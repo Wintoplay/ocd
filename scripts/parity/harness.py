@@ -175,6 +175,12 @@ def isolated_env(state_root, extra=None):
     # them at a dead port instead (scenarios that test discovery configure their own endpoints on top).
     with open(os.path.join(service_dir, "opencode.jsonc"), "w") as f:
         f.write(json.dumps({"providers": LOCAL_PROVIDERS}, indent=2) + "\n")
+    # The upstream reference build is made with `--skip-web-ui` (404 for web pages); an empty web UI directory gives
+    # ocd, which embeds the UI, the same answers. Upstream ignores the variable.
+    if "OCD_WEB_UI" not in env:
+        webui = os.path.join(state_root, "empty-web-ui")
+        os.makedirs(webui, exist_ok=True)
+        env["OCD_WEB_UI"] = webui
     env.update({
         "HOME": home,
         "OPENCODE_TEST_HOME": home,

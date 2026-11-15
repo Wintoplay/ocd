@@ -150,6 +150,12 @@ until it completes, nothing of the root's answer to the report, and nothing afte
 dropped (only the Console plugin attaches files, which ocd now keeps through the plugin transform and serves from
 the `skill` and `read` tools).
 
+**Run after closing the 2.2.7 gaps (debug build, 2026-11-15):** all 216 scenarios against a fresh local v2.2.7
+build: **211 of 216 identical**, including the new `acp` (3), `local` (5) and `plugin_skill_files` scenarios. Left:
+the same five as the final run below (`cli_help`, `cli_inventory`, `stop_retry_exhausted`, `loop_http_400`,
+`loop_tool_error`). The harness now gives ocd an empty web UI by itself, and `session225_terminal_rename_and_delete`
+finds the 0.4.0 terminal daemon in any 2.2.x checkout.
+
 **Final run against 2.2.7 (debug build, 2026-11-11):** all 207 scenarios against the local v2.2.7 build, `hg` 7.2.4
 on `PATH`, the scripted stand-in for the Claude Agent provider: **202 of 207 identical**. Left: `cli_help`,
 `cli_inventory`, `stop_retry_exhausted` and `loop_http_400` as before (in 10 extra upstream runs of `loop_http_400`,
@@ -364,7 +370,7 @@ classified below; none is an unexplained behavioral difference.
 | The GitHub Copilot plugin's own HTTP calls (the `/models` sync, the utility title) are sent by ocd's Rust HTTP client: lowercase header names, `accept-encoding: gzip,br`, no `Connection: keep-alive` (upstream: Bun's `fetch`); the first catalog build of a location waits for the initial model sync (at most 5 s), where upstream syncs in the background after activation and then reloads the providers (core/src/plugin/provider/github-copilot.ts:172-251) | same URLs, header values and bodies; the model requests go through Bun in both (AI SDK routes) or the native routes as for every provider |
 | `--version`, report-skill diagnostics, User-Agent channel/version | local build `0.0.0-detached-…`/channel `detached` (before: `0.0.0-v2-…`/`v2`) vs port 2.1.4/`latest`; masked |
 | `debug paths` db `opencode-detached.db` (before: `opencode-v2.db`) vs `opencode.db`; service config file name | derived from the channel of the local build |
-| Web UI | the local upstream build is made with `--skip-web-ui` (404 for web pages); ocd embeds the UI built from v2.1.4, so the parity runs point ocd at an empty archive (`OCD_WEB_UI`) for `errors_not_found` |
+| Web UI | the local upstream build is made with `--skip-web-ui` (404 for web pages); ocd embeds the UI, so the harness points ocd at an empty web UI directory (`OCD_WEB_UI`, unless already set) |
 | Program name `ocd`: help `DESCRIPTION` reads `ocd command line interface` (upstream `OpenCode command line interface`), completion function names | rename; masked where it is just the name |
 | `upgrade` help: ocd's description ("Upgrade ocd to the latest GitHub release, or to the given version"), the `--method` description ("Ignored: ocd installs only from its GitHub releases") and the extra `--yes, -y` flag | ocd upgrades from its own GitHub releases, not through upstream's install methods |
 | `pair --yes` parses but has nothing to accept | ocd has no OpenTunnel, so `pair --remote` stops before upstream's consent prompt |

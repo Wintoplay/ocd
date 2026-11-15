@@ -187,8 +187,9 @@ def session225_wellknown_config(ctx):
 
 def _pty_binary(ctx):
     """Install the 0.4.0 daemon where both binaries look for it, so nothing is downloaded."""
-    found = glob.glob(os.path.join(SCRATCH, "src/opencode-2.2.5/node_modules/.bun/@opencode+pty-linux-x64-gnu@0.4.0/"
-                                            "node_modules/@opencode/pty-linux-x64-gnu/bin/opencode-pty"))
+    # Any 2.2.x checkout with its dependencies installed carries it (2.2.5 through 2.2.7 pin 0.4.0).
+    found = sorted(glob.glob(os.path.join(SCRATCH, "src/opencode-2.2.*/node_modules/.bun/@opencode+pty-linux-x64-gnu@0.4.0/"
+                                                   "node_modules/@opencode/pty-linux-x64-gnu/bin/opencode-pty")))
     for d in (os.path.join(ctx.state, "cache", "opencode", "bin", "opencode-pty", "0.4.0-637e67684fb4fbb7"),):
         os.makedirs(d, exist_ok=True)
         if found:

@@ -69,7 +69,7 @@ Linux x86_64, release builds of both, the same mock model and isolated folders:
 | ⛔ **Not yet** | TUI plugins, speech and video models, image previews in the terminal, a few other experimental features |
 | ✨ **Different on purpose** | A working status line in the TUI, `ocd upgrade` from ocd's own releases, `ocd --version` shows ocd's own version |
 
-202 of 207 side-by-side scenarios produce identical output against opencode 2.2.7; the other five differ only by
+211 of 216 side-by-side scenarios produce identical output against opencode 2.2.7; the other five differ only by
 the renames, the test build's file name, two upstream timing races and the order of instantly failing tool calls. Details: **[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)**.
 
 CI runs the whole test suite on macOS, Windows and Linux ARM on every push to main; the side-by-side comparison with
@@ -80,7 +80,7 @@ upstream runs on Linux x86_64.
 ```sh
 git clone https://github.com/sphinxid/ocd.git && cd ocd
 cargo build --release -p ocd          # needs Rust 1.85+ and a C compiler
-./target/release/ocd --version        # ocd v0.3.2+1a2b3c4 (opencode 2.2.7)
+./target/release/ocd --version        # ocd v0.3.3+1a2b3c4 (opencode 2.2.7)
 ```
 
 Web UI, version stamping, tests and releases: **[docs/BUILDING.md](docs/BUILDING.md)**.

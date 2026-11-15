@@ -16,7 +16,7 @@ ocd reports version 2.2.7.
 
 ## How it is compared
 
-- **Side by side:** both binaries run the same 207 scenarios, and `scripts/parity.py` diffs their outputs. Results
+- **Side by side:** both binaries run the same 216 scenarios, and `scripts/parity.py` diffs their outputs. Results
   are in [PARITY.md](PARITY.md). The scenarios cover:
   - the agent loop, sessions, permissions and forms;
   - the read-only endpoints and 74 error cases;
@@ -24,11 +24,12 @@ ocd reports version 2.2.7.
   - GitHub Copilot, the OpenAI WebSocket transport and the experimental todo list;
   - the 2.2 changes: provider wire, `/goal`, background compaction and tools;
   - Mercurial repositories and the desktop browser attachment;
-  - the 2.2.7 changes: `run`, MCP OAuth, Copilot Auto, tools, the API and config.
+  - the 2.2.7 changes: `run`, MCP OAuth, Copilot Auto, tools, the API and config;
+  - the editor integration (ACP) following subagents after a turn;
   - local model discovery for LM Studio, Ollama and vLLM against mock servers.
 - **Model requests:** every request ocd sends to the model is compared too: system prompt, tool definitions,
   headers and prompt-cache markers.
-- **Result:** 202 of the 207 scenarios are identical. The other five differ in ways that are expected or harmless:
+- **Result:** 211 of the 216 scenarios are identical. The other five differ in ways that are expected or harmless:
   - the intended renames;
   - the upstream test build's database file name;
   - two timing races that also vary between runs of upstream (one is the title rename racing a failed step);
