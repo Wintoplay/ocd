@@ -126,7 +126,7 @@ async fn object_from_entries(rt: Rt, source: Value, site: crate::interp::Site) -
     let out = Obj::ordinary(&rt.builtins.object);
     let cursor = iteration::iterate(&rt, &source, None, site).await?;
     let Some(cursor) = cursor else {
-        return Err(type_error("Object.fromEntries expects a synchronous iterable of entries."));
+        return Err(iteration::not_iterable(&source));
     };
     loop {
         let step = cursor.next().await?;

@@ -35,10 +35,10 @@ const copyProperties = (target: Fn, source: Fn, skip: ReadonlyArray<string>) => 
   }
 }
 
-const describe: Fn = (name: unknown, fn?: unknown, ...rest: Array<unknown>) => {
+const group = (define: Fn, name: unknown, fn: unknown, rest: Array<unknown>) => {
   const mine = [...prefix, String(name)]
-  if (typeof fn !== "function") return realDescribe(name, fn, ...rest)
-  return realDescribe(
+  if (typeof fn !== "function") return define(name, fn, ...rest)
+  return define(
     name,
     (...args: Array<unknown>) => {
       const saved = prefix
@@ -52,6 +52,7 @@ const describe: Fn = (name: unknown, fn?: unknown, ...rest: Array<unknown>) => {
     ...rest,
   )
 }
+const describe: Fn = (name: unknown, fn?: unknown, ...rest: Array<unknown>) => group(realDescribe, name, fn, rest)
 copyProperties(describe, realDescribe, [])
 
 const settleTest = (context: ReturnType<typeof Recorder.testStart>, result: unknown) => {
@@ -71,12 +72,12 @@ const settleTest = (context: ReturnType<typeof Recorder.testStart>, result: unkn
   return result
 }
 
-const register = (name: string, fn: unknown, rest: Array<unknown>) => {
+const register = (name: string, fn: unknown, rest: Array<unknown>, define: Fn = realTest) => {
   const file = fileOfCaller() ?? "unknown"
   Recorder.registerFile(file)
   const full = [...prefix, name].join(" > ")
-  if (typeof fn !== "function") return realTest(name, fn, ...rest)
-  return realTest(
+  if (typeof fn !== "function") return define(name, fn, ...rest)
+  return define(
     name,
     () => {
       const context = Recorder.testStart(file, full)
@@ -134,6 +135,41 @@ const formatTitle = (title: string, args: ReadonlyArray<unknown>, index: number,
 
 const test: Fn = (name: unknown, fn?: unknown, ...rest: Array<unknown>) => register(String(name), fn, rest)
 copyProperties(test, realTest, ["each"])
+// bun's modifiers check their receiver, so each calls the real one on bun's own `test` (and `describe`) and keeps
+// the recording wrapper around the body.
+const realModifier = (owner: Fn, key: string): Fn | undefined => {
+  try {
+    const modifier = (owner as any)[key]
+    return typeof modifier === "function" ? (modifier as Fn).bind(owner) : undefined
+  } catch {
+    // Some modifiers are getters that throw where they don't apply (`describe.failing`).
+    return undefined
+  }
+}
+for (const key of ["skip", "only", "todo", "failing", "concurrent", "serial"]) {
+  const real = realModifier(realTest, key)
+  if (real !== undefined)
+    (test as any)[key] = (name: unknown, fn?: unknown, ...rest: Array<unknown>) =>
+      register(String(name), fn, rest, real)
+  const realGroup = realModifier(realDescribe, key)
+  if (realGroup !== undefined)
+    (describe as any)[key] = (name: unknown, fn?: unknown, ...rest: Array<unknown>) =>
+      group(realGroup, name, fn, rest)
+}
+for (const key of ["if", "skipIf", "todoIf"]) {
+  const real = realModifier(realTest, key)
+  if (real !== undefined)
+    (test as any)[key] =
+      (condition: unknown) =>
+      (name: unknown, fn?: unknown, ...rest: Array<unknown>) =>
+        register(String(name), fn, rest, real(condition))
+  const realGroup = realModifier(realDescribe, key)
+  if (realGroup !== undefined)
+    (describe as any)[key] =
+      (condition: unknown) =>
+      (name: unknown, fn?: unknown, ...rest: Array<unknown>) =>
+        group(realGroup(condition), name, fn, rest)
+}
 ;(test as any).each =
   (table: ReadonlyArray<unknown>) =>
   (title: string, fn: Fn, ...rest: Array<unknown>) => {

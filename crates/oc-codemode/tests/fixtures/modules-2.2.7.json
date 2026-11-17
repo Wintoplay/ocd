@@ -400,15 +400,8 @@
   "code": "if (true) { import x from \"url\" }",
   "extension": false,
   "result": {
-   "ok": false,
-   "error": {
-    "kind": "ExecutionFailure",
-    "message": "SyntaxError: An import declaration may only appear at the top level of the program. (line 1, col 13)",
-    "location": {
-     "line": 1,
-     "column": 13
-    }
-   },
+   "ok": true,
+   "value": null,
    "toolCalls": []
   }
  },
@@ -1028,15 +1021,8 @@
   "code": "label: import x from \"url\"",
   "extension": false,
   "result": {
-   "ok": false,
-   "error": {
-    "kind": "ExecutionFailure",
-    "message": "SyntaxError: An import declaration may only appear at the top level of the program. (line 1, col 8)",
-    "location": {
-     "line": 1,
-     "column": 8
-    }
-   },
+   "ok": true,
+   "value": null,
    "toolCalls": []
   }
  }

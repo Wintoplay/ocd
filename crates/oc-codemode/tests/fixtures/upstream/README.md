@@ -1,8 +1,12 @@
 # Upstream CodeMode fixtures
 
 Recordings of every program the upstream `@opencode/codemode` test suite (TypeScript, Effect 4) executes, for the
-Rust replay harness of `oc-codemode`. The current set was recorded from upstream v2.2.2 with Bun 1.4.4. They are
-generated, never hand-edited: run
+Rust replay harness of `oc-codemode`. This set was recorded from upstream v2.2.2 (legacy interpreter) with Bun 1.4.4;
+three records carry the result 2.2.7 gives instead (`errors.test.ts` seq 1 and 2, the import/export parse errors, and
+`extensions.test.ts` seq 32, "an Other"). The opencode 2.3.0 recording, from its bytecode VM, is in
+`../upstream-2.3.0/` (its README lists the format additions). The kit in `tests/recorder/` now targets 2.3.0's
+sources; this set was made with the kit as of the 2.2.7 catch-up (git history). They are generated, never
+hand-edited: run
 
 ```sh
 tests/recorder/record.sh UPSTREAM CORPUS WORK [OUT]   # an opencode checkout with node_modules, the test262 corpus
@@ -12,11 +16,11 @@ python3 -I tests/recorder/install.py OUT tests/fixtures/upstream
 `record.sh` builds `WORK/packages/codemode-rec`: a copy of upstream's `packages/codemode` with the recording kit in
 `tests/recorder/` applied (`record.ts` holds all encoding and output and is inert unless `CODEMODE_RECORD_DIR` is set;
 `tool-schema.ts` is a recording shim over the renamed `src/tool-schema-impl.ts`; `hooks.patch` adds the recording
-calls to `codemode.ts`, `tool-runtime.ts`, `interpreter/execute.ts`, `interpreter/extensions.ts`, `openapi/index.ts`
-and `openapi/runtime.ts`; `record-preload.ts` tracks the running test; `record-extras.ts` writes
-`search-signature.json`). It runs the regular suite (pass 1), then the vendored test262 corpus (pass 2). Library
-behaviour is unchanged: the instrumented suite has the same pass/fail result as upstream (2.2.2: 1 480 and 13 330
-passing tests, no failures). `install.py` replaces everything here except this README and keeps the test262 sample
+calls to `codemode.ts`, `tool-runtime.ts`, `runtime/execute.ts`, `runtime/extensions.ts`, `openapi/index.ts`
+and `openapi/runtime.ts` — `interpreter/execute.ts` and `interpreter/extensions.ts` up to 2.2.x; `record-preload.ts`
+tracks the running test; `record-extras.ts` writes `search-signature.json`). It runs the regular suite (pass 1), then
+the vendored test262 corpus (pass 2). Library behaviour is unchanged: the instrumented suite has the same pass/fail
+result as upstream (2.2.2: 1 480 and 13 330 passing tests, no failures; 2.3.0: see `../upstream-2.3.0/README.md`). `install.py` replaces everything here except this README and keeps the test262 sample
 described at the end. `tests/recorder/stdlib-check.ts` re-checks the expectations of the `tests/stdlib_*.rs` parity
 cases against upstream.
 

@@ -13,8 +13,28 @@ use oc_codemode::tool_runtime::{ToolDef, ToolEntry};
 use oc_codemode::tool_schema::ToolSchema;
 use serde_json::{Map, Value as Json};
 
+/// The recorded corpus the replay tests read by default: `OC_CODEMODE_CORPUS=2.3.0` switches every test that calls
+/// `fixtures()` to the opencode 2.3.0 recording (`tests/fixtures/upstream-2.3.0/`); unset (or `2.2`) keeps the
+/// recording ocd is held to in full (`tests/fixtures/upstream/`, upstream 2.2.2 plus the 2.2.7 edits).
 pub fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upstream")
+    corpus(&std::env::var("OC_CODEMODE_CORPUS").unwrap_or_default())
+}
+
+/// A recorded corpus by its upstream version: `""`/`"2.2"` (`upstream/`) or e.g. `"2.3.0"` (`upstream-2.3.0/`).
+pub fn corpus(version: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    match version {
+        "" | "2.2" => dir.join("upstream"),
+        other => dir.join(format!("upstream-{other}")),
+    }
+}
+
+/// The program's `bindings` (`runtime.execute(code, bindings)`), in their recorded order.
+pub fn bindings_of(record: &Json) -> Vec<(String, Json)> {
+    match record.get("bindings") {
+        Some(Json::Object(m)) => m.iter().map(|(k, v)| (k.clone(), decode(v).unwrap_or(Json::Null))).collect(),
+        _ => Vec::new(),
+    }
 }
 
 pub fn read_jsonl(path: &std::path::Path) -> Vec<Json> {

@@ -67,12 +67,26 @@ impl Host for HookHost {
     }
 }
 
+/// The corpus ocd is held to in full (upstream 2.2.2's suite).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hook_executions_replay_exactly() {
+    replay_hooks_of(corpus("")).await;
+}
+
+/// opencode 2.3.0's suite on its bytecode VM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_executions_replay_2_3_0() {
+    replay_hooks_of(corpus("2.3.0")).await;
+}
+
+async fn replay_hooks_of(dir: std::path::PathBuf) {
     let mut total = 0;
     let mut failures = Vec::new();
-    for record in read_jsonl(&fixtures().join("codemode.test.jsonl")) {
-        if record["hooks"].as_array().map(|h| h.is_empty()).unwrap_or(true) || record.get("result").is_none() {
+    for record in read_jsonl(&dir.join("codemode.test.jsonl")) {
+        if record["hooks"].as_array().map(|h| h.is_empty()).unwrap_or(true)
+            || record.get("result").is_none()
+            || record["via"] != "codemode"
+        {
             continue;
         }
         total += 1;
@@ -97,7 +111,8 @@ async fn hook_executions_replay_exactly() {
             common::ext::replay_extensions(&record),
             limits_of(&record),
         )
-        .unwrap();
+        .unwrap()
+        .with_bindings(bindings_of(&record));
         let ours = runtime.execute(record["code"].as_str().unwrap()).await.to_json();
         let expected = decode(&record["result"]).unwrap();
         if !json_eq(&ours, &expected) {

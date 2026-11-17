@@ -1,0 +1,15 @@
+# Recorded opencode 2.3.0 executions (upstream-2.3.0/) whose exact result ocd does not reproduce, with the reason.
+# Format: <test file>\t<seq>\t<reason>. A reason starting with a batch tag (P5:, P6:) is a 2.3.0 feature ocd has not
+# ported yet: the test fails once such a record replays exactly, so the batch that ports it removes the line.
+codemode.test.ts	67	P5: BM25 search; whole-word terms, so "zones" no longer finds get_timezones (a query term matches whole words, not substrings)
+codemode.test.ts	72	P5: BM25 search ranking (search ranks by rare words, prefers short names and matches partial words)
+codemode.test.ts	73	P5: BM25 search ranking (search ranks by rare words, prefers short names and matches partial words)
+promise.test.ts	64	upstream waits for an uninterruptible tool cleanup (400 ms) past the timeout; Rust host futures are dropped immediately, so no TimeoutExceeded warning (as in the 2.2 corpus)
+promise.test.ts	65	same as seq 64 (uninterruptible tool cleanup past the timeout)
+stdlib.test.ts	147	P5: TextDecoder streaming (streams an emoji one byte at a time and copies the pending bytes)
+stdlib.test.ts	148	P5: TextDecoder streaming (only strips the first BOM of each stream, including a split BOM)
+stdlib.test.ts	149	P5: TextDecoder streaming (reports malformed UTF-8 immediately and truncated UTF-8 on flush)
+stdlib.test.ts	150	P5: TextDecoder streaming (keeps unread input in order after a fatal stream error)
+stdlib.test.ts	151	P5: TextDecoder streaming (rejects primitive options before touching the partial character)
+tool-paths.test.ts	14	P5: namespace-call suggestions, #63697 (a namespace without its own tool stays non-callable)
+tool-paths.test.ts	15	P5: namespace-call suggestions, #63697 (calling a namespace names a few of its tools and counts the rest)

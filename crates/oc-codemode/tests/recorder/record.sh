@@ -3,7 +3,7 @@
 #
 #   record.sh UPSTREAM CORPUS WORK [OUT]
 #
-# UPSTREAM  an opencode checkout at the tag being tracked, with `bun install` done (node_modules present)
+# UPSTREAM  an opencode checkout at the tag being tracked (v2.3.0), with `bun install` done (node_modules present)
 # CORPUS    a directory holding the vendored test262 `built-ins/` and `language/` trees (upstream's
 #           `bun run script/sync-test262.ts` output, at the revision in test/test262/manifest.json)
 # WORK      an empty scratch directory for the instrumented package copy and the logs
@@ -14,7 +14,8 @@
 # output, inert unless CODEMODE_RECORD_DIR is set), src/tool-schema.ts (a recording shim over the original, renamed
 # src/tool-schema-impl.ts), record-preload.ts (tracks the current test), script/record-extras.ts
 # (search-signature.json), and hooks.patch (the recording calls in codemode.ts, tool-runtime.ts,
-# interpreter/execute.ts, interpreter/extensions.ts, openapi/index.ts and openapi/runtime.ts).
+# runtime/execute.ts, runtime/extensions.ts, openapi/index.ts and openapi/runtime.ts). The patch targets the VM-only
+# layout of v2.3.0; the v2.2.x recordings came from the legacy interpreter (src/interpreter/*) and an older kit.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,13 +47,15 @@ summary() { grep -E '^ *[0-9]+ (pass|fail|skip|todo|error)|^Ran |^\(fail\)' "$1"
 
 # Pass 1: the regular suite, without the test262 corpus (test/test262.test.ts then defines no tests).
 echo "pass 1: bun test (recording) -> $OUT"
-(cd "$PKG" && CODEMODE_RECORD_DIR="$OUT" "$BUN" test --preload ./record-preload.ts >"$LOGS/pass1.log" 2>&1) || true
+# test/preload.ts is upstream's own preload (bunfig.toml); it is named again so both run.
+PRELOAD=(--preload ./test/preload.ts --preload ./record-preload.ts)
+(cd "$PKG" && CODEMODE_RECORD_DIR="$OUT" "$BUN" test "${PRELOAD[@]}" >"$LOGS/pass1.log" 2>&1) || true
 summary "$LOGS/pass1.log"
 
 # Pass 2: the vendored test262 corpus.
 echo "pass 2: test262 (recording) from $CORPUS"
 cp -r "$CORPUS/built-ins" "$CORPUS/language" "$PKG/test/test262/"
-(cd "$PKG" && CODEMODE_RECORD_DIR="$OUT" "$BUN" test --preload ./record-preload.ts test/test262.test.ts \
+(cd "$PKG" && CODEMODE_RECORD_DIR="$OUT" "$BUN" test "${PRELOAD[@]}" test/test262.test.ts \
   >"$LOGS/pass2.log" 2>&1) || true
 rm -rf "$PKG/test/test262/built-ins" "$PKG/test/test262/language"
 summary "$LOGS/pass2.log"

@@ -142,10 +142,11 @@ pub enum Sym {
 }
 
 impl Sym {
+    /// `String(symbol)`: upstream's well-known symbols are its own (`Symbol("codemode.iterator")`, ...).
     pub fn description(self) -> &'static str {
         match self {
-            Sym::Iterator => "Symbol(Symbol.iterator)",
-            Sym::AsyncIterator => "Symbol(Symbol.asyncIterator)",
+            Sym::Iterator => "Symbol(codemode.iterator)",
+            Sym::AsyncIterator => "Symbol(codemode.async-iterator)",
         }
     }
 }

@@ -5,12 +5,12 @@ use std::rc::Rc;
 
 use crate::interp::callback::{apply_collection_callback, is_supported_callback, Callback};
 use crate::interp::coerce::{coerce_to_string, to_primitive_number, to_primitive_string};
-use crate::interp::errors::{invalid_data, type_error, JsResult};
+use crate::interp::errors::{invalid_data, range_error, type_error, JsResult};
 use crate::interp::eval::call_value;
 use crate::interp::function::{
     arg, constructor, fn_, method, methods, prototype_from, receiver, requires_new, Method, NResult, NativeFn,
 };
-use crate::interp::iteration::{self, iterate_direct, iterator_object, preserve_consumer_error, MapCursor, Mode};
+use crate::interp::iteration::{self, iterate_direct, iterator_object, not_iterable, preserve_consumer_error, MapCursor, Mode};
 use crate::interp::references::is_opaque;
 use crate::interp::{describe_value, Rt, Site};
 use crate::object::{
@@ -100,7 +100,7 @@ async fn coerce_group_by_property_key(rt: &Rt, value: Value, site: Site) -> JsRe
 async fn group_by_run(rt: Rt, namespace: &'static str, source: Value, apply: Callback, site: Site) -> JsResult<Value> {
     let cursor = iteration::iterate(&rt, &source, None, site).await?;
     let Some(cursor) = cursor else {
-        return Err(type_error(format!("{namespace}.groupBy expects an iterable collection.")));
+        return Err(not_iterable(&source));
     };
     let mut index = 0usize;
     if namespace == "Map" {
@@ -177,10 +177,7 @@ async fn fill_from_entries(
 ) -> JsResult<()> {
     let cursor = iteration::iterate(rt, init, None, site).await?;
     let Some(cursor) = cursor else {
-        return Err(type_error(format!(
-            "new {label}(...) expects an iterable of [key, value] pairs, received {}.",
-            describe_value(init)
-        )));
+        return Err(not_iterable(init));
     };
     loop {
         let step = cursor.next().await?;
@@ -225,10 +222,7 @@ fn construct_set(rt: &Rt, site: Site, init: Value, proto: Obj) -> NResult {
     NResult::future(async move {
         let cursor = iteration::iterate(&rt, &init, None, site).await?;
         let Some(cursor) = cursor else {
-            return Err(type_error(format!(
-                "new Set(...) expects a synchronous iterable, received {}.",
-                describe_value(&init)
-            )));
+            return Err(not_iterable(&init));
         };
         loop {
             let step = cursor.next().await?;
@@ -383,7 +377,7 @@ impl SetRecord {
             }
         }
     }
-    async fn keys(&self, rt: &Rt, site: Site) -> JsResult<Vec<Value>> {
+    async fn keys(&self, rt: &Rt, name: &str, site: Site) -> JsResult<Vec<Value>> {
         match self {
             SetRecord::Builtin(o) => Ok(map_data(o).borrow().iter().map(|(k, _)| k.clone()).collect()),
             SetRecord::Custom { source, keys, .. } => {
@@ -392,7 +386,8 @@ impl SetRecord {
                     Value::Object(o) if o.is_array() => {
                         iteration::ArrayCursor::new(rt, o.clone(), Mode::Values)
                     }
-                    _ => iterate_direct(rt, &result, None, site)?,
+                    Value::Object(_) => iterate_direct(rt, &result, None, site)?,
+                    _ => return Err(type_error(format!("Set.{name} expects 'keys' to return an iterator object."))),
                 };
                 let mut items = Vec::new();
                 loop {
@@ -417,6 +412,10 @@ async fn load_set_record(rt: &Rt, source: &Value, name: &str, site: Site) -> JsR
     let size = to_primitive_number(rt, &get_str(o, "size")?, site).await?;
     if size.is_nan() {
         return Err(type_error(format!("Set.{name} received a Set-like object with an invalid size.")));
+    }
+    // 2.3.0 compares the size as read, so -0.5 is negative too.
+    if size < 0.0 {
+        return Err(range_error(format!("Set.{name} received a Set-like object with a negative size.")));
     }
     let has = get_str(o, "has")?;
     let keys = get_str(o, "keys")?;
@@ -443,7 +442,7 @@ async fn set_operation(rt: Rt, target: Obj, name: &'static str, source: Value, s
     match name {
         "union" => {
             let result = copy_set(&rt, &target);
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 set_add(&result, item);
             }
             Ok(Value::Object(result))
@@ -460,7 +459,7 @@ async fn set_operation(rt: Rt, target: Obj, name: &'static str, source: Value, s
                 }
                 return Ok(Value::Object(result));
             }
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 if map_data(&target).borrow().has(&item) {
                     set_add(&result, item);
                 }
@@ -479,14 +478,14 @@ async fn set_operation(rt: Rt, target: Obj, name: &'static str, source: Value, s
                 }
                 return Ok(Value::Object(result));
             }
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 map_data(&result).borrow_mut().delete(&item);
             }
             Ok(Value::Object(result))
         }
         "symmetricDifference" => {
             let result = copy_set(&rt, &target);
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 if map_data(&target).borrow().has(&item) {
                     map_data(&result).borrow_mut().delete(&item);
                 } else {
@@ -512,7 +511,7 @@ async fn set_operation(rt: Rt, target: Obj, name: &'static str, source: Value, s
             if target_size() < other_size {
                 return Ok(Value::Bool(false));
             }
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 if !map_data(&target).borrow().has(&item) {
                     return Ok(Value::Bool(false));
                 }
@@ -530,7 +529,7 @@ async fn set_operation(rt: Rt, target: Obj, name: &'static str, source: Value, s
                 }
                 return Ok(Value::Bool(true));
             }
-            for item in other.keys(&rt, site).await? {
+            for item in other.keys(&rt, name, site).await? {
                 if map_data(&target).borrow().has(&item) {
                     return Ok(Value::Bool(false));
                 }
@@ -766,10 +765,7 @@ pub fn weak_set_global(rt: &Rt) -> Value {
                 NResult::future(async move {
                     let cursor = iteration::iterate(&rt, &init, None, site).await?;
                     let Some(cursor) = cursor else {
-                        return Err(type_error(format!(
-                            "new WeakSet(...) expects a synchronous iterable, received {}.",
-                            describe_value(&init)
-                        )));
+                        return Err(not_iterable(&init));
                     };
                     loop {
                         let step = cursor.next().await?;

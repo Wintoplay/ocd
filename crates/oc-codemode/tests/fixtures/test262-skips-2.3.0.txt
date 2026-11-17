@@ -1,0 +1,2 @@
+# test262 files whose upstream result is not reproduced exactly, with the reason.
+built-ins/Array/S15.4.5.2_A1_T1.js # writes index 4294967294; arrays here are dense and cap at 10 000 000 elements (RangeError: Invalid array length)

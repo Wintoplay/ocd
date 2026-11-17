@@ -1,0 +1,9 @@
+# Recorded opencode 2.3.0 extension executions a replay cannot reproduce: the recording keeps the value a host function
+# returned as data, so host values whose behaviour lies in how they are read are lost. ocd's Rust hosts never return
+# such values. Format: <test file>\t<seq>\t<reason>.
+extensions.test.ts	33	host array whose own `map` is overridden, with holes: HostValue arrays have no holes
+extensions.test.ts	35	host array of length 2^32 - 1: recorded only up to the encoding budget
+extensions.test.ts	37	a Proxy over an ArrayBuffer: recorded as a plain ArrayBuffer
+extensions.test.ts	44	a host object whose getter throws while it is copied: getters are not recorded
+extensions.test.ts	45	a function whose name and length change between reads: recorded without its getters
+suspend.test.ts	2	a loop of sync extension calls stopped by a 100 ms timeout: how many calls run first is timing

@@ -90,6 +90,22 @@ creation waits until `agent.list` answers the same twice and `plugin.updated` wa
 the agent/command/skill/model/provider/integration lists the same way; `readonly_vcs*` issue one unrecorded
 `vcs.get` first.
 
+## Code Mode engine: replayed recordings, not side by side
+
+The Code Mode interpreter (`crates/oc-codemode`) is checked against recordings of upstream's own `packages/codemode`
+test suite rather than by these scenarios: `crates/oc-codemode/tests/recorder/record.sh` instruments upstream, runs
+its suite and the vendored test262 corpus, and records every program with its tools, limits, host calls and
+`Result`; `cargo test -p oc-codemode` replays them (see that crate's README, Tests). Two corpora are replayed:
+upstream 2.2.2 (legacy interpreter) and upstream 2.3.0, where the bytecode VM is the only engine. On 2.3.0, 1 831 of
+1 843 recorded programs and 3 339 of the 3 340 sampled test262 files give the identical `Result`; the rest are the
+two permanent divergences of the 2.2 corpus and 10 records of 2.3.0 features not ported yet (BM25 `search`,
+namespace-call suggestions, `TextDecoder` streaming), listed with their batch in
+`crates/oc-codemode/tests/fixtures/replay-skips-2.3.0.txt`. No recorded program differs because of the engine change.
+Probing past upstream's tests (the `tests/stdlib_*.rs` cases and targeted programs, run through 2.2.7 and 2.3.0) did
+find VM differences: the VM's standard library is partly program code, so some error texts, coercions and nested
+imports changed. ocd follows them (`crates/oc-codemode/tests/upstream_2_3_0.rs`) except the VM's lazy check of an
+iterator's `next`.
+
 ## Scenarios (221)
 
 | group | scenarios |

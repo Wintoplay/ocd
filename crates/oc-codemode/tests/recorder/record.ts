@@ -13,6 +13,7 @@ import {
   inputTypeScript,
   isEmptyInput,
   outputTypeScript,
+  stringParameter,
 } from "./tool-schema-impl.js"
 
 const DIR = process.env.CODEMODE_RECORD_DIR
@@ -124,6 +125,11 @@ const isPlain = (value: object) => {
   return prototype === Object.prototype || prototype === null
 }
 
+const functionName = (fn: Function): unknown => {
+  const own = Object.getOwnPropertyDescriptor(fn, "name")
+  return own !== undefined && "value" in own && typeof own.value === "string" ? own.value : null
+}
+
 // Plain assignment would turn an own "__proto__" key into a prototype change.
 const setKey = (target: Record<string, unknown>, key: string, value: unknown) =>
   Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true })
@@ -149,14 +155,26 @@ export const encode = (value: unknown): unknown => {
     }
     if (typeof item === "bigint") return { $bigint: item.toString() }
     if (typeof item === "symbol") return { $symbol: item.description ?? null }
-    if (typeof item === "function") return { $function: item.name }
+    // A data property only: a `name` getter would see the recorder's read before the program's.
+    if (typeof item === "function") return { $function: functionName(item) }
     if (typeof item !== "object") return { $unencodable: `unknown type ${typeof item}` }
     if (ancestors.has(item)) return { $circular: true }
     ancestors.add(item)
     try {
       if (Array.isArray(item)) {
         const out: Array<unknown> = []
-        for (let index = 0; index < item.length; index++) out.push(index in item ? go(item[index]) : { $hole: true })
+        for (let index = 0; index < item.length; index++) {
+          // Holes count against the budget too: a sparse host array can be 2^32 - 1 long.
+          if (budget <= 0) {
+            out.push({ $tooLarge: true })
+            break
+          }
+          if (index in item) out.push(go(item[index]))
+          else {
+            budget--
+            out.push({ $hole: true })
+          }
+        }
         return out
       }
       if (item instanceof Date) return { $date: Number.isNaN(item.getTime()) ? null : item.toISOString() }
@@ -182,7 +200,7 @@ export const encode = (value: unknown): unknown => {
       if (isPlain(item)) return fields(item)
       return { $instance: className(item), fields: fields(item) }
     } catch (error) {
-      return { $unencodable: String(error) }
+      return { $unencodable: messageOf(error) }
     } finally {
       ancestors.delete(item)
     }
@@ -190,12 +208,20 @@ export const encode = (value: unknown): unknown => {
   try {
     return go(value)
   } catch (error) {
-    return { $unencodable: String(error) }
+    return { $unencodable: messageOf(error) }
   }
 }
 
+// Never converts an object to text: a host value's `toString` must not run for the recording.
 const messageOf = (error: unknown): string => {
-  if (error instanceof Error) return error.message
+  if (error instanceof Error) {
+    const message = Object.getOwnPropertyDescriptor(error, "message") ?? { value: error.message }
+    return typeof message.value === "string" ? message.value : className(error)
+  }
+  if (typeof error === "object" && error !== null) {
+    const custom = Symbol.toPrimitive in error || (error as { toString?: unknown }).toString !== Object.prototype.toString
+    if (custom) return className(error)
+  }
   try {
     return String(error)
   } catch {
@@ -265,11 +291,14 @@ const renderTool = (tool: Tool<any>, toolPath: string, full: boolean) => {
     input: attempt(() => schemaRecord(tool.input, "input")),
     output: tool.output === undefined ? null : attempt(() => schemaRecord(tool.output, "output")),
   }
+  if (tool.freeform === true) record.freeform = true
+  const execute = tool.execute as unknown as { readonly _tag?: unknown }
+  if (typeof execute === "object" && execute !== null && typeof execute._tag === "string") record.mode = execute._tag
   if (!full) return record
   record.signature = attempt(() =>
     [
       toolExpression(toolPath),
-      isEmptyInput(tool) ? "()" : `(${inputTypeScript(tool, true)})`,
+      stringParameter(tool)?.signature ?? (isEmptyInput(tool) ? "()" : `(${inputTypeScript(tool, true)})`),
       `: Promise<${outputTypeScript(tool, true)}>`,
     ].join(""),
   )
@@ -373,7 +402,7 @@ export class Execution {
   private done = false
 
   constructor(
-    readonly via: "codemode" | "executeProgram",
+    readonly via: Via,
     readonly info: ExecutionInfo,
   ) {
     const place = where()
@@ -413,6 +442,7 @@ export class Execution {
     record.via = this.via
     if (tree.openapi) record.openapi = true
     record.code = this.info.code
+    if (this.info.bindings !== undefined) record.bindings = encode(this.info.bindings)
     record.limits = encode(
       Object.fromEntries(Object.entries(this.info.limits ?? {}).filter(([, value]) => value !== undefined)),
     )
@@ -438,7 +468,21 @@ export class Execution {
   }
 }
 
+/**
+ * How an execution started: `CodeMode.make().execute` (`codemode`), `runtime.program().run()` (`program`),
+ * `runtime.resume().run()` (`resume`), or `startProgram` called directly (`executeProgram`: the test262 harness).
+ */
+export type Via = "codemode" | "executeProgram" | "program" | "resume"
+
+/** What `CodeMode.make` adds to a run's setup when recording. */
+export type RunInfo = {
+  readonly via: Via
+  readonly extensions: ReadonlyArray<{ readonly name: string; readonly globals: Record<string, unknown> }>
+  readonly bindings: unknown
+}
+
 export type ExecutionInfo = {
+  readonly bindings?: unknown
   readonly code: string
   readonly root: unknown
   readonly limits: Record<string, number | undefined> | undefined
@@ -451,7 +495,7 @@ export type ExecutionInfo = {
  * per run of the returned Effect when recording, and once, eagerly, otherwise.
  */
 export const execution = <A, E, R>(
-  via: "codemode" | "executeProgram",
+  via: Via,
   info: ExecutionInfo,
   run: (recording: Execution | undefined) => Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> => {
@@ -461,7 +505,9 @@ export const execution = <A, E, R>(
     const recording = new Execution(via, info)
     return Effect.onExit(run(recording), (exit) =>
       Effect.sync(() => {
-        if (Exit.isSuccess(exit)) recording.finish({ result: encode(exit.value) })
+        if (Exit.isSuccess(exit) && (exit.value as { ok?: unknown } | null)?.ok === "suspended")
+          recording.finish({ suspended: true })
+        else if (Exit.isSuccess(exit)) recording.finish({ result: encode(exit.value) })
         else if (Cause.hasInterruptsOnly(exit.cause)) recording.finish({ interrupted: true })
         else recording.finish({ defect: encode(Cause.squash(exit.cause)) })
       }),
@@ -494,26 +540,31 @@ const recordHook = (
   fn: HookFn,
   onFailure?: (cause: Cause.Cause<unknown>) => void,
 ): HookFn => {
+  // Recorded when the hook's Effect runs: the VM's extension bridge builds the `extension.before` Effect at each step
+  // of a call but runs it once.
   return (...args: Array<any>) => {
-    const event: Event = { type: "hook", hook, [idKey]: id, call: encode(args[0]) }
-    if (args.length > 1) event.result = encode(args[1])
-    recording.push(event)
-    return Effect.onExit(fn(...args), (exit) =>
-      Effect.sync(() => {
-        if (Exit.isSuccess(exit)) event.outcome = "success"
-        else if (Cause.hasInterruptsOnly(exit.cause)) event.outcome = "interrupted"
-        else {
-          const failure = failureFields(exit.cause)
-          event.outcome = "failure"
-          event.failed = failure.message
-          event.errorClass = failure.errorClass
-          event.errorValue = encode(failure.error)
-          event.channel = failure.channel
-        }
-        event.settledT = recording.tick()
-        if (!Exit.isSuccess(exit)) onFailure?.(exit.cause)
-      }),
-    )
+    const effect = fn(...args)
+    return Effect.suspend(() => {
+      const event: Event = { type: "hook", hook, [idKey]: id, call: encode(args[0]) }
+      if (args.length > 1) event.result = encode(args[1])
+      recording.push(event)
+      return Effect.onExit(effect, (exit) =>
+        Effect.sync(() => {
+          if (Exit.isSuccess(exit)) event.outcome = "success"
+          else if (Cause.hasInterruptsOnly(exit.cause)) event.outcome = "interrupted"
+          else {
+            const failure = failureFields(exit.cause)
+            event.outcome = "failure"
+            event.failed = failure.message
+            event.errorClass = failure.errorClass
+            event.errorValue = encode(failure.error)
+            event.channel = failure.channel
+          }
+          event.settledT = recording.tick()
+          if (!Exit.isSuccess(exit)) onFailure?.(exit.cause)
+        }),
+      )
+    })
   }
 }
 
@@ -633,12 +684,13 @@ export class ToolCallRecording {
         } else if (Cause.hasInterruptsOnly(exit.cause)) event.outcome = "interrupted"
         else {
           const failure = failureFields(exit.cause)
-          const error = failure.error as { name?: unknown; kind?: unknown } | undefined
-          const runtime = error instanceof Error && error.name === "ToolRuntimeError" && typeof error.kind === "string"
-          event.outcome = runtime ? (error.kind === "InvalidToolOutput" ? "invalidOutput" : "rejected") : "failure"
+          const error = failure.error
+          const kind = error instanceof Error ? (error as { kind?: unknown }).kind : undefined
+          const runtime = error instanceof Error && error.name === "ToolRuntimeError" && typeof kind === "string"
+          event.outcome = runtime ? (kind === "InvalidToolOutput" ? "invalidOutput" : "rejected") : "failure"
           event.error = failure.message
           event.errorClass = failure.errorClass
-          if (runtime) event.errorKind = error.kind
+          if (runtime) event.errorKind = kind
           else if (failure.errorClass !== "ToolError") event.errorValue = encode(failure.error)
           event.channel = failure.channel
         }
@@ -652,6 +704,14 @@ export class ToolCallRecording {
 }
 
 // --- Extension calls ---
+
+/** How a host function returned: a Promise or an Effect, a plain value, or a throw. */
+export const returnedKind = (result: unknown, threw: boolean): "value" | "throw" | "promise" =>
+  threw ? "throw" : Effect.isEffect(result) || result instanceof Promise ? "promise" : "value"
+
+// An extension call's steps (its hooks, the host call, how it settles) run as separate host requests that share the
+// call's argument array, so the recording is found by it.
+const extensionCalls = new WeakMap<object, ExtensionCallRecording>()
 
 export class ExtensionCallRecording {
   private settled = false
@@ -678,7 +738,13 @@ export class ExtensionCallRecording {
     event.async = isAsync(host)
     event.args = encode(args)
     recording.push(event)
-    return new ExtensionCallRecording(recording, event)
+    const recorded = new ExtensionCallRecording(recording, event)
+    extensionCalls.set(args, recorded)
+    return recorded
+  }
+
+  static of(args: object): ExtensionCallRecording | undefined {
+    return extensionCalls.get(args)
   }
 
   hooks<H extends Record<string, unknown>>(hooks: H): H {

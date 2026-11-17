@@ -43,7 +43,21 @@ fn show(value: &Value) -> String {
     }
 }
 
+/// The harness of upstream's `test/test262/run.ts`. Up to 2.2.7 `assert` (with `assert.throws`) is a host function;
+/// from 2.3.0 the program defines `assert` in a one-line prelude on the `"use strict"` line, over the host's
+/// `$assert` (`sameValue`, `notSameValue`, `compareArray`, `thrown`, `notThrown`).
 fn harness(rt: &Rt) -> Vec<(String, Value)> {
+    harness_for(rt, false)
+}
+
+fn harness_prelude(rt: &Rt) -> Vec<(String, Value)> {
+    harness_for(rt, true)
+}
+
+/// The 2.3.0 harness prelude, as `run.ts` puts it before every file.
+const PRELUDE: &str = "\"use strict\"; function assert(mustBeTrue, message) { $assert(mustBeTrue, message) }";
+
+fn harness_for(rt: &Rt, prelude: bool) -> Vec<(String, Value)> {
     let b = &rt.builtins;
     let proto = Obj::ordinary(&b.object);
     define(&proto, "name", Value::str("Test262Error"), HIDDEN);
@@ -88,7 +102,7 @@ fn harness(rt: &Rt) -> Vec<(String, Value)> {
     let compare_array = fn_(&b.function, "compareArray", 2, move |_, _, _, args| NResult::ok(compare(&arg(&args, 0), &arg(&args, 1))));
     methods(&b.function, &compare_array, vec![method("format", 1, |_, _, _, args| NResult::ok(show(&arg(&args, 0))))]);
     let f1 = fail.clone();
-    let assert = fn_(&b.function, "assert", 2, move |_, _, _, args| {
+    let assert = fn_(&b.function, if prelude { "$assert" } else { "assert" }, 2, move |_, _, _, args| {
         if matches!(arg(&args, 0), Value::Bool(true)) {
             return NResult::ok(Value::Undefined);
         }
@@ -99,7 +113,41 @@ fn harness(rt: &Rt) -> Vec<(String, Value)> {
         f1(message)
     });
     let (f2, f3, f4, f5) = (fail.clone(), fail.clone(), fail.clone(), fail.clone());
-    methods(&b.function, &assert, vec![
+    let expected_name = |ctor: &Value| match ctor {
+        Value::Object(o) if o.is_callable() => {
+            oc_codemode::interp::coerce::coerce_to_string(&get(o, &PropKey::str("name")).unwrap_or_default()).to_rust()
+        }
+        other => show(other),
+    };
+    let (f6, f7) = (fail.clone(), fail.clone());
+    let checks = vec![
+        method("notThrown", 2, move |_, _, _, args| {
+            f6(format!(
+                "{}Expected a {} to be thrown but no exception was thrown at all",
+                prefix(&arg(&args, 1)),
+                expected_name(&arg(&args, 0))
+            ))
+        }),
+        method("thrown", 3, move |_, _, _, args| {
+            let Value::Object(thrown) = arg(&args, 2) else {
+                return f7(format!("{}Thrown value was not an object!", prefix(&arg(&args, 1))));
+            };
+            let actual = match get(&thrown, &PropKey::str("constructor")) {
+                Ok(v) => v,
+                Err(e) => return NResult::err(e),
+            };
+            if actual.strict_equals(&arg(&args, 0)) {
+                return NResult::ok(Value::Undefined);
+            }
+            f7(format!(
+                "{}Expected a {} but got a {}",
+                prefix(&arg(&args, 1)),
+                expected_name(&arg(&args, 0)),
+                show(&actual)
+            ))
+        }),
+    ];
+    let mut list = vec![
         method("sameValue", 3, move |_, _, _, args| {
             if arg(&args, 0).same_value(&arg(&args, 1)) {
                 return NResult::ok(Value::Undefined);
@@ -118,7 +166,8 @@ fn harness(rt: &Rt) -> Vec<(String, Value)> {
             }
             f4(format!("Actual {} and expected {} should have the same contents. {}", show(&arg(&args, 0)), show(&arg(&args, 1)), prefix(&arg(&args, 2))))
         }),
-        method("throws", 3, move |rt, site, _, args| {
+    ];
+    let throws = method("throws", 3, move |rt, site, _, args| {
             let expected_ctor = arg(&args, 0);
             let expected = match &expected_ctor {
                 Value::Object(o) if o.is_callable() => oc_codemode::interp::coerce::coerce_to_string(&get(o, &PropKey::str("name")).unwrap_or_default()).to_rust(),
@@ -142,10 +191,15 @@ fn harness(rt: &Rt) -> Vec<(String, Value)> {
                     Ok(_) => f5(format!("{label}Expected a {expected} to be thrown but no exception was thrown at all")).resolve().await,
                 }
             })
-        }),
-    ]);
+        });
+    if prelude {
+        list.extend(checks);
+    } else {
+        list.push(throws);
+    }
+    methods(&b.function, &assert, list);
     vec![
-        ("assert".into(), Value::Object(assert)),
+        (if prelude { "$assert" } else { "assert" }.into(), Value::Object(assert)),
         ("compareArray".into(), Value::Object(compare_array)),
         ("Test262Error".into(), Value::Object(test262_error)),
         ("$DONE".into(), Value::Object(fn_(&b.function, "$DONE", 1, |_, _, _, _| NResult::ok(Value::Undefined)))),
@@ -158,8 +212,8 @@ fn harness(rt: &Rt) -> Vec<(String, Value)> {
     ]
 }
 
-fn skips() -> HashMap<String, String> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test262-skips.txt");
+fn skips(name: &str) -> HashMap<String, String> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -171,9 +225,20 @@ fn skips() -> HashMap<String, String> {
         .collect()
 }
 
+/// The sample recorded from upstream 2.2.2 (legacy interpreter).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test262_sample_matches_upstream() {
-    let dir = fixtures().join("test262");
+    test262_sample(corpus(""), "test262-skips.txt").await;
+}
+
+/// The same files recorded from upstream 2.3.0 (bytecode VM), with its `assert` prelude.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test262_sample_matches_upstream_2_3_0() {
+    test262_sample(corpus("2.3.0"), "test262-skips-2.3.0.txt").await;
+}
+
+async fn test262_sample(corpus: std::path::PathBuf, skip_file: &str) {
+    let dir = corpus.join("test262");
     let mut files = Vec::new();
     for group in ["built-ins", "language"] {
         if let Ok(entries) = std::fs::read_dir(dir.join(group)) {
@@ -181,23 +246,18 @@ async fn test262_sample_matches_upstream() {
         }
     }
     files.sort();
-    let skips = skips();
-    let runtime = CodeMode::new(
-        Vec::new(),
-        Arc::new(NoTools),
-        Vec::new(),
-        ExecutionLimits { timeout_ms: Some(5000.0), ..Default::default() },
-    )
-    .unwrap()
-    .with_program_globals(Arc::new(harness));
-    let slow_runtime = CodeMode::new(
-        Vec::new(),
-        Arc::new(NoTools),
-        Vec::new(),
-        ExecutionLimits { timeout_ms: Some(60_000.0), ..Default::default() },
-    )
-    .unwrap()
-    .with_program_globals(Arc::new(harness));
+    let skips = skips(skip_file);
+    let make = |timeout_ms: f64, prelude: bool| {
+        CodeMode::new(
+            Vec::new(),
+            Arc::new(NoTools),
+            Vec::new(),
+            ExecutionLimits { timeout_ms: Some(timeout_ms), ..Default::default() },
+        )
+        .unwrap()
+        .with_program_globals(Arc::new(if prelude { harness_prelude } else { harness }))
+    };
+    let runtimes = [(make(5000.0, false), make(60_000.0, false)), (make(5000.0, true), make(60_000.0, true))];
     let (mut total, mut passed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
     let only = std::env::var("TEST262_ONLY").ok();
     for path in files {
@@ -210,7 +270,9 @@ async fn test262_sample_matches_upstream() {
             }
             let Some(expected) = record.get("result").and_then(decode) else { continue };
             total += 1;
-            let mut ours = runtime.execute(record["code"].as_str().unwrap_or("")).await.to_json();
+            let code = record["code"].as_str().unwrap_or("");
+            let (runtime, slow_runtime) = &runtimes[usize::from(code.starts_with(PRELUDE))];
+            let mut ours = runtime.execute(code).await.to_json();
             // A few files loop 65 536 times (decodeURI's S15.1.3.*_A1.*), which takes seconds in an unoptimized build
             // on a loaded machine: when upstream finished, give a timed-out run more time instead of failing it.
             if ours["error"]["kind"] == "TimeoutExceeded" && expected["error"]["kind"] != "TimeoutExceeded" {
@@ -225,9 +287,9 @@ async fn test262_sample_matches_upstream() {
             }
         }
     }
-    eprintln!("test262 sample: {total} files, {passed} identical, {skipped} known divergences, {} failed", failures.len());
+    eprintln!("test262 sample ({skip_file}): {total} files, {passed} identical, {skipped} known divergences, {} failed", failures.len());
     if !failures.is_empty() {
-        let out = std::env::temp_dir().join("oc-codemode-test262-failures.txt");
+        let out = std::env::temp_dir().join(format!("oc-codemode-test262-failures-{skip_file}"));
         std::fs::write(&out, failures.join("\n\n")).ok();
         panic!("{} test262 mismatches (see {}):\n{}", failures.len(), out.display(), failures.iter().take(15).cloned().collect::<Vec<_>>().join("\n"));
     }

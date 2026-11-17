@@ -5,6 +5,7 @@ import * as Recorder from "./record.js"
 
 export type { InputProperty } from "./tool-schema-impl.js"
 export const identifierSegment = Impl.identifierSegment
+export const stringParameter = Impl.stringParameter
 export const toTypeScript = Recorder.schemaCall("toTypeScript", Impl.toTypeScript)
 export const jsonSchemaToTypeScript = Recorder.schemaCall("jsonSchemaToTypeScript", Impl.jsonSchemaToTypeScript)
 export const inputProperties = Recorder.schemaCall("inputProperties", Impl.inputProperties)

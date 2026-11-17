@@ -93,7 +93,7 @@ fn construct_error(rt: &Rt, site: Site, error_type: ErrorType, args: Vec<Value>,
             };
             let cursor = iteration::iterate(&rt, &arg(&args, 0), None, site).await?;
             let Some(cursor) = cursor else {
-                return Err(type_error("new AggregateError(...) expects a synchronous iterable of errors."));
+                return Err(iteration::not_iterable(&arg(&args, 0)));
             };
             let mut errors = Vec::new();
             loop {

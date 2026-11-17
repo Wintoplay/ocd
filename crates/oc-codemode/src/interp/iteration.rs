@@ -519,6 +519,12 @@ pub async fn iterate(rt: &Rt, value: &Value, node: Option<Loc>, site: Site) -> J
     Ok(custom_iterator(rt, value, node, false, site).await?.map(|it| custom_cursor(rt, it, node, site)))
 }
 
+/// What a built-in that walks its argument with `for...of` (Map, Set, groupBy, fromEntries, ...) throws when the
+/// argument is not iterable: from 2.3.0 these built-ins are program code on upstream's VM, so the error is for...of's.
+pub fn not_iterable(value: &Value) -> super::errors::Thrown {
+    super::errors::invalid_data(format!("for...of requires an iterable value, received {}.", super::describe_value(value)))
+}
+
 /// GetIteratorDirect: drive an iterator by its own `next`, without asking for `[Symbol.iterator]`.
 pub fn iterate_direct(rt: &Rt, value: &Value, node: Option<Loc>, site: Site) -> JsResult<Rc<dyn Cursor>> {
     if let Value::Object(o) = value
@@ -527,7 +533,7 @@ pub fn iterate_direct(rt: &Rt, value: &Value, node: Option<Loc>, site: Site) -> 
         return Ok(c.clone());
     }
     let Value::Object(o) = value else {
-        let e = type_error(format!("An iterator must be an object, received {}.", super::describe_value(value)));
+        let e = type_error("An iterator must be an object.");
         return Err(match node {
             Some(n) => super::errors::locate(e, Some(n)),
             None => e,

@@ -1,0 +1,1240 @@
+[
+ {
+  "code": "if (true) { import x from \"url\" } return typeof x",
+  "result": {
+   "ok": true,
+   "value": "undefined",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "if (false) { import x from \"nope\" } return 1",
+  "result": {
+   "ok": true,
+   "value": 1,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "function f() { import x from \"url\"; return typeof x } return f()",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "SyntaxError: An import declaration may only appear at the top level of the program. (line 1, col 16)",
+    "location": {
+     "line": 1,
+     "column": 16
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}, null, \"ab\", true, () => 1, Symbol.iterator]) { try { new Map(v); out.push(\"ok\") } catch (e) { out.push(e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "for...of requires an iterable value, received a number.",
+    "for...of requires an iterable value, received a data object.",
+    "ok",
+    "new Map(...) expects [key, value] pairs as entry objects.",
+    "for...of requires an iterable value, received a boolean.",
+    "for...of requires an iterable value, received a function.",
+    "for...of requires an iterable value, received a symbol."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}, \"ab\", [1]]) { try { new Set(v); out.push(\"ok\") } catch (e) { out.push(e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "for...of requires an iterable value, received a number.",
+    "for...of requires an iterable value, received a data object.",
+    "ok",
+    "ok"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}, \"ab\"]) { try { Object.groupBy(v, x => x); out.push(\"ok\") } catch (e) { out.push(e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "for...of requires an iterable value, received a number.",
+    "for...of requires an iterable value, received a data object.",
+    "ok"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}, \"ab\"]) { try { Array.from(v); out.push(\"ok\") } catch (e) { out.push(e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "Array.from expects an iterable or array-like value, received a number.",
+    "ok",
+    "ok"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}]) { try { Promise.all(v).catch(e => out.push(\"rej \" + e.message)); out.push(\"ok\") } catch (e) { out.push(e.message) } } await null; await null; return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "ok",
+    "ok",
+    "rej Promise.all expects a synchronous iterable, received a number.",
+    "rej Promise.all expects a synchronous iterable, received a data object."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const v of [5, {}]) { try { new Map([v]); out.push(\"ok\") } catch (e) { out.push(e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "new Map(...) expects [key, value] pairs as entry objects.",
+    "ok"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const k of [5, {}, null]) { try { new Set([1]).union({ size: 1, has() {}, keys() { return k } }); out.push(\"ok\") } catch (e) { out.push(e.name + \": \" + e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Set.union expects 'keys' to return an iterator object.",
+    "TypeError: The called value is not a function.",
+    "TypeError: Set.union expects 'keys' to return an iterator object."
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const out = []; for (const m of [\"union\",\"intersection\",\"difference\",\"symmetricDifference\",\"isSubsetOf\",\"isSupersetOf\",\"isDisjointFrom\"]) { try { new Set([1]).union; new Set([1])[m]({ size: -1, has() {}, keys() { return [].values() } }); out.push(\"ok\") } catch (e) { out.push(e.name + \": \" + e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "RangeError: Set.union received a Set-like object with a negative size.",
+    "RangeError: Set.intersection received a Set-like object with a negative size.",
+    "RangeError: Set.difference received a Set-like object with a negative size.",
+    "RangeError: Set.symmetricDifference received a Set-like object with a negative size.",
+    "RangeError: Set.isSubsetOf received a Set-like object with a negative size.",
+    "RangeError: Set.isSupersetOf received a Set-like object with a negative size.",
+    "RangeError: Set.isDisjointFrom received a Set-like object with a negative size."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const out = []; for (const s of [NaN, undefined, \"x\", 1.5, -0.5, Infinity]) { try { new Set([1]).union({ size: s, has() {}, keys() { return [].values() } }); out.push(\"ok\") } catch (e) { out.push(e.name + \": \" + e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Set.union received a Set-like object with an invalid size.",
+    "TypeError: Set.union received a Set-like object with an invalid size.",
+    "TypeError: Set.union received a Set-like object with an invalid size.",
+    "ok",
+    "RangeError: Set.union received a Set-like object with a negative size.",
+    "ok"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const it = Iterator.from({}); return [typeof it, typeof it.next]",
+  "result": {
+   "ok": true,
+   "value": [
+    "object",
+    "function"
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const it = Iterator.from({}); try { it.next(); return \"no\" } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Iterator.from is not a function.",
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const out = []; for (const v of [5, \"s\", null, undefined]) { try { Iterator.prototype.map.call(v, x => x); out.push(\"ok\") } catch (e) { out.push(e.name + \": \" + e.message) } } return out",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: An iterator must be an object.",
+    "TypeError: An iterator must be an object.",
+    "TypeError: An iterator must be an object.",
+    "TypeError: An iterator must be an object."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const it = Iterator.prototype.map.call({}, x => x); try { it.next(); return \"no\" } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Iterator.prototype.map.call is not a function.",
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const it = Iterator.prototype.map.call({ next: 5 }, x => x); try { it.next(); return \"no\" } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Iterator.prototype.map.call is not a function.",
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "return [[1, 2, 3].sort((a, b) => ({ valueOf() { return b - a } })), [3,1,2].sort(() => \"1\"), [3,1,2].sort(() => null)]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     3,
+     2,
+     1
+    ],
+    [
+     2,
+     1,
+     3
+    ],
+    [
+     3,
+     1,
+     2
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [1,2,3].sort(() => Symbol.iterator) } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Cannot convert a symbol to a number",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [1,2,3].sort(async () => 1) } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Unary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [...new Uint8Array([2, 1]).sort(() => ({ valueOf() { return -1 } }))] } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": [
+    2,
+    1
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [...new Uint8Array([2, 1]).sort(async () => 1)] } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Unary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [1,2].toSorted(async () => 1) } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Unary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return +Promise.resolve(1) } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Unary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return -(async () => 1)() } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Unary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return Number(Promise.resolve(1)) } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": null,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [Promise.resolve(1) * 2] } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "TypeError: Binary operators require data values.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { return [Math.sumPrecise(5)] } catch (e) { return e.name + \": \" + e.message }\n",
+  "result": {
+   "ok": true,
+   "value": "TypeError: for...of requires an iterable value, received a number.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Array.from(5, x => x)), t(() => Array.from([1,2], 5)), t(() => Array.from({length: 2, 0: \"a\"}, (x, i) => [x, i])), t(() => Array.from(new Set([1,2]), function (x) { return this.k + x }, {k: 10}))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Array.from expects an iterable or array-like value, received a number.",
+    "TypeError: Array.from expects a function callback.",
+    [
+     [
+      "a",
+      0
+     ],
+     [
+      null,
+      1
+     ]
+    ],
+    [
+     11,
+     12
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [1].map(5)), t(() => [1].filter()), t(() => [1].forEach(null)), t(() => [1].some({})), t(() => [1].every(\"x\")), t(() => [1].find(1)), t(() => [1].findIndex()), t(() => [1].findLast()), t(() => [1].findLastIndex()), t(() => [1].reduce()), t(() => [1].reduceRight(3)), t(() => [1].flatMap(2))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Array.map expects a function callback.",
+    "TypeError: Array.filter expects a function callback.",
+    "TypeError: Array.forEach expects a function callback.",
+    "TypeError: Array.some expects a function callback.",
+    "TypeError: Array.every expects a function callback.",
+    "TypeError: Array.find expects a function callback.",
+    "TypeError: Array.findIndex expects a function callback.",
+    "TypeError: Array.findLast expects a function callback.",
+    "TypeError: Array.findLastIndex expects a function callback.",
+    "TypeError: Array.reduce expects a function callback.",
+    "TypeError: Array.reduceRight expects a function callback.",
+    "TypeError: Array.flatMap expects a function callback."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => new Uint8Array([1]).map(5)), t(() => new Uint8Array([1]).filter()), t(() => new Uint8Array([1]).forEach(null)), t(() => new Uint8Array([1]).some({})), t(() => new Uint8Array([1]).reduce()), t(() => new Uint8Array([]).reduce((a, b) => a)), t(() => [].reduce((a, b) => a)), t(() => [,,].reduceRight((a, b) => a))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Uint8Array.map expects a function callback.",
+    "TypeError: Uint8Array.filter expects a function callback.",
+    "TypeError: Uint8Array.forEach expects a function callback.",
+    "TypeError: Uint8Array.some expects a function callback.",
+    "TypeError: Uint8Array.reduce expects a function callback.",
+    "TypeError: Uint8Array.reduce of an empty array with no initial value.",
+    "TypeError: Array.reduce of an empty array with no initial value.",
+    "TypeError: Array.reduceRight of an empty array with no initial value."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const a = [1, 2, 3]; const seen = []; a.map((x, i) => { if (i === 0) { a.push(9); a[2] = 7 } seen.push(x); return x }); return seen",
+  "result": {
+   "ok": true,
+   "value": [
+    1,
+    2,
+    7
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const a = [1, , 3]; const out = []; a.find((x, i) => { out.push([i, x]) }); a.findLast((x, i) => { out.push([i, x]) }); a.forEach((x, i) => out.push([\"f\", i])); return [out, a.map(x => x * 2), 1 in a.map(x => x)]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     [
+      0,
+      1
+     ],
+     [
+      1,
+      null
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      1,
+      null
+     ],
+     [
+      0,
+      1
+     ],
+     [
+      "f",
+      0
+     ],
+     [
+      "f",
+      2
+     ]
+    ],
+    [
+     2,
+     null,
+     6
+    ],
+    false
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const a = [1, 2, 3, 4]; const out = []; a.forEach((x, i) => { out.push(x); if (i === 0) a.pop() }); return out",
+  "result": {
+   "ok": true,
+   "value": [
+    1,
+    2,
+    3
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "return [[1, 2, 3].filter(async x => false).length, [1, 2].some(async () => false), [1, 2].every(async () => false), [1, 2].find(async () => false), [1, 2].findIndex(async () => false)]",
+  "result": {
+   "ok": true,
+   "value": [
+    3,
+    true,
+    true,
+    1,
+    0
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [...new Uint8Array([1, 2]).map(x => \"7\")]), t(() => [...new Uint8Array([1, 2]).map(x => ({}))]), t(() => [...new Uint8Array([1, 2]).map(async x => x)]), t(() => [...new Uint8Array([1, 2]).map(x => null)]), t(() => [...new Uint8Array([1]).map(x => ({ valueOf() { return 300 } }))])]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     7,
+     7
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     0
+    ],
+    [
+     0
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [3, 1, 2].sort(() => undefined)), t(() => [3, 1, 2].sort(() => \"-1\")), t(() => [3, 1, 2].sort(() => [])), t(() => [3, 1, 2].sort(() => [1])), t(() => [3, 1, 2].sort(() => ({}))), t(() => [3, 1, 2].sort((a, b) => ({ toString() { return String(a - b) } }))), t(() => [3, 1, 2].sort(() => true)), t(() => [3, 1, 2].sort(() => 1n))]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     3,
+     1,
+     2
+    ],
+    [
+     3,
+     1,
+     2
+    ],
+    [
+     3,
+     1,
+     2
+    ],
+    [
+     2,
+     1,
+     3
+    ],
+    [
+     3,
+     1,
+     2
+    ],
+    [
+     1,
+     2,
+     3
+    ],
+    [
+     2,
+     1,
+     3
+    ],
+    "TypeError: BigInt literals are not supported."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [3, 1, 2].sort(5)), t(() => [3, 1, 2].sort(null)), t(() => [3, undefined, , 1].sort((a, b) => a - b)), t(() => [3, 1, 2].sort(() => { throw new Error(\"cmp\") })), t(() => [3, 1, 2].toSorted(() => NaN)), t(() => [2, 1].sort((a, b) => ({ valueOf() { throw new RangeError(\"v\") } })))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Array.sort expects a function callback.",
+    "TypeError: Array.sort expects a function callback.",
+    [
+     1,
+     3,
+     null,
+     null
+    ],
+    "Error: cmp",
+    [
+     3,
+     1,
+     2
+    ],
+    "RangeError: v"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [1, null, undefined, { toLocaleString() { return \"X\" } }, [2, 3]].toLocaleString()), t(() => [{ toLocaleString: 5 }].toLocaleString()), t(() => [{ toLocaleString() { return {} } }].toLocaleString())]",
+  "result": {
+   "ok": true,
+   "value": [
+    "1,,,X,2,3",
+    "TypeError: The called value is not a function.",
+    "[object Object]"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => new Map([[1, 2], \"ab\"])), t(() => new Map([\"ab\"])), t(() => [...new Map([[1]])]), t(() => [...new Set(\"abc\")]), t(() => new WeakMap([[{}, 1], [1, 2]])), t(() => new WeakSet([1])), t(() => new Map(undefined).size), t(() => new Set(null).size)]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: new Map(...) expects [key, value] pairs as entry objects.",
+    "TypeError: new Map(...) expects [key, value] pairs as entry objects.",
+    [
+     [
+      1,
+      null
+     ]
+    ],
+    [
+     "a",
+     "b",
+     "c"
+    ],
+    "TypeError: Invalid value used as weak map key: a number cannot be held weakly.",
+    "TypeError: Invalid value used in weak set: a number cannot be held weakly.",
+    0,
+    0
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Object.groupBy(null, x => x)), t(() => Map.groupBy(undefined, x => x)), t(() => Object.groupBy([1], 5)), t(() => Object.groupBy([1, 2], x => ({ toString() { return \"k\" + x } }))), t(() => Object.groupBy([1], () => Symbol.iterator)), t(() => [...Map.groupBy([1, 2, 3], x => x % 2)])]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Object.groupBy expects an iterable collection.",
+    "TypeError: Map.groupBy expects an iterable collection.",
+    "TypeError: Object.groupBy expects a function callback.",
+    {
+     "k1": [
+      1
+     ],
+     "k2": [
+      2
+     ]
+    },
+    {
+     "Symbol(codemode.iterator)": [
+      1
+     ]
+    },
+    [
+     [
+      1,
+      [
+       1,
+       3
+      ]
+     ],
+     [
+      0,
+      [
+       2
+      ]
+     ]
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst m = new Map([[1, \"a\"]])\nreturn [t(() => m.getOrInsertComputed(2, k => { m.set(2, \"inner\"); return \"outer\" })), t(() => m.get(2)), t(() => m.getOrInsertComputed(3, 5)), t(() => m.getOrInsertComputed(1, () => \"x\"))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "outer",
+    "outer",
+    "TypeError: Map.getOrInsertComputed expects a function callback.",
+    "a"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst m = new Map([[1, 1], [2, 2]]); const out = []\nm.forEach((v, k) => { out.push(k); if (k === 1) { m.delete(2); m.set(3, 3) } })\nreturn [out, t(() => m.forEach(5)), t(() => new Set([1]).forEach()), t(() => Map.prototype.forEach.call({}, () => 1))]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     1,
+     3
+    ],
+    "TypeError: Map.forEach expects a function callback.",
+    "TypeError: Set.forEach expects a function callback.",
+    "TypeError: Map.prototype.forEach called on incompatible receiver a data object."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst s = new Set([1, 2])\nreturn [t(() => s.union(5)), t(() => s.union(null)), t(() => s.union({ size: \"2\", has() {}, keys() { return [3].values() } })), t(() => [...s.union({ size: 1, has: 5, keys() {} })]), t(() => s.union({ size: 1, has() {}, keys: null })), t(() => s.union({ size: 1, has() {}, keys() { return {} } })), t(() => s.union({ size: 1, has() {}, keys() { return { next: 5 } } }))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Set.union expects a Set-like object.",
+    "TypeError: Set.union expects a Set-like object.",
+    [
+     1,
+     2,
+     3
+    ],
+    "TypeError: Set.union expects callable 'has' and 'keys' methods.",
+    "TypeError: Set.union expects callable 'has' and 'keys' methods.",
+    "TypeError: s.union is not a function.",
+    "TypeError: s.union is not a function."
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const order = []\nconst like = { get size() { order.push(\"size\"); return 1 }, get has() { order.push(\"has\"); return () => true }, get keys() { order.push(\"keys\"); return () => [5].values() } }\nconst s = new Set([1, 2])\nreturn [[...s.union(like)], order, [...s.intersection(like)], s.isSubsetOf(like), s.isSupersetOf(like), s.isDisjointFrom(like)]",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: Only init object properties are supported. (line 2, col 16)",
+    "location": {
+     "line": 2,
+     "column": 16
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Object.fromEntries(5)), t(() => Object.fromEntries([5])), t(() => Object.fromEntries([\"ab\"])), t(() => Object.fromEntries([[1, 2], [{ toString() { return \"k\" } }, 3]])), t(() => Object.fromEntries(new Map([[\"a\", 1]]))), t(() => Object.fromEntries([[Symbol.iterator, 1]]))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: for...of requires an iterable value, received a number.",
+    "TypeError: Object.fromEntries expects [key, value] entry objects.",
+    "TypeError: Object.fromEntries expects [key, value] entry objects.",
+    "TypeError: Object.fromEntries expects [key, value] entry objects.",
+    {
+     "a": 1
+    },
+    {
+     "Symbol(codemode.iterator)": 1
+    }
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Math.sumPrecise([1, 2, 0.1])), t(() => Math.sumPrecise([])), t(() => Math.sumPrecise(\"12\")), t(() => Math.sumPrecise(new Set([1e308, 1e308, -1e308])))]",
+  "result": {
+   "ok": true,
+   "value": [
+    3.1,
+    0,
+    "TypeError: Math.sumPrecise expects an iterable of numbers.",
+    0
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => new AggregateError(5)), t(() => new AggregateError(null, \"m\")), t(() => { const e = new AggregateError(new Set([1, 2]), \"m\", { cause: 3 }); return [e.errors, e.message, e.cause] }), t(() => AggregateError(\"ab\").errors)]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: for...of requires an iterable value, received a number.",
+    "TypeError: for...of requires an iterable value, received null.",
+    [
+     [
+      1,
+      2
+     ],
+     "m",
+     3
+    ],
+    [
+     "a",
+     "b"
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Uint8Array.from(5)), t(() => Uint8Array.from({ length: 2 })), t(() => [...Uint8Array.from(new Set([1, 2]), x => x * 3)]), t(() => [...Uint8Array.from([1, 2], 5)]), t(() => { const u = new Uint8Array(4); u.set(new Set([7, 8]), 1); return [...u] }), t(() => [...Uint8Array.from(\"12\")])]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Uint8Array.from expects a Uint8Array, an array, or an iterable of numbers, received a number.",
+    "TypeError: Uint8Array.from expects a Uint8Array, an array, or an iterable of numbers, received a data object.",
+    [
+     3,
+     6
+    ],
+    "TypeError: Uint8Array.from expects a function callback.",
+    [
+     0,
+     7,
+     8,
+     0
+    ],
+    [
+     1,
+     2
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => [...new Headers([[\"a\", \"1\"], [\"b\", 2]])]), t(() => new Headers([5])), t(() => new Headers([[\"a\"]])), t(() => new Headers([[\"a\", \"1\", \"2\"]])), t(() => [...new URLSearchParams([[\"a\", 1], [\"b\", { toString() { return \"x\" } }]])]), t(() => new URLSearchParams([5])), t(() => [...new URLSearchParams(new Map([[\"k\", \"v\"]]))])]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     [
+      "a",
+      "1"
+     ],
+     [
+      "b",
+      "2"
+     ]
+    ],
+    "TypeError: new Headers(...) expects iterable [name, value] pairs.",
+    "TypeError: new Headers(...) expects iterable [name, value] pairs.",
+    "TypeError: new Headers(...) expects iterable [name, value] pairs.",
+    [
+     [
+      "a",
+      "1"
+     ],
+     [
+      "b",
+      "x"
+     ]
+    ],
+    "TypeError: new URLSearchParams(...) expects iterable [name, value] pairs.",
+    [
+     [
+      "k",
+      "v"
+     ]
+    ]
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst h = new Headers([[\"a\", \"1\"], [\"b\", \"2\"]]); const out = []\nh.forEach((v, k) => { out.push(k + v); h.delete(\"b\") })\nconst p = new URLSearchParams(\"a=1&b=2\"); p.forEach((v, k) => { out.push(k + v); p.append(\"c\", \"3\") })\nreturn [out, t(() => h.forEach(5)), t(() => p.forEach())]",
+  "result": {
+   "ok": true,
+   "value": [
+    [
+     "a1",
+     "b2",
+     "a1",
+     "b2"
+    ],
+    "TypeError: Headers.forEach expects a function callback.",
+    "TypeError: URLSearchParams.forEach requires 1 argument."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Iterator.from(5)), t(() => Iterator.from(\"ab\").toArray()), t(() => Iterator.from({ next() { return { done: true } } }).toArray()), t(() => typeof Iterator.from({}).next), t(() => Iterator.from({}).next()), t(() => Iterator.from({ [Symbol.iterator]: 5 })), t(() => Iterator.from(null))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: Iterator.from expects an iterable or iterator, received a number.",
+    [
+     "a",
+     "b"
+    ],
+    [],
+    "function",
+    "TypeError: Iterator.from is not a function.",
+    "TypeError: Iterator.from is not a function.",
+    "TypeError: Iterator.from expects an iterable or iterator, received null."
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => Iterator.prototype.map.call(5, x => x)), t(() => Iterator.prototype.map.call({}, x => x).next()), t(() => [1].values().map(5)), t(() => [1].values().take(-1)), t(() => [1].values().take(NaN)), t(() => [1].values().drop(\"x\")), t(() => [1, 2, 3].values().take(1.7).toArray()), t(() => [1].values().take(Infinity).toArray()), t(() => [1].values().reduce()), t(() => [].values().reduce((a, b) => a))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: An iterator must be an object.",
+    "TypeError: Iterator.prototype.map.call is not a function.",
+    "TypeError: Iterator.prototype.map expects a function callback.",
+    "RangeError: Iterator.prototype.take expects a non-negative count, received -1.",
+    "RangeError: Iterator.prototype.take expects a non-negative count, received NaN.",
+    "RangeError: Iterator.prototype.drop expects a non-negative count, received NaN.",
+    [
+     1
+    ],
+    [
+     1
+    ],
+    "TypeError: Iterator.prototype.reduce expects a function callback.",
+    "TypeError: Iterator.prototype.reduce of an empty iterator with no initial value."
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst closes = []\nconst it = () => ({ i: 0, next() { return { value: this.i++, done: this.i > 3 } }, return() { closes.push(\"ret\"); return {} }, __proto__: Iterator.prototype })\nconst a = it().map(x => x * 2); a.return()\nconst b = it().take(0); b.next()\nconst c = it().filter(x => x > 0); c.next(); c.return()\nreturn [closes, t(() => it().flatMap(x => 5).toArray()), t(() => it().flatMap(x => \"ab\").toArray()), t(() => it().flatMap(x => [x, x]).toArray()), t(() => it().some(x => x === 1)), closes]",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: it(...).map is not a function. (line 4, col 11)",
+    "location": {
+     "line": 4,
+     "column": 11
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nconst bad = { next() { return { value: 1, done: false } }, return() { return 5 }, __proto__: Iterator.prototype }\nreturn [t(() => bad.map(x => x).return()), t(() => bad.find(x => true)), t(() => Iterator.prototype.toArray.call(5)), t(() => Iterator.prototype.forEach.call({ next: 1 }, x => x))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: bad.map is not a function.",
+    "TypeError: bad.find is not a function.",
+    "TypeError: An iterator must be an object.",
+    "TypeError: Iterator.prototype.forEach.call is not a function."
+   ],
+   "toolCalls": []
+  },
+  "gap": "2.3.0 reads an iterator's next without checking it and fails when it is called, naming the program call that made the iterator"
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => JSON.parse('{\"a\":1,\"b\":[1,2],\"c\":{\"d\":3}}', (k, v) => typeof v === \"number\" ? v * 10 : v)), t(() => JSON.parse('{\"a\":1,\"b\":2}', (k, v) => k === \"a\" ? undefined : v)), t(() => JSON.parse('[1,2,3]', function (k, v) { return k === \"0\" ? this.length : v })), t(() => JSON.parse('{\"a\":1}', 5))]",
+  "result": {
+   "ok": true,
+   "value": [
+    {
+     "a": 10,
+     "b": [
+      10,
+      20
+     ],
+     "c": {
+      "d": 30
+     }
+    },
+    {
+     "b": 2
+    },
+    [
+     3,
+     2,
+     3
+    ],
+    {
+     "a": 1
+    }
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => \"abc\".replace(/b/, (m, i, s) => [m, i, s].join(\"|\"))), t(() => \"aXbX\".replaceAll(\"X\", () => ({ toString() { return \"y\" } }))), t(() => \"ab\".replace(\"a\", async () => 1)), t(() => \"ab\".replace(/(?<n>a)/g, (...args) => JSON.stringify(args))), t(() => \"ab\".replace(\"a\", () => Symbol.iterator))]",
+  "result": {
+   "ok": true,
+   "value": [
+    "ab|1|abcc",
+    "ayby",
+    "[object Promise]b",
+    "[\"a\",\"a\",0,\"ab\",{\"n\":\"a\"}]b",
+    "Symbol(codemode.iterator)b"
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = (f) => { try { return f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [t(() => { for (const x of 5) {} }), t(() => [...{}]), t(() => { const [a] = 5 }), t(() => { const [a] = {} }), t(() => Array.from({ [Symbol.iterator]() { return 5 } })), t(() => { for (const x of { [Symbol.iterator]() { return {} } }) {} }), t(() => Promise.all(5))]",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: Promise.all expects a synchronous iterable, received a number. (line 2, col 259)",
+    "location": {
+     "line": 2,
+     "column": 259
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const t = async (f) => { try { return await f() } catch (e) { return e.name + \": \" + e.message } }\nreturn [await t(async () => { for await (const x of 5) {} }), await t(() => Promise.all(5)), await t(() => Promise.any([])), await t(() => Promise.race({}))]\n",
+  "result": {
+   "ok": true,
+   "value": [
+    "TypeError: for await...of requires an iterable value, received a number.",
+    "TypeError: Promise.all expects a synchronous iterable, received a number.",
+    "AggregateError: All promises were rejected",
+    "TypeError: Promise.race expects a synchronous iterable, received a data object."
+   ],
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "label: import x from \"url\"\nreturn 1",
+  "result": {
+   "ok": true,
+   "value": 1,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "if (true) { import x from \"url\" } try { return x } catch (e) { return e.name + \": \" + e.message }",
+  "result": {
+   "ok": true,
+   "value": "ReferenceError: Unknown identifier 'x'.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "try { import x from \"nope\" } finally {} return 2",
+  "result": {
+   "ok": true,
+   "value": 2,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "switch (1) { case 1: import x from \"nope\" } return 3",
+  "result": {
+   "ok": true,
+   "value": 3,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "for (let i = 0; i < 1; i++) { import x from \"nope\" } return 4",
+  "result": {
+   "ok": true,
+   "value": 4,
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const f = () => { import x from \"url\" }; try { f() } catch (e) { return e.message }",
+  "result": {
+   "ok": true,
+   "value": "An import declaration may only appear at the top level of the program.",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "{ import { URL } from \"url\" } return typeof URL",
+  "result": {
+   "ok": true,
+   "value": "function",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "import u from \"url\"; { import v from \"nope\" } return typeof u\n",
+  "result": {
+   "ok": true,
+   "value": "object",
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "new Map(5)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "for (const x of 5) {}",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "Object.groupBy(5, x => x)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const s = new Set([1]);\ns.union({ size: -1, has() {}, keys() {} })",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "RangeError: Set.union received a Set-like object with a negative size. (line 2, col 1)",
+    "location": {
+     "line": 2,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "new Set([1]).union({ size: 1, has() {}, keys() { return 5 } })",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: Set.union expects 'keys' to return an iterator object. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "Iterator.prototype.map.call(5, x => x)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: An iterator must be an object. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "[2, 1].sort(async () => 1)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: Unary operators require data values. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "Math.sumPrecise(5)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "new AggregateError(5)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "Object.fromEntries(5)",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "new WeakSet(5)\n",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "InvalidDataValue",
+    "message": "TypeError: for...of requires an iterable value, received a number. (line 1, col 1)",
+    "location": {
+     "line": 1,
+     "column": 1
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "return [String(Symbol.iterator), Symbol.iterator.description, String(Symbol.asyncIterator), Symbol.asyncIterator.description, Symbol.iterator.toString(), `${String(Symbol.hasInstance)}`, Object.getOwnPropertyNames(Symbol)]",
+  "result": {
+   "ok": false,
+   "error": {
+    "kind": "ExecutionFailure",
+    "message": "TypeError: Cannot access a property on a non-object value. (line 1, col 34)",
+    "location": {
+     "line": 1,
+     "column": 34
+    }
+   },
+   "toolCalls": []
+  }
+ },
+ {
+  "code": "const o = { [Symbol.iterator]: 1, [Symbol.asyncIterator]: 2 }; return [Object.keys(o), JSON.stringify(Object.groupBy([1], () => Symbol.asyncIterator))]\n",
+  "result": {
+   "ok": true,
+   "value": [
+    [],
+    "{\"Symbol(codemode.async-iterator)\":[1]}"
+   ],
+   "toolCalls": []
+  }
+ }
+]

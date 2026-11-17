@@ -169,6 +169,8 @@ const CASES: &[(&str, &str)] = &[
         r#"try { Iterator.from(null) } catch (e) { return [e.name, e.message] }"#,
         r#"{"ok":true,"value":["TypeError","Iterator.from expects an iterable or iterator, received null."],"toolCalls":[]}"#,
     ),
+    // Upstream 2.3.0's VM reads `next` without checking it and fails only when it is called, with a "<call> is not a
+    // function." naming the program call that made the iterator; ocd keeps 2.2's eager check (listed in the README).
     (
         r#"try { Iterator.from({}) } catch (e) { return [e.name, e.message] }"#,
         r#"{"ok":true,"value":["TypeError","Iterator next must be a function."],"toolCalls":[]}"#,
@@ -183,8 +185,10 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { Iterator.prototype.map.call(5, (x) => x) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","An iterator must be an object, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","An iterator must be an object."],"toolCalls":[]}"#,
     ),
+    // Upstream 2.3.0's VM reads `next` without checking it and fails only when it is called, with a "<call> is not a
+    // function." naming the program call that made the iterator; ocd keeps 2.2's eager check (listed in the README).
     (
         r#"try { Iterator.prototype.map.call({}, (x) => x) } catch (e) { return [e.name, e.message] }"#,
         r#"{"ok":true,"value":["TypeError","Iterator next must be a function."],"toolCalls":[]}"#,

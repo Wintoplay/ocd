@@ -1,5 +1,6 @@
-"""Installs a recording into crates/oc-codemode/tests/fixtures/upstream, keeping a deterministic quarter of the
-test262 shards (records whose sha1(test) is divisible by 4), like the previous checked-in set."""
+"""Installs a recording into a crates/oc-codemode/tests/fixtures/upstream* directory, keeping a deterministic quarter of
+the test262 shards (records whose sha1(test) is divisible by 4), like the previous checked-in set. unknown.jsonl
+(programs run by child processes some tests spawn, outside any test file) is left out."""
 import hashlib, json, os, shutil, sys
 
 src, dst = sys.argv[1], sys.argv[2]
@@ -10,7 +11,7 @@ for name in os.listdir(dst):
     shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
 for name in os.listdir(src):
     path = os.path.join(src, name)
-    if name == "test262" or name == "README.md":
+    if name in ("test262", "README.md", "unknown.jsonl"):
         continue
     shutil.copy(path, os.path.join(dst, name))
 kept = total = 0

@@ -43,7 +43,9 @@ fn properties_json(def: &ToolDef) -> Json {
 }
 
 fn check_tree(node: &Json, path: &mut Vec<String>, failures: &mut Vec<String>, seen: &mut HashSet<String>) {
-    if let Some(tool) = node.get("tool") {
+    if let Some(tool) = node.get("tool")
+        && !freeform(tool)
+    {
         let key = format!("{}|{}", path.join("."), tool);
         if seen.insert(key) {
             let p = path.join(".");
@@ -74,11 +76,28 @@ fn check_tree(node: &Json, path: &mut Vec<String>, failures: &mut Vec<String>, s
     }
 }
 
+/// Both recorded corpora, or only the one `OC_CODEMODE_CORPUS` names.
+fn corpora() -> Vec<std::path::PathBuf> {
+    match std::env::var("OC_CODEMODE_CORPUS") {
+        Ok(_) => vec![fixtures()],
+        Err(_) => vec![corpus(""), corpus("2.3.0")],
+    }
+}
+
+/// A freeform tool (2.3.0, #61703) takes its one string field directly, `tools.x(/** desc */ name: string)`: ocd
+/// renders it as an object input until the freeform port (batch P1) lands.
+fn freeform(tool: &Json) -> bool {
+    tool["freeform"] == true
+}
+
 #[test]
 fn recorded_tool_signatures_render_identically() {
     let mut failures = Vec::new();
     let mut seen = HashSet::new();
-    let mut files: Vec<_> = std::fs::read_dir(fixtures()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let mut files: Vec<_> = corpora()
+        .into_iter()
+        .flat_map(|dir| std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect::<Vec<_>>())
+        .collect();
     files.sort();
     for path in files {
         let name = path.to_string_lossy().to_string();
@@ -99,7 +118,10 @@ fn recorded_tool_signatures_render_identically() {
 #[test]
 fn recorded_catalog_reads_match() {
     let mut failures = Vec::new();
-    for record in read_jsonl(&fixtures().join("catalog.jsonl")) {
+    for record in corpora().iter().flat_map(|dir| read_jsonl(&dir.join("catalog.jsonl"))) {
+        if record["tree"].to_string().contains(r#""freeform":true"#) {
+            continue;
+        }
         let runtime =
             CodeMode::new(tree_entries(&record["tree"]), Arc::new(NoTools), Vec::new(), ExecutionLimits::default()).unwrap();
         let ours = serde_json::to_value(runtime.catalog()).unwrap();
@@ -114,7 +136,7 @@ fn recorded_catalog_reads_match() {
 fn recorded_schema_calls_match() {
     let mut failures = Vec::new();
     let mut count = 0;
-    for record in read_jsonl(&fixtures().join("schema-calls.jsonl")) {
+    for record in corpora().iter().flat_map(|dir| read_jsonl(&dir.join("schema-calls.jsonl"))) {
         let args = record["args"].as_array().unwrap();
         // A BigInt default cannot exist in JSON; upstream skips it as unserializable.
         if record["args"].to_string().contains("$bigint") {
@@ -156,10 +178,12 @@ fn recorded_schema_calls_match() {
 
 #[test]
 fn search_signature_and_tool_expressions() {
-    let d: Json =
-        serde_json::from_str(&std::fs::read_to_string(fixtures().join("search-signature.json")).unwrap()).unwrap();
-    assert_eq!(d["searchSignature"].as_str().unwrap(), SEARCH_SIGNATURE);
-    for pair in d["toolExpression"].as_array().unwrap() {
-        assert_eq!(tool_expression(pair[0].as_str().unwrap()), pair[1].as_str().unwrap(), "{pair}");
+    for dir in corpora() {
+        let d: Json =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("search-signature.json")).unwrap()).unwrap();
+        assert_eq!(d["searchSignature"].as_str().unwrap(), SEARCH_SIGNATURE);
+        for pair in d["toolExpression"].as_array().unwrap() {
+            assert_eq!(tool_expression(pair[0].as_str().unwrap()), pair[1].as_str().unwrap(), "{pair}");
+        }
     }
 }

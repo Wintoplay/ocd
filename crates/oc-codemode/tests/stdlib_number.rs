@@ -304,7 +304,7 @@ return [Math.max(a, b, c), Math.atan2(a, b), Math.abs(a, b), Math.pow(b, c, a), 
 for (const v of [undefined, null, 5, {}, "12", [1, "2"], [1, , 2], new Map([[1, 2]])]) {
   try { r.push(Math.sumPrecise(v)) } catch (e) { r.push(e.name + ": " + e.message) }
 }
-return r"#, r#"{"ok":true,"value":["TypeError: Math.sumPrecise expects a synchronous iterable.","TypeError: Math.sumPrecise expects a synchronous iterable.","TypeError: Math.sumPrecise expects a synchronous iterable.","TypeError: Math.sumPrecise expects a synchronous iterable.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers."],"toolCalls":[]}"#),
+return r"#, r#"{"ok":true,"value":["TypeError: for...of requires an iterable value, received undefined.","TypeError: for...of requires an iterable value, received null.","TypeError: for...of requires an iterable value, received a number.","TypeError: for...of requires an iterable value, received a data object.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers.","TypeError: Math.sumPrecise expects an iterable of numbers."],"toolCalls":[]}"#),
     (r#"let closed = false
 const it = { [Symbol.iterator]() { let i = 0; return { next() { i++; return i < 3 ? { value: i, done: false } : { value: "x", done: false } }, return() { closed = true; return {} } } } }
 try { Math.sumPrecise(it) } catch (e) { return [e.message, closed] }"#, r#"{"ok":true,"value":["Math.sumPrecise expects an iterable of numbers.",true],"toolCalls":[]}"#),

@@ -367,6 +367,8 @@ pub struct Frame {
     /// The generator whose body this frame runs, where `yield` suspends.
     pub generator: RefCell<Option<Rc<GeneratorHandle>>>,
     pub gen_async: Cell<bool>,
+    /// Whether this frame runs the program itself (set by `run`), not a function it calls.
+    pub program: Cell<bool>,
 }
 
 /// The single dispatch for calls made by built-ins (upstream `ctx.call`): a root frame at depth 0.
@@ -390,7 +392,14 @@ fn is_thenable(value: &Value) -> bool {
 
 impl Frame {
     pub fn new(rt: Rt, depth: usize, ambient: Site) -> Frame {
-        Frame { rt, depth: Cell::new(depth), ambient, generator: RefCell::new(None), gen_async: Cell::new(false) }
+        Frame {
+            rt,
+            depth: Cell::new(depth),
+            ambient,
+            generator: RefCell::new(None),
+            gen_async: Cell::new(false),
+            program: Cell::new(false),
+        }
     }
 
     fn site(&self, node: Option<Loc>) -> Site {
@@ -516,6 +525,7 @@ impl Frame {
     // ---- program ----
 
     pub async fn run(&self, global: &Env, program: &Program) -> JsResult<Value> {
+        self.program.set(true);
         // Keep top-level declarations separate so they can shadow builtins.
         let env = new_env(Some(global));
         // Imports load before any code runs, as in a module.
@@ -668,6 +678,9 @@ impl Frame {
             }),
             Stmt::Try { block, handler, finalizer, .. } => Box::pin(self.try_stmt(env, block, handler, finalizer)),
             Stmt::Empty(_) | Stmt::FunctionDecl(_) => ready(Ok(Completion::Normal)),
+            // Upstream 2.3.0's VM compiles an import nested in the program's own blocks (outside any function) to
+            // nothing: it binds and loads nothing. Inside a function it is still an error.
+            Stmt::Import(_) if self.program.get() => ready(Ok(Completion::Normal)),
             Stmt::Import(i) => ready(Err(locate(
                 syntax_error("An import declaration may only appear at the top level of the program."),
                 Some(i.loc),

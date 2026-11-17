@@ -1052,7 +1052,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { new Map(5) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","new Map(...) expects an iterable of [key, value] pairs, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","for...of requires an iterable value, received a number."],"toolCalls":[]}"#,
     ),
     (
         r#"try { new Map([1, 2]) } catch (e) { return [e.name, e.message] }"#,
@@ -1060,7 +1060,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { new Set(5) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","new Set(...) expects a synchronous iterable, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","for...of requires an iterable value, received a number."],"toolCalls":[]}"#,
     ),
     (
         r#"let closed = 0; const it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false } }, return() { closed++; return {} } } } }; try { new Map(it) } catch (e) { return [e.message, closed] }"#,
@@ -1132,7 +1132,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"const a = new Set([1]); try { a.union({ size: 1, has() {}, keys() { return 5 } }) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","An iterator must be an object, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","Set.union expects 'keys' to return an iterator object."],"toolCalls":[]}"#,
     ),
     (
         r#"const a = new Set([1, 2, 3]); const calls = []; const like = { size: 10, has(x) { calls.push(x); return x !== 2 }, keys() { calls.push("keys"); return [].values() } }; return [[...a.intersection(like)], calls]"#,
@@ -1144,7 +1144,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"const a = new Set([1, 2]); const like = { size: -5, has: () => false, keys: () => [].values() }; return [[...a.difference(like)], a.isSupersetOf(like), a.isSubsetOf(like)]"#,
-        r#"{"ok":true,"value":[[1,2],true,false],"toolCalls":[]}"#,
+        r#"{"ok":false,"error":{"kind":"ExecutionFailure","message":"RangeError: Set.difference received a Set-like object with a negative size. (line 1, col 110)","location":{"line":1,"column":110}},"toolCalls":[]}"#,
     ),
     (
         r#"const a = new Set([1, 2]); const like = { size: Infinity, has: () => true, keys: () => [].values() }; return [a.isSubsetOf(like), [...a.intersection(like)]]"#,
@@ -1188,7 +1188,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { new WeakMap(1) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","new WeakMap(...) expects an iterable of [key, value] pairs, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","for...of requires an iterable value, received a number."],"toolCalls":[]}"#,
     ),
     (
         r#"try { new WeakSet([1]) } catch (e) { return [e.name, e.message] }"#,
@@ -1196,7 +1196,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { new WeakSet(1) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","new WeakSet(...) expects a synchronous iterable, received a number."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","for...of requires an iterable value, received a number."],"toolCalls":[]}"#,
     ),
     (
         r#"try { WeakMap() } catch (e) { return [e.name, e.message] }"#,
@@ -1260,7 +1260,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"try { Map.groupBy(5, (x) => x) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","Map.groupBy expects an iterable collection."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","for...of requires an iterable value, received a number."],"toolCalls":[]}"#,
     ),
     (
         r#"try { Map.groupBy([1], 5) } catch (e) { return [e.name, e.message] }"#,

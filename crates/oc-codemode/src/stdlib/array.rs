@@ -22,14 +22,14 @@ use std::rc::Rc;
 use futures::future::LocalBoxFuture;
 
 use crate::interp::callback::{apply_collection_callback, invoke, Callback};
-use crate::interp::coerce::{coerce_to_integer, coerce_to_number, coerce_to_string, with_primitives, Hint};
+use crate::interp::coerce::{coerce_to_integer, coerce_to_string, to_primitive, with_primitives, Hint};
 use crate::interp::errors::{invalid_data, range_error, type_error, JsResult};
 use crate::interp::function::{
     arg, constructor, method, methods, prototype_from, receiver, Method, NResult, NativeFn,
 };
 use crate::interp::iteration::{self, iterator_object, preserve_consumer_error, ArrayCursor, Mode};
 use crate::interp::limits::{check_array_length, check_string_length, MAX_ARRAY_LENGTH, MAX_STRING_LENGTH};
-use crate::interp::references::reject_circular_insertion;
+use crate::interp::references::{is_opaque, reject_circular_insertion};
 use crate::interp::{describe_value, Rt, Site};
 use crate::object::{define, get, get_str, index_key, reject_addition, Obj, ObjKind, HIDDEN};
 use crate::value::{JsStr, PropKey, Sym, Value};
@@ -183,9 +183,15 @@ fn merge_sort(
         let mut merged = Vec::with_capacity(left.len() + right.len());
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
-            // Treat a NaN comparator result as equal to preserve stable ordering.
+            // Treat a NaN comparator result as equal to preserve stable ordering. The result is read as unary `+`
+            // reads it (upstream 2.3.0's sort is program code): an object's valueOf/toString run, a promise or
+            // other opaque value is refused.
             let result = apply(&rt, vec![left[li].clone(), right[ri].clone()], Value::Undefined, site).await?;
-            let order = coerce_to_number(&result);
+            let operand = to_primitive(&rt, &result, Hint::Number, site).await?;
+            if is_opaque(&operand) {
+                return Err(invalid_data("Unary operators require data values."));
+            }
+            let order = crate::stdlib::number::to_number(&operand)?;
             if order.is_nan() || order <= 0.0 {
                 merged.push(left[li].clone());
                 li += 1;

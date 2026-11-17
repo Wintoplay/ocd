@@ -133,7 +133,12 @@ pub fn to_host(value: &Json, label: &str, events: &Events) -> HostValue {
                 }
                 "$symbol" => HostValue::Unrepresentable("a symbol".into()),
                 "$bigint" => HostValue::Unrepresentable("a bigint".into()),
-                "$instance" => HostValue::Unrepresentable(format!("a {}", v.as_str().unwrap_or("object"))),
+                // Upstream's `describeHost`: "an" before a class name starting with A, E, I or O.
+                "$instance" => HostValue::Unrepresentable(match v.as_str().unwrap_or("") {
+                    "" => "an object".into(),
+                    name if name.starts_with(['A', 'E', 'I', 'O']) => format!("an {name}"),
+                    name => format!("a {name}"),
+                }),
                 "$promise" => HostValue::Unrepresentable("a Promise".into()),
                 _ => HostValue::Object(vec![(k.clone(), next(v, format!("{label}.{k}")))]),
             }

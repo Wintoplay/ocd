@@ -679,7 +679,7 @@ return r"####,
 }
 const m = async (f) => { try { return await f() } catch (e) { return e.name + ": " + e.message } }
 return [await m(main), await m(async () => [...new Uint8Array([2, 1]).sort(async () => 1)])]"####,
-            r####"{"ok":true,"value":[[[0,0,0],1],[2,1]],"toolCalls":[]}"####,
+            r####"{"ok":true,"value":[[[0,0,0],1],"TypeError: Unary operators require data values."],"toolCalls":[]}"####,
         ),
         (
             r####"const m = (f) => { try { return f() } catch (e) { return e.name + ": " + e.message } }

@@ -466,7 +466,9 @@ async fn read_pair(rt: &Rt, value: &Value, label: &str, site: Site) -> JsResult<
         if step.done {
             return Ok(items);
         }
-        items.push(coerce_to_string(&step.value));
+        // `String(item)`, as upstream 2.3.0's program-code pair reader converts it: an object's toString runs.
+        let text = crate::interp::coerce::to_primitive_string(rt, &step.value, site).await;
+        items.push(preserve_consumer_error(&cursor, text).await?);
     }
 }
 

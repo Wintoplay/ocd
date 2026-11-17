@@ -795,7 +795,8 @@ fn replace_with_callback(rt: &Rt, site: Site, value: JsStr, name: &'static str, 
             if r.offset > end {
                 out.extend_from_slice(&units[end..r.offset]);
             }
-            out.extend_from_slice(coerce_to_string(&replacement).units());
+            // `String(result)`, as upstream 2.3.0's program-code replace reads it: an object's toString runs.
+            out.extend_from_slice(to_primitive_string(&rt, &replacement, site).await?.units());
             end = r.offset + r.length;
         }
         if end < units.len() {

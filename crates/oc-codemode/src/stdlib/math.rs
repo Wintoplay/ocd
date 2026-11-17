@@ -754,7 +754,7 @@ pub fn math_global(rt: &Rt) -> Value {
         let source = arg(&args, 0);
         NResult::future(async move {
             let Some(cursor) = iteration::iterate(&rt, &source, None, site).await? else {
-                return Err(type_error("Math.sumPrecise expects a synchronous iterable."));
+                return Err(iteration::not_iterable(&source));
             };
             let mut numbers = Vec::new();
             loop {
