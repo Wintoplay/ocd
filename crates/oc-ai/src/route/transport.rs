@@ -24,6 +24,9 @@ pub struct PreparedRequest {
     pub json_body: Value,
     /// `http.encoding`: compress the body when it is sent (`jsonPost`'s `encoding`).
     pub encoding: Option<RequestEncoding>,
+    /// `http.tls`: the client certificate presented when the request goes to an `https:` URL
+    /// (`RequestExecutor.withTls`).
+    pub tls: Option<crate::types::ClientTls>,
 }
 
 /// `compressBody`: a `zstd` or `gzip` body with its `content-encoding`. Compression is an
@@ -113,6 +116,7 @@ pub async fn prepare_json(request: &LLMRequest, body: Value) -> Result<PreparedR
     let mut prepared = json_request_parts(request, body).await?;
     prepared.headers.insert("content-type".into(), "application/json".into());
     prepared.encoding = request.http.as_ref().and_then(|h| h.encoding);
+    prepared.tls = request.http.as_ref().and_then(|h| h.tls.clone());
     Ok(prepared)
 }
 
@@ -135,7 +139,7 @@ pub async fn json_request_parts(request: &LLMRequest, body: Value) -> Result<Pre
         auth::AuthInput { method: "POST", url: &url, body: &body_text, headers },
     )
     .await?;
-    Ok(PreparedRequest { method: "POST".into(), url, headers, body: body_text, json_body, encoding: None })
+    Ok(PreparedRequest { method: "POST".into(), url, headers, body: body_text, json_body, encoding: None, tls: None })
 }
 
 /// Executed response: HTTP context and raw byte stream.
@@ -212,8 +216,57 @@ pub fn system_message(code: &str, host: &str) -> String {
     }
 }
 
+/// The client that sends a request to `url`: the certified client of `tls` on an `https:` URL (upstream's
+/// `withClientCertificate`), else `client`. A certificate or key that can't be used fails the request the way Bun's
+/// `fetch` does (`FailedToOpenSocket`).
+pub fn certified(client: &reqwest::Client, tls: Option<&crate::types::ClientTls>, url: &str) -> Result<(reqwest::Client, bool), AIError> {
+    let Some(tls) = tls.filter(|_| url.starts_with("https:")) else { return Ok((client.clone(), false)) };
+    match oc_util::http::certified_client(tls) {
+        Ok(client) => Ok((client, true)),
+        Err(reason) => {
+            tracing::warn!(%url, %reason, "the provider's client certificate can't be used");
+            let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+            Err(AIError::transport(TransportOperation::Request, system_message("FailedToOpenSocket", &host), Some("FailedToOpenSocket"), Some(url)))
+        }
+    }
+}
+
+/// A certified request answered with a redirect: Bun's `redirect: "error"` failure.
+pub fn redirect_error(url: &str) -> AIError {
+    AIError::transport(TransportOperation::Request, oc_util::http::unexpected_redirect(url), Some("UnexpectedRedirect"), Some(url))
+}
+
+/// Whether the TLS peer ended the handshake with an alert (a server that requires a client certificate the request
+/// didn't present): Bun's `EPROTO`. With TLS 1.3 the server's alert follows the client's half of the handshake, so the
+/// HTTP client usually only sees the new connection close before it could be used.
+fn tls_alert(error: &(dyn std::error::Error + 'static), url: &str) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let mut text = String::new();
+    while let Some(s) = source {
+        text.push_str(&s.to_string());
+        text.push('\n');
+        let tls = s.downcast_ref::<rustls::Error>().or_else(|| {
+            s.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()).and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        });
+        if matches!(tls, Some(rustls::Error::AlertReceived(_))) {
+            return true;
+        }
+        source = s.source();
+    }
+    url.starts_with("https:") && text.contains("connection was not ready")
+}
+
 /// `httpError` for a request that failed to send: the code and message upstream's transport reports.
 pub fn send_error(error: &reqwest::Error, url: &str) -> AIError {
+    if !error.is_timeout() && tls_alert(error, url) {
+        return AIError::transport(
+            TransportOperation::Request,
+            "EPROTO: The TLS handshake failed. Does the server speak TLS on this port?",
+            Some("EPROTO"),
+            Some(url),
+        )
+        .with_cause(error);
+    }
     let system = if error.is_connect() { system_code(error) } else { None };
     let (code, message) = match system {
         _ if error.is_timeout() => ("Timeout", reqwest_message(error)),
@@ -274,7 +327,9 @@ pub async fn execute_with(
         Some(w) => (w.method.as_str(), w.url.as_str()),
         None => (prepared.method.as_str(), prepared.url.as_str()),
     };
+    let (client, certified) = certified(client, prepared.tls.as_ref(), url)?;
     let mut builder = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST), url);
+    let sent_url = url.to_string();
     match &hooked {
         Some(w) => {
             for (k, v) in &w.headers {
@@ -323,6 +378,10 @@ pub async fn execute_with(
         None => send.await,
     };
     let response = response.map_err(|e| send_error(&e, &prepared.url))?;
+    // A followed redirect would present the certificate to whatever host the server names.
+    if certified && oc_util::http::is_redirect(response.status().as_u16(), response.headers()) {
+        return Err(redirect_error(&sent_url));
+    }
     if let (Some(hook), Some(sent)) = (hook, &hooked)
         && hook.wants_response()
     {

@@ -202,7 +202,19 @@ async function throughMiddleware(store: Middleware, send: Fetch, input: any, ini
 }
 
 // `Provider.Settings` fields OpenCode reads itself; every other key is a provider option (`Provider.nativeSettings`).
-const SETTINGS_KEYS = ["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding"]
+const SETTINGS_KEYS = ["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding", "tls"]
+
+/** `Provider.tls`: the client certificate of `settings.tls`. An empty `cert` or `key`, such as a missing `{file:}`, or
+ * another shape leaves it unset. */
+function tls(settings: Record<string, unknown>) {
+  const value = settings.tls
+  if (!isRecord(value)) return undefined
+  const { cert, key, passphrase } = value
+  if (typeof cert !== "string" || typeof key !== "string") return undefined
+  if (passphrase !== undefined && typeof passphrase !== "string") return undefined
+  if (!cert || !key) return undefined
+  return passphrase === undefined ? { cert, key } : { cert, key, passphrase }
+}
 
 function nativeSettings(settings: Record<string, unknown>) {
   return Object.fromEntries(Object.entries(settings).filter(([key]) => !SETTINGS_KEYS.includes(key)))
@@ -243,6 +255,7 @@ function prepareOptions(model: any, pkg: string) {
   }
   const customFetch = settings.fetch
   const limits = timeouts(settings)
+  const certificate = tls(settings)
   options.fetch = async (input: any, init?: any) => {
     const opts = { ...(init ?? {}) }
     // The header limit is cleared once headers arrive; the whole-request limit spans the body.
@@ -264,7 +277,12 @@ function prepareOptions(model: any, pkg: string) {
       } catch {}
       if (isRecord(decoded)) opts.body = JSON.stringify(mergeOverlay(decoded, model.body))
     }
-    const send: Fetch = typeof customFetch === "function" ? customFetch : fetch
+    const https = String(input instanceof Request ? input.url : input).startsWith("https:")
+    // Bun's fetch takes the client certificate per request. A followed redirect keeps the TLS options, so it would
+    // present the client certificate to another host.
+    const certified = certificate && https
+    if (certified) Object.assign(opts, { tls: certificate }, { redirect: "error" })
+    const send: Fetch = certified ? fetch : typeof customFetch === "function" ? customFetch : fetch
     const middleware = httpMiddleware.getStore()
     const res = await (
       middleware

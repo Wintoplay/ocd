@@ -239,7 +239,12 @@ pub struct HttpOptions {
     /// Compression for JSON request bodies. Only set it for endpoints known to decode it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<RequestEncoding>,
+    /// Client certificate presented to HTTPS endpoints that request one (mutual TLS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ClientTls>,
 }
+
+pub use oc_util::http::ClientTls;
 
 fn merge_string_maps(items: &[Option<&IndexMap<String, String>>]) -> Option<IndexMap<String, String>> {
     let defined: Vec<_> = items.iter().flatten().collect();
@@ -273,6 +278,7 @@ impl HttpOptions {
         let header_timeout = last(|h| h.header_timeout);
         let chunk_timeout = last(|h| h.chunk_timeout);
         let encoding = items.iter().rev().flatten().find_map(|h| h.encoding);
+        let tls = items.iter().rev().flatten().find_map(|h| h.tls.clone());
         if body.is_none()
             && headers.is_none()
             && query.is_none()
@@ -280,10 +286,11 @@ impl HttpOptions {
             && header_timeout.is_none()
             && chunk_timeout.is_none()
             && encoding.is_none()
+            && tls.is_none()
         {
             return None;
         }
-        Some(HttpOptions { body, headers, query, timeout, header_timeout, chunk_timeout, encoding })
+        Some(HttpOptions { body, headers, query, timeout, header_timeout, chunk_timeout, encoding, tls })
     }
 }
 

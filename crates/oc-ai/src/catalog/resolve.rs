@@ -378,7 +378,7 @@ pub fn from_catalog_model(
     let defaults = runtime.defaults.clone().unwrap_or_default();
     // Timeouts and body encoding are transport policy, so they land on the route's HTTP defaults
     // instead of package settings.
-    let transport = HttpOptions { encoding: encoding(&configured), ..timeouts(&configured) };
+    let transport = HttpOptions { encoding: encoding(&configured), tls: crate::types::ClientTls::from_settings(configured.get("tls")), ..timeouts(&configured) };
     let http = HttpOptions::merge(&[defaults.http.as_ref(), Some(&transport)]);
     let runtime = runtime.with_defaults(ModelDefaults { http, ..defaults });
 
@@ -596,9 +596,20 @@ pub fn from_catalog_media(
         package: if package.is_empty() { "unknown".into() } else { package.clone() },
         detail: cause.message,
     };
+    // The model's client certificate rides on its HTTP options: the submit (and a protocol's prepare POST) presents
+    // it, polls and downloads don't.
+    let tls = crate::types::ClientTls::from_settings(configured.get("tls"));
+    let with_tls = |http: Option<HttpOptions>| match &tls {
+        Some(tls) => HttpOptions::merge(&[http.as_ref(), Some(&HttpOptions { tls: Some(tls.clone()), ..Default::default() })]),
+        None => http,
+    };
     match kind {
         MediaType::Image => match crate::providers::media::image_model(&specifier, &resolved.model_id, &settings) {
-            Some(built) => Ok(MediaModel::Image(built.map_err(construction)?)),
+            Some(built) => {
+                let mut model = built.map_err(construction)?;
+                model.http = with_tls(model.http.take());
+                Ok(MediaModel::Image(model))
+            }
             None => Err(unsupported()),
         },
         MediaType::Decision => match crate::providers::media::decision_model(&specifier, &resolved.model_id, &settings) {
@@ -608,6 +619,7 @@ pub fn from_catalog_media(
                 if let Some(media_input) = resolved.compatibility.as_ref().and_then(|c| c.media_input.clone()) {
                     model.media_input = Some(media_input);
                 }
+                model.http = with_tls(model.http.take());
                 Ok(MediaModel::Decision(model))
             }
             None => Err(unsupported()),
@@ -675,7 +687,11 @@ pub fn resolve_model(
             .and_then(|c| c.get("type"))
             .and_then(Value::as_str)
             .map(String::from),
-        transport: provider.and_then(|p| p.transport()).map(String::from),
+        // The WebSocket transport can't present a client certificate, so `tls` keeps the model on HTTP.
+        transport: match provider {
+            Some(p) if crate::types::ClientTls::from_settings(p.setting("tls")).is_some() => Some("http".into()),
+            p => p.and_then(|p| p.transport()).map(String::from),
+        },
         chunk_timeout: timeout(provider.and_then(|p| p.setting("chunkTimeout"))),
         cache: runtime_info.settings.as_ref().and_then(|s| s.get("cache")).and_then(Value::as_object).cloned(),
     })

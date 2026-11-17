@@ -335,6 +335,8 @@ pub struct MediaCall {
     pub url: String,
     pub headers: Headers,
     pub body: Option<(Vec<u8>, Option<String>)>,
+    /// The client certificate of a submit to the model's host (never of polls or downloads).
+    pub tls: Option<crate::types::ClientTls>,
 }
 
 /// `makeTransport(...).submit`: POST the protocol body to the rendered endpoint with the merged HTTP options.
@@ -383,7 +385,7 @@ pub async fn prepare<R>(
     if let Some((_, Some(content_type))) = &encoded {
         headers.insert("content-type".into(), content_type.clone());
     }
-    Ok(MediaCall { method: "POST".into(), url, headers, body: encoded.map(|(b, _)| (b, None)) })
+    Ok(MediaCall { method: "POST".into(), url, headers, body: encoded.map(|(b, _)| (b, None)), tls: http.and_then(|h| h.tls.clone()) })
 }
 
 fn reqwest_message(error: &reqwest::Error) -> String {
@@ -402,6 +404,7 @@ fn reqwest_message(error: &reqwest::Error) -> String {
 /// `RequestExecutor.execute`: send, read the whole body, and classify a status of 400 or more.
 pub async fn execute(client: &reqwest::Client, call: &MediaCall) -> Result<MediaResponse, AIError> {
     let method = reqwest::Method::from_bytes(call.method.as_bytes()).unwrap_or(reqwest::Method::POST);
+    let (client, certified) = super::transport::certified(client, call.tls.as_ref(), &call.url)?;
     let mut builder = client.request(method, &call.url);
     for (k, v) in &call.headers {
         builder = builder.header(k, v);
@@ -417,6 +420,9 @@ pub async fn execute(client: &reqwest::Client, call: &MediaCall) -> Result<Media
         error.cause = None;
         error
     })?;
+    if certified && oc_util::http::is_redirect(response.status().as_u16(), response.headers()) {
+        return Err(super::transport::redirect_error(&call.url));
+    }
     let status = response.status().as_u16();
     let url = response.url().to_string();
     let mut headers = IndexMap::new();
@@ -448,6 +454,7 @@ pub async fn download(client: &reqwest::Client, url: &str, headers: Option<&Inde
         url: url.to_string(),
         headers: headers.map(super::normalize_headers).unwrap_or_default(),
         body: None,
+        tls: None,
     };
     let response = execute(client, &call).await?;
     Ok(response.body.to_vec())

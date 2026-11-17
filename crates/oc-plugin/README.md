@@ -445,7 +445,7 @@ explicitly configured `aisdk:@ai-sdk/github-copilot` package installs from npm l
 | step | where | upstream |
 |---|---|---|
 | route, request lowering to `LanguageModelV3CallOptions`, raising stream parts to LLM events, error classification | oc-ai `src/aisdk.rs` | `modelFromLanguage`, `callOptions`/`prompt`, `streamLanguage`/`streamPartEvents`, `llmError` |
-| package install/import, `aisdk.sdk` / `aisdk.language` hooks (internal provider plugins, then plugins), SDK and language caches, `prepareOptions` (SDK options, timed `fetch`, extra body, header/chunk timeouts), `doStream`, error shapes | sidecar `host/src/aisdk.ts` | `AISDK.Service.language`, `prepareOptions`, `wrapSSE`, `loadSDKFactory`, the internal plugins |
+| package install/import, `aisdk.sdk` / `aisdk.language` hooks (internal provider plugins, then plugins), SDK and language caches, `prepareOptions` (SDK options, timed `fetch`, extra body, header/chunk timeouts, the provider's client certificate `settings.tls` on `https:` requests through Bun's `fetch` with `redirect: "error"`), `doStream`, error shapes | sidecar `host/src/aisdk.ts` | `AISDK.Service.language`, `prepareOptions`, `wrapSSE`, `loadSDKFactory`, the internal plugins |
 | JSON-RPC plumbing, part streams, `session.http.*` callbacks, npm installs | `src/aisdk.rs` (`PluginHost::aisdk_load/aisdk_stream/aisdk_close`) | — |
 | per-location bridge, resolution sites | oc-core `src/aisdk.rs` (`LocationBridge`), `Models::resolve_model` | `ModelResolver.layer` |
 

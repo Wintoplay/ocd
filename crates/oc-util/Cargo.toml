@@ -27,6 +27,13 @@ rustls.workspace = true
 webpki-roots.workspace = true
 webpki.workspace = true
 sha1 = "0.10"
+base64.workspace = true
+pkcs8 = { version = "0.10", features = ["encryption", "3des", "std"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+des = "0.8"
+md5 = { package = "md-5", version = "0.10" }
 uuid = { version = "1", features = ["v4"] }
 qrcodegen = "1.8"
 

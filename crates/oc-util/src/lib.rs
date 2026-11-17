@@ -4,6 +4,7 @@ pub mod flock;
 pub mod fs;
 pub mod global;
 pub mod hash;
+pub mod client_key;
 pub mod http;
 pub mod jsonc;
 pub mod log;

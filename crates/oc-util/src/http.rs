@@ -15,8 +15,13 @@
 //! (what a plain `openssl req -x509` makes) is accepted as the server certificate, after the host name check.
 //!
 //! The certificates are read once, at the first handshake (or by [`preload`]), and shared by every client.
+//!
+//! A provider's client certificate (`settings.tls`, [`ClientTls`]) is presented by a second client per certificate
+//! ([`certified_client`]): the same trust and ALPN, the certificate for servers that ask for one, and no redirects,
+//! so the certificate never reaches a host the server names (upstream sends those requests with
+//! `redirect: "error"`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -201,6 +206,90 @@ fn client_config(source: Source, alpn: &[&[u8]]) -> ClientConfig {
         .with_no_client_auth();
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     config
+}
+
+/// [`client_config`] presenting a client certificate.
+fn certified_config(source: Source, alpn: &[&[u8]], tls: &ClientTls) -> Result<ClientConfig, String> {
+    let chain = crate::client_key::certificates(&tls.cert)?;
+    let key = crate::client_key::private_key(&tls.key, tls.passphrase.as_deref())?;
+    let provider = provider();
+    let mut config = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("default TLS versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Verifier { source, provider }))
+        .with_client_auth_cert(chain, key)
+        .map_err(|e| e.to_string())?;
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Ok(config)
+}
+
+/// A provider's client certificate (`Provider.Tls`): PEM certificate (chain) and private key, with the passphrase of
+/// an encrypted key.
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ClientTls {
+    pub cert: String,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for ClientTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientTls").field("cert", &format_args!("<{} bytes>", self.cert.len())).finish_non_exhaustive()
+    }
+}
+
+impl ClientTls {
+    /// `Provider.tls(settings)`: the certificate of a `settings.tls` value. An invalid shape, or an empty `cert` or
+    /// `key` (such as a missing `{file:}`), leaves it unset.
+    pub fn from_settings(value: Option<&serde_json::Value>) -> Option<ClientTls> {
+        let object = value?.as_object()?;
+        let text = |key: &str| object.get(key).and_then(serde_json::Value::as_str).map(String::from);
+        let passphrase = match object.get("passphrase") {
+            None => None,
+            Some(serde_json::Value::String(p)) => Some(p.clone()),
+            Some(_) => return None,
+        };
+        let (cert, key) = (text("cert")?, text("key")?);
+        if cert.is_empty() || key.is_empty() {
+            return None;
+        }
+        Some(ClientTls { cert, key, passphrase })
+    }
+}
+
+/// One client per certificate (like upstream's agent per certificate), so its connections are pooled. A certificate
+/// that can't be loaded is remembered with its reason.
+static CERTIFIED: LazyLock<parking_lot::Mutex<HashMap<ClientTls, Result<reqwest::Client, String>>>> = LazyLock::new(Default::default);
+
+/// The client that presents `tls` to HTTPS servers asking for a client certificate: upstream's trust, `fetch`'s proxy
+/// rules, and no redirects. `Err`: why the certificate or key can't be used.
+pub fn certified_client(tls: &ClientTls) -> Result<reqwest::Client, String> {
+    let mut clients = CERTIFIED.lock();
+    if let Some(client) = clients.get(tls) {
+        return client.clone();
+    }
+    let client = certified_config(Source::Global, &[b"h2", b"http/1.1"], tls).and_then(|config| {
+        reqwest::Client::builder()
+            .use_preconfigured_tls(config)
+            .proxy(reqwest::Proxy::custom(|url| crate::proxy::fetch_proxy(&crate::proxy::process_env, url)))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())
+    });
+    clients.insert(tls.clone(), client.clone());
+    client
+}
+
+/// The statuses fetch follows; a certified request answered with one of them (and a `Location`) fails instead.
+pub fn is_redirect(status: u16, headers: &reqwest::header::HeaderMap) -> bool {
+    REDIRECT_STATUSES.contains(&status) && headers.contains_key(reqwest::header::LOCATION)
+}
+
+/// Bun's `fetch` error for a redirect under `redirect: "error"` (code `UnexpectedRedirect`).
+pub fn unexpected_redirect(url: &str) -> String {
+    format!("UnexpectedRedirect fetching \"{url}\". For more information, pass `verbose: true` in the second argument to fetch()")
 }
 
 #[derive(Default)]
@@ -448,6 +537,54 @@ mod tests {
         assert!(is_self_issued(ca.der()));
         assert!(!is_self_issued(leaf.der()));
         assert!(!is_self_issued(b"\x30\x03\x02\x01"));
+    }
+
+    fn client_cert() -> (String, String) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["client".to_string()]).unwrap().self_signed(&key).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    #[test]
+    fn client_certificates() {
+        let (cert, key) = client_cert();
+        let tls = ClientTls { cert: cert.clone(), key: key.clone(), passphrase: None };
+        assert!(certified_client(&tls).is_ok());
+        // The key of another certificate, a key that isn't one, or no certificate.
+        let (_, other) = client_cert();
+        assert!(certified_client(&ClientTls { key: other, ..tls.clone() }).is_err());
+        assert!(certified_client(&ClientTls { key: cert.clone(), ..tls.clone() }).is_err());
+        assert!(certified_client(&ClientTls { cert: key.clone(), ..tls.clone() }).is_err());
+    }
+
+    #[test]
+    fn tls_settings() {
+        use serde_json::json;
+        let tls = |v: serde_json::Value| ClientTls::from_settings(Some(&v));
+        assert_eq!(tls(json!({"cert": "C", "key": "K"})), Some(ClientTls { cert: "C".into(), key: "K".into(), passphrase: None }));
+        assert_eq!(tls(json!({"cert": "C", "key": "K", "passphrase": "p", "extra": 1})).unwrap().passphrase.as_deref(), Some("p"));
+        // A missing `{file:}` is an empty string; a wrong shape is no certificate.
+        assert_eq!(tls(json!({"cert": "", "key": "K"})), None);
+        assert_eq!(tls(json!({"cert": "C", "key": ""})), None);
+        assert_eq!(tls(json!({"cert": "C"})), None);
+        assert_eq!(tls(json!({"cert": "C", "key": "K", "passphrase": 1})), None);
+        assert_eq!(tls(json!("pem")), None);
+        assert_eq!(ClientTls::from_settings(None), None);
+    }
+
+    #[test]
+    fn redirects() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(!is_redirect(307, &headers));
+        headers.insert(reqwest::header::LOCATION, "https://elsewhere/".parse().unwrap());
+        for status in [301, 302, 303, 307, 308] {
+            assert!(is_redirect(status, &headers));
+        }
+        assert!(!is_redirect(200, &headers));
+        assert_eq!(
+            unexpected_redirect("https://h/v1"),
+            "UnexpectedRedirect fetching \"https://h/v1\". For more information, pass `verbose: true` in the second argument to fetch()"
+        );
     }
 
     #[test]
