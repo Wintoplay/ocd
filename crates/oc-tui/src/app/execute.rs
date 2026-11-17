@@ -28,19 +28,10 @@ fn output_text(t: &ToolPart) -> Option<String> {
     }
 }
 
-/// A JSON result, optionally followed by "\n\nWarnings:" or "\n\nLogs:".
+/// A JSON result shows indented and highlighted, with any "Warnings:" and "Logs:" sections below it.
 fn highlighted_output(text: &str) -> Option<(String, Option<String>)> {
-    if !text.starts_with('{') && !text.starts_with('[') {
-        return None;
-    }
-    let end = ["\n\nWarnings:\n", "\n\nLogs:\n"].iter().filter_map(|m| text.find(m)).min();
-    let json = match end {
-        Some(i) => &text[..i],
-        None => text,
-    };
-    serde_json::from_str::<Value>(json).ok()?;
-    let rest = text[json.len()..].trim();
-    Some((json.to_string(), (!rest.is_empty()).then(|| rest.to_string())))
+    let formatted = oc_codemode::execute_tool::format_execute_output(text);
+    Some((formatted.json?, formatted.rest))
 }
 
 fn line_count(text: Option<&str>) -> usize {
@@ -204,8 +195,8 @@ mod tests {
 
     #[test]
     fn json_output_splits_off_warnings() {
-        assert_eq!(highlighted_output("{\"a\":1}\n\nLogs:\nhello"), Some(("{\"a\":1}".into(), Some("Logs:\nhello".into()))));
-        assert_eq!(highlighted_output("[1,2]"), Some(("[1,2]".into(), None)));
+        assert_eq!(highlighted_output("{\"a\":1}\n\nLogs:\nhello"), Some(("{\n  \"a\": 1\n}".into(), Some("Logs:\nhello".into()))));
+        assert_eq!(highlighted_output("[1,2]"), Some(("[\n  1,\n  2\n]".into(), None)));
         assert_eq!(highlighted_output("{not json"), None);
         assert_eq!(highlighted_output("plain"), None);
     }

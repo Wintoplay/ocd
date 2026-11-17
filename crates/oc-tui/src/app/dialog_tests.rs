@@ -310,7 +310,10 @@ fn execute_detail_dialog() {
     assert_eq!(col(row(&lines, "Code"), "Code"), 15);
     assert!(contains(&lines, "1 const a = 1"), "{joined}");
     assert!(contains(&lines, "2 return a"), "{joined}");
-    assert!(contains(&lines, "1 {\"a\":1}"), "{joined}");
+    // The compact JSON result is shown indented (`formatExecuteOutput`).
+    assert!(contains(&lines, "1 {"), "{joined}");
+    assert!(contains(&lines, "2   \"a\": 1"), "{joined}");
+    assert!(contains(&lines, "3 }"), "{joined}");
     assert_eq!(col(row(&lines, "Logs:"), "Logs:"), 17, "{joined}");
     assert!(contains(&lines, "scroll ↑/↓  copy code c  copy output o  back esc"), "{joined}");
     a.on_key(Stroke::key("c"));

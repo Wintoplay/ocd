@@ -549,17 +549,104 @@ pub fn text_encoder_global(rt: &Rt) -> Value {
     ))
 }
 
-/// The options a `TextDecoder` was built with (always UTF-8).
-#[derive(Clone, Copy)]
+/// A `TextDecoder`: the options it was built with (always UTF-8) and its stream state, the bytes of an unfinished
+/// character (`queued`) and whether a stream already produced text (`seen`, so only its first BOM is stripped).
 struct Decoder {
     fatal: bool,
     ignore_bom: bool,
+    queued: Vec<u8>,
+    seen: bool,
+}
+
+/// Where a streamed chunk stops being decodable (`streamBoundary`): replacement mode only needs to find an
+/// incomplete suffix (at most three bytes); fatal mode also reports the first error, with the position after it.
+fn stream_boundary(bytes: &[u8], fatal: bool) -> (usize, bool) {
+    let mut next = if fatal { 0 } else { bytes.len().saturating_sub(3) };
+    while next < bytes.len() {
+        let start = next;
+        let lead = bytes[next];
+        next += 1;
+        if lead < 0x80 {
+            continue;
+        }
+        if !(0xC2..=0xF4).contains(&lead) {
+            if fatal {
+                return (next, true);
+            }
+            continue;
+        }
+        let width = if lead < 0xE0 { 2 } else if lead < 0xF0 { 3 } else { 4 };
+        let mut lower = match lead {
+            0xE0 => 0xA0,
+            0xF0 => 0x90,
+            _ => 0x80,
+        };
+        let mut upper = match lead {
+            0xED => 0x9F,
+            0xF4 => 0x8F,
+            _ => 0xBF,
+        };
+        while next < start + width {
+            if next == bytes.len() {
+                return (start, false);
+            }
+            let byte = bytes[next];
+            // A bad continuation is reprocessed as a leading byte, even after a fatal error.
+            if byte < lower || byte > upper {
+                if fatal {
+                    return (next, true);
+                }
+                break;
+            }
+            next += 1;
+            lower = 0x80;
+            upper = 0xBF;
+        }
+    }
+    (next, false)
+}
+
+impl Decoder {
+    fn decode(&mut self, bytes: &[u8], stream: bool) -> JsResult<String> {
+        let mut input: Vec<u8> = if !self.queued.is_empty() && !bytes.is_empty() {
+            check_array_length((self.queued.len() + bytes.len()) as f64)?;
+            let mut joined = std::mem::take(&mut self.queued);
+            joined.extend_from_slice(bytes);
+            joined
+        } else if bytes.is_empty() {
+            std::mem::take(&mut self.queued)
+        } else {
+            bytes.to_vec()
+        };
+        let (end, error) = if stream { stream_boundary(&input, self.fatal) } else { (input.len(), false) };
+        self.queued = if end < input.len() { input.split_off(end) } else { Vec::new() };
+        let invalid = || type_error("TextDecoder.decode: the input is not valid utf-8.");
+        if error {
+            return Err(invalid());
+        }
+        let strip_bom = !self.ignore_bom && !self.seen;
+        if !stream {
+            self.seen = false;
+        }
+        let text = if self.fatal {
+            String::from_utf8(input).map_err(|_| invalid())?
+        } else {
+            String::from_utf8_lossy(&input).into_owned()
+        };
+        if stream && !text.is_empty() {
+            self.seen = true;
+        }
+        Ok(match text.strip_prefix('\u{FEFF}') {
+            Some(rest) if strip_bom => rest.to_string(),
+            _ => text,
+        })
+    }
 }
 
 thread_local! {
     /// TextDecoder state by object. A TextDecoder is an ordinary object upstream (`TextDecoderObj extends Obj`), so
     /// it has no `ObjKind`; the weak handle keeps the address from being reused while the entry exists.
-    static DECODERS: RefCell<HashMap<usize, (Weak<ObjData>, Decoder)>> = RefCell::new(HashMap::new());
+    static DECODERS: RefCell<HashMap<usize, (Weak<ObjData>, Rc<RefCell<Decoder>>)>> = RefCell::new(HashMap::new());
 }
 
 fn register_decoder(o: &Obj, decoder: Decoder) {
@@ -568,15 +655,17 @@ fn register_decoder(o: &Obj, decoder: Decoder) {
         if d.len() >= 1024 && d.len().is_power_of_two() {
             d.retain(|_, (w, _)| w.strong_count() > 0);
         }
-        d.insert(o.addr(), (Rc::downgrade(&o.0), decoder));
+        d.insert(o.addr(), (Rc::downgrade(&o.0), Rc::new(RefCell::new(decoder))));
     });
 }
 
-fn decoder_of(o: &Obj) -> Option<Decoder> {
-    DECODERS.with(|d| d.borrow().get(&o.addr()).and_then(|(w, dec)| (w.as_ptr() == Rc::as_ptr(&o.0)).then_some(*dec)))
+fn decoder_of(o: &Obj) -> Option<Rc<RefCell<Decoder>>> {
+    DECODERS.with(|d| {
+        d.borrow().get(&o.addr()).and_then(|(w, dec)| (w.as_ptr() == Rc::as_ptr(&o.0)).then(|| dec.clone()))
+    })
 }
 
-fn decoder_receiver(this: &Value, name: &str) -> JsResult<Decoder> {
+fn decoder_receiver(this: &Value, name: &str) -> JsResult<Rc<RefCell<Decoder>>> {
     let o = receiver(this, &format!("TextDecoder.prototype.{name}"), |o| decoder_of(o).is_some())?;
     Ok(decoder_of(&o).expect("receiver checked"))
 }
@@ -589,8 +678,9 @@ pub fn text_decoder_global(rt: &Rt) -> Value {
     let proto = rt.builtins.text_decoder.clone();
     let fp = rt.builtins.function.clone();
     let encoding: Getter = Rc::new(|this| decoder_receiver(this, "encoding").map(|_| Value::str("utf-8")));
-    let fatal: Getter = Rc::new(|this| decoder_receiver(this, "fatal").map(|d| Value::Bool(d.fatal)));
-    let ignore_bom: Getter = Rc::new(|this| decoder_receiver(this, "ignoreBOM").map(|d| Value::Bool(d.ignore_bom)));
+    let fatal: Getter = Rc::new(|this| decoder_receiver(this, "fatal").map(|d| Value::Bool(d.borrow().fatal)));
+    let ignore_bom: Getter =
+        Rc::new(|this| decoder_receiver(this, "ignoreBOM").map(|d| Value::Bool(d.borrow().ignore_bom)));
     define_accessor(&proto, "encoding", Some(encoding), None);
     define_accessor(&proto, "fatal", Some(fatal), None);
     define_accessor(&proto, "ignoreBOM", Some(ignore_bom), None);
@@ -601,10 +691,8 @@ pub fn text_decoder_global(rt: &Rt) -> Value {
             NResult::from((|| {
                 let decoder = decoder_receiver(&this, "decode")?;
                 let input = arg(&args, 0);
-                if input.is_undefined() {
-                    return Ok(Value::str(""));
-                }
                 let bytes = match &input {
+                    Value::Undefined => Vec::new(),
                     Value::Object(o) if o.bytes().is_some() => view_of(o).to_vec(),
                     other => {
                         return Err(type_error(format!(
@@ -613,18 +701,15 @@ pub fn text_decoder_global(rt: &Rt) -> Value {
                         )));
                     }
                 };
-                let body = if !decoder.ignore_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                    &bytes[3..]
-                } else {
-                    &bytes[..]
+                let options = arg(&args, 1);
+                if !options.is_undefined() && options.js_typeof() != "object" {
+                    return Err(type_error("TextDecoder.decode expects an options object."));
+                }
+                let stream = match &options {
+                    Value::Object(o) => get(o, &PropKey::str("stream"))?.truthy(),
+                    _ => false,
                 };
-                let text = if decoder.fatal {
-                    std::str::from_utf8(body)
-                        .map_err(|_| type_error("TextDecoder.decode: the input is not valid utf-8."))?
-                        .to_string()
-                } else {
-                    String::from_utf8_lossy(body).into_owned()
-                };
+                let text = decoder.borrow_mut().decode(&bytes, stream)?;
                 Ok(Value::from(text))
             })())
         })],
@@ -659,7 +744,8 @@ pub fn text_decoder_global(rt: &Rt) -> Value {
                             None => Ok(false),
                         }
                     };
-                    let decoder = Decoder { fatal: flag("fatal")?, ignore_bom: flag("ignoreBOM")? };
+                    let decoder =
+                        Decoder { fatal: flag("fatal")?, ignore_bom: flag("ignoreBOM")?, queued: Vec::new(), seen: false };
                     let obj = Obj::ordinary(&prototype_from(&new_target, &construct_proto));
                     register_decoder(&obj, decoder);
                     Ok(Value::Object(obj))

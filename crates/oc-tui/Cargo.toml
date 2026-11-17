@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 oc-util = { path = "../oc-util" }
+oc-codemode = { path = "../oc-codemode" }
 tokio.workspace = true
 futures.workspace = true
 ratatui.workspace = true

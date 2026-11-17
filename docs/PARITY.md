@@ -96,11 +96,11 @@ The Code Mode interpreter (`crates/oc-codemode`) is checked against recordings o
 test suite rather than by these scenarios: `crates/oc-codemode/tests/recorder/record.sh` instruments upstream, runs
 its suite and the vendored test262 corpus, and records every program with its tools, limits, host calls and
 `Result`; `cargo test -p oc-codemode` replays them (see that crate's README, Tests). Two corpora are replayed:
-upstream 2.2.2 (legacy interpreter) and upstream 2.3.0, where the bytecode VM is the only engine. On 2.3.0, 1 831 of
+upstream 2.2.2 (legacy interpreter) and upstream 2.3.0, where the bytecode VM is the only engine. On 2.3.0, 1 841 of
 1 843 recorded programs and 3 339 of the 3 340 sampled test262 files give the identical `Result`; the rest are the
-two permanent divergences of the 2.2 corpus and 10 records of 2.3.0 features not ported yet (BM25 `search`,
-namespace-call suggestions, `TextDecoder` streaming), listed with their batch in
-`crates/oc-codemode/tests/fixtures/replay-skips-2.3.0.txt`. No recorded program differs because of the engine change.
+two permanent divergences of the 2.2 corpus (`crates/oc-codemode/tests/fixtures/replay-skips-2.3.0.txt`). 2.3.0's
+BM25 `search` ranking and namespace-call suggestions are also checked on a generated 400-tool catalog
+(`crates/oc-codemode/tests/search_ranking.rs`, 272 programs). No recorded program differs because of the engine change.
 Probing past upstream's tests (the `tests/stdlib_*.rs` cases and targeted programs, run through 2.2.7 and 2.3.0) did
 find VM differences: the VM's standard library is partly program code, so some error texts, coercions and nested
 imports changed. ocd follows them (`crates/oc-codemode/tests/upstream_2_3_0.rs`) except the VM's lazy check of an

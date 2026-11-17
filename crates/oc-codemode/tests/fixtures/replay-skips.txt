@@ -2,3 +2,5 @@
 # Format: <test file>\t<seq>\t<reason>
 promise.test.ts	64	upstream waits for an uninterruptible tool cleanup (400 ms) past the timeout; Rust host futures are dropped immediately, so no TimeoutExceeded warning
 promise.test.ts	65	same as seq 64 (uninterruptible tool cleanup past the timeout)
+codemode.test.ts	65	2.3.0 changed this: search ranks by BM25 over whole words, so "zones" no longer finds get_timezones (2.3.0 corpus, codemode.test.ts 67)
+tool-paths.test.ts	14	2.3.0 changed this: calling a namespace names its tools (#63697; 2.3.0 corpus, tool-paths.test.ts 14)

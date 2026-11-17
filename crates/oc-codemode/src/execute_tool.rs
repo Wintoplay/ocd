@@ -69,14 +69,70 @@ pub struct ExecuteOutput {
     pub files: Vec<ExecuteFile>,
 }
 
+// Compact JSON: indentation adds tokens on every later step without helping the model. Clients pretty-print it
+// (`format_execute_output`).
 fn format_value(value: &Json) -> String {
     match value {
         Json::String(s) => s.clone(),
-        other => crate::data::stringify(other, "  "),
+        other => crate::data::stringify(other, ""),
     }
 }
 
-/// The text output of an execution: the value (strings verbatim, else pretty JSON) or the error message plus
+/// `formatExecuteOutput` (`@opencode/util/execute-output`): an `execute` output for display. The result (compact
+/// JSON for structured values) is followed by optional "Warnings:" and "Logs:" sections; a JSON result comes back
+/// indented as `json` (as `JSON.stringify(JSON.parse(result), null, 2)` prints it), the sections as `rest`, and
+/// `text` joins them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormattedOutput {
+    pub json: Option<String>,
+    pub rest: Option<String>,
+    pub text: String,
+}
+
+pub fn format_execute_output(output: &str) -> FormattedOutput {
+    let end = ["\n\nWarnings:\n", "\n\nLogs:\n"].iter().filter_map(|m| output.find(m)).min();
+    let result = end.map_or(output, |end| &output[..end]);
+    let rest = end.map(|end| {
+        output[end..].trim_matches(|c: char| (c as u32) < 0x10000 && crate::number::is_js_whitespace(c as u16)).to_string()
+    });
+    let json = indented_json(result);
+    let shown = json.as_deref().unwrap_or(result);
+    let text = match &rest {
+        None => shown.to_string(),
+        Some(rest) => format!("{shown}\n\n{rest}"),
+    };
+    FormattedOutput { json, rest, text }
+}
+
+fn indented_json(text: &str) -> Option<String> {
+    if !text.starts_with('{') && !text.starts_with('[') {
+        return None;
+    }
+    let parsed = crate::stdlib::json::parse_json(&crate::value::JsStr::from(text)).ok()?;
+    Some(crate::data::stringify(&parsed_json(&parsed), "  "))
+}
+
+/// A parsed JSON value as host JSON with a JS object's key order (integer-like keys first, a repeated key keeping
+/// its first place and last value); lone surrogates stay marked so they print as `\udXXX` escapes.
+fn parsed_json(parsed: &crate::stdlib::json::Parsed) -> Json {
+    use crate::stdlib::json::Parsed;
+    match parsed {
+        Parsed::Null => Json::Null,
+        Parsed::Bool(b) => Json::Bool(*b),
+        Parsed::Number(n) => serde_json::Number::from_f64(*n).map(Json::Number).unwrap_or(Json::Null),
+        Parsed::String(s) => Json::String(crate::data::marked_string(s.units())),
+        Parsed::Array(items) => Json::Array(items.iter().map(parsed_json).collect()),
+        Parsed::Object(entries) => {
+            let mut unique: indexmap::IndexMap<String, Json> = indexmap::IndexMap::new();
+            for (key, value) in entries {
+                unique.insert(crate::data::marked_string(key.units()), parsed_json(value));
+            }
+            Json::Object(crate::data::js_ordered(unique.into_iter().collect()))
+        }
+    }
+}
+
+/// The text output of an execution: the value (strings verbatim, else compact JSON) or the error message plus
 /// suggestions not already contained, then `Warnings:` and `Logs:` sections.
 pub fn format_result(result: &ExecResult) -> String {
     let output = match result {
@@ -249,7 +305,7 @@ mod tests {
         };
         assert_eq!(
             format_result(&ok),
-            "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n\nWarnings:\n- [ExecutionFailure] boom\n\nLogs:\nhello"
+            "{\"a\":[1,2]}\n\nWarnings:\n- [ExecutionFailure] boom\n\nLogs:\nhello"
         );
         let err = ExecResult::Failure {
             error: Diagnostic {
@@ -265,6 +321,48 @@ mod tests {
         assert_eq!(format_result(&err), "Unknown tool 'x'.\nUse search to find available tools.");
         let s = ExecResult::Success { value: json!("text"), warnings: None, logs: None, truncated: false, tool_calls: vec![] };
         assert_eq!(format_result(&s), "text");
+    }
+
+    // packages/util/src/execute-output.test.ts
+    #[test]
+    fn indents_a_json_result() {
+        let indented = "{\n  \"a\": 1,\n  \"b\": [\n    2\n  ]\n}";
+        assert_eq!(
+            format_execute_output("{\"a\":1,\"b\":[2]}"),
+            FormattedOutput { json: Some(indented.into()), rest: None, text: indented.into() }
+        );
+    }
+
+    #[test]
+    fn indents_a_json_result_followed_by_warnings_and_logs() {
+        assert_eq!(
+            format_execute_output("[\"x\"]\n\nWarnings:\n- [unhandled] boom\n\nLogs:\nhi"),
+            FormattedOutput {
+                json: Some("[\n  \"x\"\n]".into()),
+                rest: Some("Warnings:\n- [unhandled] boom\n\nLogs:\nhi".into()),
+                text: "[\n  \"x\"\n]\n\nWarnings:\n- [unhandled] boom\n\nLogs:\nhi".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn leaves_other_results_as_they_are() {
+        assert_eq!(
+            format_execute_output("exit 0\nok\n\nLogs:\nhi"),
+            FormattedOutput { json: None, rest: Some("Logs:\nhi".into()), text: "exit 0\nok\n\nLogs:\nhi".into() }
+        );
+        assert_eq!(format_execute_output("{not json"), FormattedOutput { json: None, rest: None, text: "{not json".into() });
+    }
+
+    #[test]
+    fn indents_like_javascript() {
+        // JSON.parse then JSON.stringify(_, null, 2): integer keys first, a repeated key keeps its first place and
+        // last value, numbers in JS form, lone surrogates escaped.
+        let out = format_execute_output("{\"b\":1,\"2\":1e21,\"1\":1.50,\"b\":\"\\ud800\",\"e\":{},\"f\":[]}");
+        assert_eq!(
+            out.json.as_deref(),
+            Some("{\n  \"1\": 1.5,\n  \"2\": 1e+21,\n  \"b\": \"\\ud800\",\n  \"e\": {},\n  \"f\": []\n}")
+        );
     }
 
     #[test]

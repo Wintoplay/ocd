@@ -203,7 +203,7 @@ async fn execute_runs_nested_tools_with_progress_and_files() {
     let output = result.output.unwrap();
     assert_eq!(
         output["output"],
-        json!("{\n  \"order\": {\n    \"id\": \"o1\",\n    \"status\": \"open\"\n  },\n  \"chart\": \"rendered\"\n}")
+        json!("{\"order\":{\"id\":\"o1\",\"status\":\"open\"},\"chart\":\"rendered\"}")
     );
     assert_eq!(
         output["toolCalls"],
