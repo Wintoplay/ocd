@@ -368,23 +368,31 @@ fn history_never_decodes_rows_before_the_latest_compaction_or_its_kept_tail() {
 fn hides_instruction_updates_before_the_baseline_epoch() {
     let (db, sid) = setup();
     user(&db, &sid, "First");
-    store(&db, &sid, "system", json!({ "time": { "created": 0 }, "text": "Entered mode", "metadata": { "notice": "instructions" } }));
+    let update = store(&db, &sid, "system", json!({ "time": { "created": 0 }, "text": "Entered mode", "metadata": { "notice": "instructions" } }));
     store(&db, &sid, "system", json!({ "time": { "created": 0 }, "text": "Other notice", "metadata": { "notice": "other" } }));
     let second = user(&db, &sid, "Second");
     let seq_of = |id: &str| -> i64 {
         db.with(|c| c.query_row("SELECT seq FROM session_message WHERE id = ?", [id], |r| r.get(0))).unwrap()
     };
     let context = |db: &Database| -> Vec<String> { texts(&history::entries(db, &sid, Boundary::Latest).unwrap().into_iter().map(|(_, m)| m).collect::<Vec<_>>()) };
-    // Without an instruction state, every update replays.
+    let baseline = |epoch: i64| {
+        db.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO instruction_state (session_id, epoch_start, through_seq, initial_values, current_values) VALUES (?, ?, ?, '{}', '{}')",
+                rusqlite::params![sid, epoch, epoch],
+            )
+        })
+        .unwrap();
+    };
+    // A baseline that started at the update keeps it.
+    baseline(seq_of(&update));
     assert_eq!(context(&db), ["First", "Entered mode", "Other notice", "Second"]);
-    // A fresh baseline rendered at "Second" covers the update before it.
-    db.with(|c| {
-        c.execute(
-            "INSERT INTO instruction_state (session_id, epoch_start, through_seq, initial_values, current_values) VALUES (?, ?, ?, '{}', '{}')",
-            rusqlite::params![sid, seq_of(&second), seq_of(&second)],
-        )
-    })
-    .unwrap();
+    // A fresh baseline rendered at "Second" covers the update before it; other system notices stay.
+    baseline(seq_of(&second));
     assert_eq!(context(&db), ["First", "Other notice", "Second"]);
+    // Like upstream (`epochStart ?? Infinity`), no instruction state at all hides every instruction update.
+    db.with(|c| c.execute("DELETE FROM instruction_state WHERE session_id = ?", [&sid])).unwrap();
+    assert_eq!(context(&db), ["First", "Other notice", "Second"]);
+    // Clients still see every message.
     assert_eq!(db.session_messages(&sid).unwrap().iter().filter(|(_, m)| matches!(m, Message::System { .. })).count(), 2);
 }

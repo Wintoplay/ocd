@@ -526,7 +526,8 @@ async fn request_metadata_and_fork_hook() {
     s.run(&session, "check the canary").await;
     let body = s.mock.bodies.lock()[0].clone();
     let last = body["messages"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(last["content"], json!([{ "type": "text", "text": "CANARY-TOKEN" }, { "type": "text", "text": "check the canary" }]), "{body}");
+    // The hook put the canary before the prompt's text (Chat Completions joins a user message's text parts).
+    assert_eq!(last["content"], json!("CANARY-TOKENcheck the canary"), "{body}");
     assert!(!body.to_string().contains("\"metadata\""), "{body}");
 
     let r = s.h.post(&format!("/api/session/{session}/fork"), json!({})).await;
@@ -627,7 +628,7 @@ async fn no_sidecar_without_plugins() {
     assert!(!s.h.app.plugins.host().is_some_and(|h| h.is_running()));
     let list = s.h.get("/api/plugin").await.json();
     let ids: Vec<&str> = list["data"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 92);
+    assert_eq!(ids.len(), 93);
     assert!(!ids.contains(&"opencode.browser"));
     // The browser deny is gone with its plugin.
     let agents = s.h.get("/api/agent").await.json();

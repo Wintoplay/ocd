@@ -69,8 +69,10 @@ upgrade while this is the first unused turn). The mock records every upgrade (he
 ### What the normalizer masks (and nothing else)
 
 - generated IDs (`<prefix>_` + 12 hex + 14 base62, also with derived suffixes like `msg_…_4`, and a schedule ID
-  inside a scheduled prompt's message ID, `msg_sch_…_<n>`), renumbered by first appearance; UUIDs;
-- epoch-millisecond numbers (any key), ISO timestamps, `duration`/`elapsed`-style keys, `pid`;
+  inside a scheduled prompt's message ID, `msg_sch_…_<n>`, and the fork's ID in its fork notice's message ID,
+  `msg_fork_notice_ses_…`), renumbered by first appearance; UUIDs;
+- epoch-millisecond numbers (any key), ISO timestamps, `duration`/`elapsed`-style keys, `pid` (and the number of a
+  backgrounded shell result's `PID:` line);
 - session `slug`s;
 - the build version (`0.0.0-v2-…` or `0.0.0-detached-…` upstream, `2.0.26`, `2.1.4`, `2.2.2`, `2.2.5` or `2.2.7` port) wherever it appears,
   the channel in the User-Agent and in the report skill's diagnostics (`v2`/`detached` vs `latest`);
@@ -153,6 +155,15 @@ iterator's `next`.
 | codemode230 | 2.3.0 Code Mode (`scripts/parity/codemode230.py`): `search` over the built-in and fake MCP tools (whole and partial words, plurals, a namespace filter), an unknown tool's suggestion and namespace calls naming up to three tools, a compact JSON result; streaming `fetch` against mock routes that send chunks 80 ms apart (a reader, `for await` with a streaming `TextDecoder`, a second whole-body read failing, the response's keys and `Headers`, `bodyUsed`), a redirect whose open body the mock sees discarded, and a body left open at the program's end that the mock sees cancelled |
 
 ## Results
+
+**Small 2.3.0 items (P7: tool result shapes, fork notice, hook metadata, provider fixes; debug build, 2026-11-17):**
+groups `loop`, `stop`, `session`, `readonly` and `plugin` plus `subagent_report_running_work` against the local v2.3.0
+build (`up-dist-2.3.0`): **58 of 62 identical**. `loop_shell_tool`, `loop_session_shell`, `stop_shell_keeps_output`,
+`stop_long_run_compaction`, `stop_background_shell` and `subagent_report_running_work` now match (the `PID:` line,
+`pid` metadata and structured output; `shell.created` with the `pid`; the shell's completion notice admitted without
+a location), `readonly_server` lists `opencode.fork-notice`, and `session_fork` has the same fork notices once the
+normalizer masks the fork ID inside `msg_fork_notice_<id>`. Left: `loop_tool_error`, `loop_http_400` and
+`stop_retry_exhausted`, the scheduler and title races described below.
 
 **Provider client certificates (debug build, 2026-11-17):** the new group `tls230` against the local v2.3.0 build
 (`up-dist-2.3.0`): **6 of 6 identical** (`tls230_chat`, `tls230_bad_keys`, `tls230_key_formats`, `tls230_decisions`,
