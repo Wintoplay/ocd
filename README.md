@@ -50,16 +50,17 @@ instantly. Manage it with `ocd service status|stop|restart`, or run `ocd --stand
 
 ## Speed and size
 
-Linux x86_64, the official release binaries of opencode 2.2.7 and ocd v0.3.4, the same mock model and isolated
-folders; medians of 9 runs (5 server starts), measured 2026-11-15:
+Linux x86_64, the official opencode 2.2.7 release binary and an ocd release build (mimalloc and whole-program
+optimisation, after v0.3.4), the same mock model and isolated folders; medians of 9 runs (5 server starts), measured
+2026-11-17:
 
-| Measure | opencode 2.2.7 | ocd v0.3.4 |
+| Measure | opencode 2.2.7 | ocd |
 |---|---:|---:|
-| `run` with one tool call | 1.93 s | **1.01 s** |
-| Server ready after start | 287 ms | **55 ms** |
-| Idle server memory | 147 MB | **34 MB** |
-| Peak memory during `run` | 315 MB | **287 MB** |
-| Binary size (web UI included) | 259 MB | **120 MB** |
+| `run` with one tool call | 1.92 s | **0.73 s** |
+| Server ready after start | 284 ms | **50 ms** |
+| Idle server memory | 147 MB | **29 MB** |
+| Peak memory during `run` | 313 MB | **228 MB** |
+| Binary size (web UI included) | 259 MB | **103 MB** |
 
 ## Compatibility at a glance
 
