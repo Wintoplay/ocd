@@ -1,6 +1,9 @@
-//! The `fetch` extension (core's `codemode/fetch.ts`): a host-provided outbound HTTP capability with a 30 s timeout
-//! that buffers the whole body and returns `{ url, status, statusText, ok, redirected, headers: { get, has,
-//! entries }, text(), json(), bytes() }`. The host may check each request first (core asserts the `webfetch`
+//! The `fetch` extension (core's `codemode/fetch.ts`): a host-provided outbound HTTP capability with a 30 s timeout.
+//! Since 2.3.0 (#63436) the response streams like Bun's (`Extension.StreamingResponse`, converted by the VM's
+//! `runtime/extensions.ts`): `{ url, status, statusText, ok, headers, redirected, body, bodyUsed, text(), json(),
+//! bytes(), arrayBuffer() }`, where `headers` is a real `Headers`, `body` is `null` (HEAD, 204, 205, 304) or a stream
+//! (`locked`, `cancel()`, `getReader()` → `{ read, cancel, releaseLock }`, `for await`), and the whole-body readers
+//! consume it once. The host may check each request first (core asserts the `webfetch`
 //! permission); a rejection rejects the program's promise and nothing is sent. URLs with credentials are refused, the
 //! `#fragment` is dropped before any check, and redirects are followed here (up to 20, one 30 s deadline for the whole
 //! chain) so the host can check each target against the same rules (#60502, #61701, #62373).
@@ -10,7 +13,12 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-use crate::host::{host_fn, host_fn_async, HostCall, HostFunction, HostValue, HttpClient, HttpRequest, HttpResponse, SimpleExtension};
+use futures::StreamExt;
+
+use crate::host::{
+    host_fn, host_fn_async, BodyStream, HostCall, HostFunction, HostKey, HostProperty, HostValue, HttpClient, HttpRequest,
+    HttpResponse, HttpStreamingResponse, SimpleExtension,
+};
 
 pub const TIMEOUT_MS: u64 = 30_000;
 
@@ -101,17 +109,20 @@ impl HostFunction for Fetch {
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err(HostValue::error("TypeError", "The operation timed out."));
+                    return Err(transport_error("The operation timed out.".into()));
                 }
                 request.url = target.clone();
                 request.timeout = Some(remaining);
-                let mut response = client.send(request.clone()).await.map_err(|message| HostValue::error("TypeError", message))?;
+                let mut response =
+                    client.send_streaming(request.clone()).await.map_err(transport_error)?;
                 let location = response.headers.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case("location")).map(|(_, v)| v.clone());
                 let Some(location) = location.filter(|_| REDIRECT_STATUSES.contains(&response.status)) else {
                     response.url = target;
                     response.redirected = redirects > 0;
-                    return Ok(response_value(response));
+                    return Ok(response_value(response, &request.method));
                 };
+                // The redirect's body is discarded (cancelled) before the next hop.
+                drop(std::mem::replace(&mut response.body, Box::pin(futures::stream::empty())));
                 if redirects >= MAX_REDIRECTS {
                     return Err(HostValue::error("Error", format!("Too many redirects (more than {MAX_REDIRECTS})")));
                 }
@@ -217,80 +228,303 @@ fn build_request(args: &[HostValue]) -> Result<HttpRequest, HostValue> {
     Ok(HttpRequest { method, url, headers, body, timeout: Some(Duration::from_millis(TIMEOUT_MS)) })
 }
 
-fn response_value(response: HttpResponse) -> HostValue {
-    let body = Arc::new(response.body);
-    let headers = Arc::new(response.headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect::<Vec<_>>());
-    // Object.fromEntries(response.headers): later duplicates win.
-    let lookup = {
-        let h = headers.clone();
-        move |name: &str| h.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.clone())
-    };
-    let get = {
-        let lookup = lookup.clone();
-        host_fn("get", 1, move |args| {
-            let name = string_of(args.first().unwrap_or(&HostValue::Undefined)).to_lowercase();
-            HostCall::Ready(Ok(lookup(&name).map(HostValue::String).unwrap_or(HostValue::Null)))
-        })
-    };
-    let has = {
-        let lookup = lookup.clone();
-        host_fn("has", 1, move |args| {
-            let name = string_of(args.first().unwrap_or(&HostValue::Undefined)).to_lowercase();
-            HostCall::Ready(Ok(HostValue::Bool(lookup(&name).is_some())))
-        })
-    };
-    let entries = {
-        let h = headers.clone();
-        host_fn("entries", 0, move |_| {
-            let mut seen: Vec<(String, String)> = Vec::new();
-            for (k, v) in h.iter() {
-                match seen.iter_mut().find(|(x, _)| x == k) {
-                    Some(e) => e.1 = v.clone(),
-                    None => seen.push((k.clone(), v.clone())),
+/// The body of a streaming response, shared by the response's readers (a `ReadableStream` as Bun's `fetch` gives it).
+struct Body {
+    state: std::sync::Mutex<BodyState>,
+    /// `None` once the body ended or was cancelled. Reads queue on the lock, so they settle in order.
+    stream: tokio::sync::Mutex<Option<BodyStream>>,
+}
+
+#[derive(Default)]
+struct BodyState {
+    /// Bun's `bodyUsed`: set by any read, a reader, async iteration or a cancel.
+    used: bool,
+    /// The reader holding the lock (readers are numbered; a whole-body read holds it for good).
+    lock: Option<u64>,
+    readers: u64,
+    /// The error the body ended with, for every later read.
+    error: Option<HostValue>,
+}
+
+const LOCKED: &str = "Invalid state: ReadableStream is locked";
+const DETACHED: &str = "Invalid state: The reader is not attached to a stream";
+
+fn type_error(message: &str) -> HostValue {
+    HostValue::error("TypeError", message)
+}
+
+/// `{ value, done }`, a read result.
+fn read_result(value: Option<Vec<u8>>) -> HostValue {
+    let done = value.is_none();
+    HostValue::Object(vec![
+        ("value".into(), value.map(HostValue::Bytes).unwrap_or(HostValue::Undefined)),
+        ("done".into(), HostValue::Bool(done)),
+    ])
+}
+
+/// A transport or body error as the program catches it: the 30 s timeout is Bun's `TimeoutError` DOMException, which
+/// crosses as an `Error`; anything else is a `TypeError`, like Bun's network errors.
+fn transport_error(message: String) -> HostValue {
+    if message == "The operation timed out." { HostValue::error("Error", message) } else { type_error(&message) }
+}
+
+impl Body {
+    fn new(stream: BodyStream) -> Arc<Body> {
+        Arc::new(Body { state: std::sync::Mutex::new(BodyState::default()), stream: tokio::sync::Mutex::new(Some(stream)) })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, BodyState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Takes the lock for a new reader.
+    fn acquire(&self) -> Result<u64, HostValue> {
+        let mut state = self.state();
+        if state.lock.is_some() {
+            return Err(type_error(LOCKED));
+        }
+        state.readers += 1;
+        let reader = state.readers;
+        state.lock = Some(reader);
+        state.used = true;
+        Ok(reader)
+    }
+
+    fn attached(&self, reader: u64) -> Result<(), HostValue> {
+        if self.state().lock == Some(reader) { Ok(()) } else { Err(type_error(DETACHED)) }
+    }
+
+    fn release(&self, reader: u64) {
+        let mut state = self.state();
+        if state.lock == Some(reader) {
+            state.lock = None;
+        }
+    }
+
+    /// The next chunk, or `None` at the end.
+    async fn next(&self) -> Result<Option<Vec<u8>>, HostValue> {
+        if let Some(error) = self.state().error.clone() {
+            return Err(error);
+        }
+        let mut stream = self.stream.lock().await;
+        loop {
+            let Some(body) = stream.as_mut() else { return Ok(None) };
+            match body.next().await {
+                Some(Ok(chunk)) if chunk.is_empty() => continue,
+                Some(Ok(chunk)) => return Ok(Some(chunk)),
+                None => {
+                    *stream = None;
+                    return Ok(None);
+                }
+                Some(Err(message)) => {
+                    *stream = None;
+                    let error = transport_error(message);
+                    self.state().error = Some(error.clone());
+                    return Err(error);
                 }
             }
-            HostCall::Ready(Ok(HostValue::Array(
-                seen.into_iter().map(|(k, v)| HostValue::Array(vec![HostValue::String(k), HostValue::String(v)])).collect(),
-            )))
-        })
+        }
+    }
+
+    async fn read(&self, reader: u64) -> Result<HostValue, HostValue> {
+        self.attached(reader)?;
+        self.state().used = true;
+        Ok(read_result(self.next().await?))
+    }
+
+    async fn cancel(&self) {
+        self.state().used = true;
+        *self.stream.lock().await = None;
+    }
+
+    /// The whole body, once (`text`, `json`, `bytes`, `arrayBuffer`).
+    async fn consume(&self) -> Result<Vec<u8>, HostValue> {
+        {
+            let mut state = self.state();
+            if state.used || state.lock.is_some() {
+                return Err(type_error("Body already used"));
+            }
+            state.used = true;
+            state.lock = Some(u64::MAX);
+        }
+        let mut out = Vec::new();
+        while let Some(chunk) = self.next().await? {
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
+    }
+}
+
+/// Response text: UTF-8, its BOM dropped, malformed bytes replaced.
+fn decode_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)).into_owned()
+}
+
+/// What a whole-body reader returns for the body's bytes.
+#[derive(Clone, Copy)]
+enum Whole {
+    Text,
+    Json,
+    Bytes,
+}
+
+fn whole_value(kind: Whole, bytes: Vec<u8>) -> Result<HostValue, HostValue> {
+    Ok(match kind {
+        Whole::Text => HostValue::String(decode_text(&bytes)),
+        Whole::Bytes => HostValue::Bytes(bytes),
+        // Bun reads an empty body (a null one too) as no JSON text at all.
+        Whole::Json if bytes.is_empty() => return Err(HostValue::error("SyntaxError", "Unexpected end of JSON input")),
+        Whole::Json => {
+            let text = decode_text(&bytes);
+            let parsed = crate::stdlib::json::parse_json(&crate::value::JsStr::from(text.as_str()))
+                .map_err(|m| HostValue::error("SyntaxError", m))?;
+            parsed_to_host(&parsed)
+        }
+    })
+}
+
+/// The body stream object: `locked`, `cancel(reason)`, `getReader(options)` and `[Symbol.asyncIterator]()`.
+fn stream_value(body: &Arc<Body>) -> HostValue {
+    let locked = {
+        let body = body.clone();
+        HostProperty::Getter(Arc::new(move || HostValue::Bool(body.state().lock.is_some())))
     };
-    let text_of = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    let text = {
-        let b = body.clone();
-        host_fn_async("text", 0, move |_| {
-            let t = text_of(&b);
-            HostCall::Pending(Box::pin(async move { Ok(HostValue::String(t)) }))
-        })
-    };
-    let json = {
-        let b = body.clone();
-        host_fn_async("json", 0, move |_| {
-            let t = text_of(&b);
+    let cancel = {
+        let body = body.clone();
+        host_fn_async("", 1, move |_| {
+            let body = body.clone();
             HostCall::Pending(Box::pin(async move {
-                let parsed = crate::stdlib::json::parse_json(&crate::value::JsStr::from(t.as_str()))
-                    .map_err(|m| HostValue::error("SyntaxError", m))?;
-                Ok(parsed_to_host(&parsed))
+                if body.state().lock.is_some() {
+                    return Err(type_error(LOCKED));
+                }
+                body.cancel().await;
+                Ok(HostValue::Undefined)
             }))
         })
     };
-    let bytes = {
-        let b = body.clone();
-        host_fn_async("bytes", 0, move |_| {
-            let v = (*b).clone();
-            HostCall::Pending(Box::pin(async move { Ok(HostValue::Bytes(v)) }))
+    let get_reader = {
+        let body = body.clone();
+        host_fn("", 1, move |args| {
+            let mode = args.first().and_then(|options| options.field("mode"));
+            if mode.is_some_and(|mode| !matches!(mode, HostValue::Undefined)) {
+                return HostCall::Ready(Err(type_error("Only the default stream reader is supported.")));
+            }
+            HostCall::Ready(body.acquire().map(|reader| reader_value(&body, reader)))
         })
     };
+    let iterator = {
+        let body = body.clone();
+        host_fn("", 0, move |_| HostCall::Ready(body.acquire().map(|reader| iterator_value(&body, reader))))
+    };
+    HostValue::Live(vec![
+        (HostKey::String("locked".into()), locked),
+        (HostKey::String("cancel".into()), HostProperty::Value(cancel)),
+        (HostKey::String("getReader".into()), HostProperty::Value(get_reader)),
+        (HostKey::AsyncIterator, HostProperty::Value(iterator)),
+    ])
+}
+
+/// A default reader: `{ read, cancel, releaseLock }`.
+fn reader_value(body: &Arc<Body>, reader: u64) -> HostValue {
+    let read = {
+        let body = body.clone();
+        host_fn_async("read", 0, move |_| {
+            let body = body.clone();
+            HostCall::Pending(Box::pin(async move { body.read(reader).await }))
+        })
+    };
+    let cancel = {
+        let body = body.clone();
+        host_fn_async("cancel", 1, move |_| {
+            let body = body.clone();
+            HostCall::Pending(Box::pin(async move {
+                body.attached(reader)?;
+                body.cancel().await;
+                Ok(HostValue::Undefined)
+            }))
+        })
+    };
+    let release = {
+        let body = body.clone();
+        host_fn("releaseLock", 0, move |_| {
+            body.release(reader);
+            HostCall::Ready(Ok(HostValue::Undefined))
+        })
+    };
+    HostValue::Object(vec![("read".into(), read), ("cancel".into(), cancel), ("releaseLock".into(), release)])
+}
+
+/// `body.values()` as `{ next, return }`: the lock is released at the end, and `return` cancels the body.
+fn iterator_value(body: &Arc<Body>, reader: u64) -> HostValue {
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let next = {
+        let (body, finished) = (body.clone(), finished.clone());
+        host_fn_async("next", 0, move |_| {
+            let (body, finished) = (body.clone(), finished.clone());
+            HostCall::Pending(Box::pin(async move {
+                if finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(read_result(None));
+                }
+                let result = body.read(reader).await;
+                if !matches!(result, Ok(HostValue::Object(ref fields)) if matches!(fields[1].1, HostValue::Bool(false))) {
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                    body.release(reader);
+                }
+                result
+            }))
+        })
+    };
+    let finish = {
+        let (body, finished) = (body.clone(), finished.clone());
+        host_fn_async("return", 0, move |_| {
+            let (body, finished) = (body.clone(), finished.clone());
+            HostCall::Pending(Box::pin(async move {
+                if !finished.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    body.cancel().await;
+                    body.release(reader);
+                }
+                Ok(read_result(None))
+            }))
+        })
+    };
+    HostValue::Object(vec![("next".into(), next), ("return".into(), finish)])
+}
+
+fn response_value(response: HttpStreamingResponse, method: &str) -> HostValue {
     let status = response.status;
-    HostValue::Object(vec![
-        ("url".into(), HostValue::String(response.url)),
-        ("status".into(), HostValue::Number(status as f64)),
-        ("statusText".into(), HostValue::String(response.status_text)),
-        ("ok".into(), HostValue::Bool((200..300).contains(&status))),
-        ("redirected".into(), HostValue::Bool(response.redirected)),
-        ("headers".into(), HostValue::Object(vec![("get".into(), get), ("has".into(), has), ("entries".into(), entries)])),
-        ("text".into(), text),
-        ("json".into(), json),
-        ("bytes".into(), bytes),
+    // Bun gives no body for a HEAD request or a null-body status.
+    let null_body = method.eq_ignore_ascii_case("HEAD") || matches!(status, 101 | 103 | 204 | 205 | 304);
+    let body = Body::new(response.body);
+    let whole = |kind: Whole| {
+        let body = body.clone();
+        host_fn_async("", 0, move |_| {
+            let body = body.clone();
+            HostCall::Pending(Box::pin(async move {
+                let bytes = if null_body { Vec::new() } else { body.consume().await? };
+                whole_value(kind, bytes)
+            }))
+        })
+    };
+    let used = {
+        let body = body.clone();
+        HostProperty::Getter(Arc::new(move || HostValue::Bool(!null_body && body.state().used)))
+    };
+    let value = |v: HostValue| HostProperty::Value(v);
+    let key = |k: &str| HostKey::String(k.into());
+    HostValue::Live(vec![
+        (key("url"), value(HostValue::String(response.url))),
+        (key("status"), value(HostValue::Number(status as f64))),
+        (key("statusText"), value(HostValue::String(response.status_text))),
+        (key("ok"), value(HostValue::Bool((200..300).contains(&status)))),
+        (key("headers"), value(HostValue::Headers(response.headers.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect()))),
+        (key("redirected"), value(HostValue::Bool(response.redirected))),
+        (key("body"), value(if null_body { HostValue::Null } else { stream_value(&body) })),
+        (key("bodyUsed"), used),
+        (key("text"), value(whole(Whole::Text))),
+        (key("json"), value(whole(Whole::Json))),
+        (key("bytes"), value(whole(Whole::Bytes))),
+        // `arrayBuffer()` crosses as a `Uint8Array`.
+        (key("arrayBuffer"), value(whole(Whole::Bytes))),
     ])
 }
 
@@ -332,37 +566,46 @@ impl Default for ReqwestClient {
     }
 }
 
+fn reqwest_error(e: reqwest::Error) -> String {
+    if e.is_timeout() { "The operation timed out.".to_string() } else { e.to_string() }
+}
+
+/// Sends a request and returns the response head: `(response, url, redirected, headers)`.
+async fn send_head(
+    client: reqwest::Client,
+    request: HttpRequest,
+) -> Result<(reqwest::Response, String, bool, Vec<(String, String)>), String> {
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|_| format!("'{}' is not a valid HTTP method.", request.method))?;
+    let mut builder = client.request(method, &request.url);
+    for (k, v) in &request.headers {
+        builder = builder.header(k, v);
+    }
+    if let Some(body) = request.body {
+        builder = builder.body(body);
+    }
+    // The timeout covers the body too.
+    if let Some(t) = request.timeout {
+        builder = builder.timeout(t);
+    }
+    let response = builder.send().await.map_err(reqwest_error)?;
+    let url = response.url().to_string();
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+        .collect();
+    let redirected = url != request.url && url.trim_end_matches('/') != request.url.trim_end_matches('/');
+    Ok((response, url, redirected, headers))
+}
+
 impl HttpClient for ReqwestClient {
     fn send(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, String>> {
         let client = self.client.clone();
         Box::pin(async move {
-            let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|_| {
-                format!("'{}' is not a valid HTTP method.", request.method)
-            })?;
-            let mut builder = client.request(method, &request.url);
-            for (k, v) in &request.headers {
-                builder = builder.header(k, v);
-            }
-            if let Some(body) = request.body {
-                builder = builder.body(body);
-            }
-            if let Some(t) = request.timeout {
-                builder = builder.timeout(t);
-            }
-            let response = builder.send().await.map_err(|e| {
-                if e.is_timeout() { "The operation timed out.".to_string() } else { e.to_string() }
-            })?;
-            let url = response.url().to_string();
+            let (response, url, redirected, headers) = send_head(client, request).await?;
             let status = response.status();
-            let headers: Vec<(String, String)> = response
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
-                .collect();
-            let redirected = url != request.url && url.trim_end_matches('/') != request.url.trim_end_matches('/');
-            let body = response.bytes().await.map_err(|e| {
-                if e.is_timeout() { "The operation timed out.".to_string() } else { e.to_string() }
-            })?;
+            let body = response.bytes().await.map_err(reqwest_error)?;
             Ok(HttpResponse {
                 url,
                 status: status.as_u16(),
@@ -370,6 +613,24 @@ impl HttpClient for ReqwestClient {
                 redirected,
                 headers,
                 body: body.to_vec(),
+            })
+        })
+    }
+
+    fn send_streaming(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpStreamingResponse, String>> {
+        let client = self.client.clone();
+        Box::pin(async move {
+            let (response, url, redirected, headers) = send_head(client, request).await?;
+            let status = response.status();
+            let body: BodyStream =
+                Box::pin(response.bytes_stream().map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(reqwest_error)));
+            Ok(HttpStreamingResponse {
+                url,
+                status: status.as_u16(),
+                status_text: status.canonical_reason().unwrap_or("").to_string(),
+                redirected,
+                headers,
+                body,
             })
         })
     }

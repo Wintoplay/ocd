@@ -52,7 +52,7 @@ impl Host for Progress {
 }
 
 #[tokio::test]
-async fn fetch_returns_the_buffered_response_shape() {
+async fn fetch_returns_the_response_shape() {
     let client = Arc::new(Mock { seen: Mutex::new(Vec::new()) });
     let host = Arc::new(Progress::default());
     let runtime = CodeMode::new(
@@ -67,23 +67,25 @@ async fn fetch_returns_the_buffered_response_shape() {
             r#"
             const r = await fetch("https://api.test/items", { method: "post", headers: { "x-a": "1" }, body: "hi" })
             return [r.status, r.ok, r.statusText, r.url, r.redirected, r.headers.get("CONTENT-TYPE"), r.headers.has("x"),
-                    r.headers.entries(), await r.text(), await r.json(), (await r.bytes()).length, typeof r.json]
+                    [...r.headers.entries()], await r.text(), await r.json().catch(e => e.message), r.bodyUsed, typeof r.json]
             "#,
         )
         .await;
     assert_eq!(
         result.to_json(),
         json!({"ok": true, "value": [201, true, "Created", "https://api.test/items", false, "application/json", false,
-            [["content-type", "application/json"]], "{\"ok\":true,\"n\":[1,2]}", {"ok": true, "n": [1, 2]}, 21, "function"],
+            [["content-type", "application/json"]], "{\"ok\":true,\"n\":[1,2]}", "Body already used", true, "function"],
             "toolCalls": []})
     );
+    let json = runtime.execute(r#"const r = await fetch("https://api.test/items"); return [await r.json(), (await (await fetch("https://api.test/x")).bytes()).length]"#).await;
+    assert_eq!(json.to_json()["value"], json!([{"ok": true, "n": [1, 2]}, 21]));
     let seen = client.seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].method, "POST");
     assert_eq!(seen[0].body.as_deref(), Some(&b"hi"[..]));
     assert!(seen[0].headers.contains(&("x-a".to_string(), "1".to_string())));
     let rows = host.rows.rows();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].tool, "fetch");
     assert_eq!(rows[0].status, CallStatus::Completed);
     assert_eq!(serde_json::to_value(&rows[0].input).unwrap(), json!({"method": "POST", "url": "https://api.test/items"}));
@@ -95,7 +97,7 @@ async fn fetch_returns_the_buffered_response_shape() {
     );
     let uncaught = runtime.execute(r#"await fetch("https://down.test/")"#).await;
     assert_eq!(format_result(&uncaught), "TypeError: Unable to connect. Is the computer able to access the url?");
-    assert_eq!(host.rows.rows()[2].status, CallStatus::Error);
+    assert_eq!(host.rows.rows()[4].status, CallStatus::Error);
 }
 
 /// Answers the URLs in `routes` with `(status, location)` redirects, and anything else with 200 `ok`.

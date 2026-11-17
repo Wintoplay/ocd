@@ -12,9 +12,9 @@ use super::function::{native, NResult, NativeFn};
 use super::globals::create_error_value;
 use super::limits::MAX_VALUE_DEPTH;
 use super::{describe_value, Rt};
-use crate::host::{CallResult, ExtensionInvocation, HostCall, HostFunction, HostValue};
-use crate::object::{define, define_data, get, has, keys, BytesData, MapData, Obj, ObjKind, HIDDEN};
-use crate::value::{PropKey, Value};
+use crate::host::{CallResult, ExtensionInvocation, HostCall, HostFunction, HostKey, HostProperty, HostValue};
+use crate::object::{define, define_accessor, define_data, get, has, keys, BytesData, Getter, MapData, Obj, ObjKind, HIDDEN};
+use crate::value::{PropKey, Sym, Value};
 
 const UNCROSSED: [&str; 4] = ["stack", "constructor", "toString", "__proto__"];
 
@@ -182,6 +182,24 @@ pub fn from_host(rt: &Rt, value: &HostValue, label: &str, depth: usize) -> JsRes
                     continue;
                 }
                 define_data(&copied, k.as_str(), next(v, &format!("{label}.{k}"))?);
+            }
+            Value::Object(copied)
+        }
+        HostValue::Live(props) => {
+            let copied = Obj::ordinary(&b.object);
+            for (key, property) in props {
+                let (key, path): (PropKey, String) = match key {
+                    HostKey::String(k) => (PropKey::str(k), format!("{label}.{k}")),
+                    HostKey::AsyncIterator => (PropKey::Sym(Sym::AsyncIterator), format!("{label}[Symbol.asyncIterator]")),
+                };
+                match property {
+                    HostProperty::Value(v) => define_data(&copied, key, next(v, &path)?),
+                    HostProperty::Getter(read) => {
+                        let read = read.clone();
+                        let getter: Getter = std::rc::Rc::new(move |_| from_host(&super::rt(), &read(), &path, 0));
+                        define_accessor(&copied, key, Some(getter), None);
+                    }
+                }
             }
             Value::Object(copied)
         }

@@ -100,13 +100,13 @@ upstream 2.2.2 (legacy interpreter) and upstream 2.3.0, where the bytecode VM is
 1 843 recorded programs and 3 339 of the 3 340 sampled test262 files give the identical `Result`; the rest are the
 two permanent divergences of the 2.2 corpus (`crates/oc-codemode/tests/fixtures/replay-skips-2.3.0.txt`). 2.3.0's
 BM25 `search` ranking and namespace-call suggestions are also checked on a generated 400-tool catalog
-(`crates/oc-codemode/tests/search_ranking.rs`, 272 programs). No recorded program differs because of the engine change.
+(`crates/oc-codemode/tests/search_ranking.rs`, 272 programs). Streaming `fetch` responses are checked against upstream core 2.3.0's `execute` outputs on 46 programs read from a local server (`crates/oc-codemode/tests/fetch_stream.rs`). No recorded program differs because of the engine change.
 Probing past upstream's tests (the `tests/stdlib_*.rs` cases and targeted programs, run through 2.2.7 and 2.3.0) did
 find VM differences: the VM's standard library is partly program code, so some error texts, coercions and nested
 imports changed. ocd follows them (`crates/oc-codemode/tests/upstream_2_3_0.rs`) except the VM's lazy check of an
 iterator's `next`.
 
-## Scenarios (226)
+## Scenarios (237)
 
 | group | scenarios |
 |---|---|
@@ -149,8 +149,18 @@ iterator's `next`.
 | auth230 | 2.3.0 MCP OAuth and provider sign-in (`scripts/parity/auth230.py`, on mcp227's fake server): a token due within 30 s refreshed with the login's saved discovery before it is sent, a login whose issuer discovery no longer names (no refresh sent, login kept), a 403 `insufficient_scope` (needs_auth, no step-up), both loopback redirects registered and the code redeemed with the localhost one the browser came back on (the saved discovery included); the Poe, Snowflake, Codex browser and ChatGPT sign-ins with `paste: true` and their pasted-URL checks (Poe's issuer and state-echo rules), using only pastes that end or keep the attempt before any token request |
 | subagent | 2.3.0 subagents (`scripts/parity/subagent230.py`): a report each time the child goes idle (the launch, then a follow-up prompted to the child over HTTP), a child whose background shell is still running when its report goes out (`state="running"`, "Background work still running:") and its second report once the shell's notice woke it, a child created and prompted directly over HTTP reporting to its parent, a stopped child ("Subagent cancelled"), and a restart with a child in flight (`serve --service` on a free port, SIGKILL mid-turn, a second service resuming the child). Compared: the parent's and the child's messages, the job list (also mid-run), durable events per aggregate, and each session's model requests in order |
 | freeform230 | 2.3.0 freeform tool input against the mock's Responses and Chat endpoints (`scripts/parity/freeform230.py`; the mock streams `custom_tool_call` items): `execute` and `patch` as custom tools (free text, and the Lark patch grammar) on a model configured with `capabilities.freeform`, custom calls run with their object input, the stored parts, the files the patch wrote, and the replay of the calls as `custom_tool_call`/`custom_tool_call_output` in later requests; the formats a model lists (`["text"]`, `[]`, unset) deciding which tools go out custom; `openai/gpt-5.4-mini` freeform from the bundled models.dev catalog (and its `/api/model` capabilities); Chat Completions custom tools and a streamed `custom` call. Every request body (custom tools in full, function tools as one digest each, input/messages in full) is compared |
+| codemode230 | 2.3.0 Code Mode (`scripts/parity/codemode230.py`): `search` over the built-in and fake MCP tools (whole and partial words, plurals, a namespace filter), an unknown tool's suggestion and namespace calls naming up to three tools, a compact JSON result; streaming `fetch` against mock routes that send chunks 80 ms apart (a reader, `for await` with a streaming `TextDecoder`, a second whole-body read failing, the response's keys and `Headers`, `bodyUsed`), a redirect whose open body the mock sees discarded, and a body left open at the program's end that the mock sees cancelled |
 
 ## Results
+
+**Code Mode features of 2.3.0 (debug build, 2026-11-17):** the new group `codemode230` and the Code Mode scenarios
+`tools227_codemode` and `tools22_repair_codemode_mcp` against the local v2.3.0 build (`up-dist-2.3.0`): 3 of 4
+identical (`codemode230_search`, `codemode230_fetch_stream` with both bodies seen cancelled by the mock in both runs,
+`tools227_codemode`). `tools22_repair_codemode_mcp` no longer differs by its result's JSON (compact now); it still
+has one more `session.tool.progress` than upstream, a race with the 100 ms progress throttle: upstream's three
+nested MCP calls finish in about 34 ms, before the trailing update is due, while the debug build's take about 80 ms
+plus the program's teardown (measured in-program with `Date.now()`), so its trailing update fires first. The
+throttle is the same as upstream's (`codemode/tool.ts` `record`/`publish`).
 
 **Subagent lifecycle (debug build, 2026-11-17):** the new `subagent` group and the `acp` group against the local
 v2.3.0 build (`up-dist-2.3.0`), both through the isolation guard: **8 of 9 identical**. `acp` 3 of 3 (the root's answer

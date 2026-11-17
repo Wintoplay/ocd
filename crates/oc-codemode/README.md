@@ -118,19 +118,29 @@ runs before the host function, so a denied call never reaches the host: a host f
 (`HostFunction::asynchronous`, `host::host_fn_async`; upstream's `async` functions and `Extension.async`, e.g. `fetch`)
 always returns a promise, which a denial rejects, while a synchronous one throws. Values cross as `HostValue`
 copies (plain data, Date, RegExp, URL, URLSearchParams, Headers, Map, Set, bytes, errors with name/message/cause/own
-fields, and nested host functions that become callable program functions). A host function returns
+fields, and nested host functions that become callable program functions). `HostValue::Live` is a host object with
+accessors read from the host on every access (non-enumerable) and `Symbol.asyncIterator` methods (`HostKey`,
+`HostProperty`); `fetch` builds its streaming responses from it. A host function returns
 `HostCall::Ready` (synchronous) or `HostCall::Pending` (the program sees a promise).
 
-HTTP: `host::{HttpClient, HttpRequest, HttpResponse}`; `web::ReqwestClient` is the default client.
-`web::extension(client)` is the `fetch` extension exposing `fetch(url, { method?, headers?, body? })` with a 30 s
-timeout and the upstream response shape `{ url, status, statusText, ok, redirected, headers: { get, has, entries },
-text(), json(), bytes() }`. `web::extension_with(client, Some(authorize))` checks each call after the `file:` refusal
+HTTP: `host::{HttpClient, HttpRequest, HttpResponse}`; `HttpClient::send_streaming` returns an
+`HttpStreamingResponse` once the head arrives, its body a `BodyStream` of chunks (the default buffers `send`);
+`web::ReqwestClient` is the default client. `web::extension(client)` is the `fetch` extension exposing `fetch(url, {
+method?, headers?, body? })` with a 30 s timeout (body included) and, since 2.3.0 (#63436), a streaming response like
+Bun's: `{ url, status, statusText, ok, headers, redirected, body, bodyUsed, text(), json(), bytes(), arrayBuffer() }`.
+`headers` is a real `Headers`; `body` is `null` for HEAD, 204, 205 and 304, else a stream with `locked`, `cancel()`,
+`getReader()` (`{ read, cancel, releaseLock }`; `getReader({ mode })` is `TypeError: Only the default stream reader is
+supported.`) and `for await` iteration; the whole-body readers consume it once (`TypeError: Body already used`, as
+are a locked or read stream's), `arrayBuffer()` gives a `Uint8Array`, and `bodyUsed` follows Bun (set by a reader too).
+Bun's lock and detached-reader errors and its JSON errors for an empty body are reproduced; a timeout is
+`Error: The operation timed out.` (Bun's `TimeoutError` crossing). A body still open when the program ends is
+cancelled with the run. `web::extension_with(client, Some(authorize))` checks each call after the `file:` refusal
 and before anything is sent (core asserts the `webfetch` permission, `codemode/fetch.ts`); an `Err` rejects the
 program's promise. Since 2.2.7 the URL loses its `#fragment` before any check, a URL with credentials is a
 `TypeError` (`fetch cannot be used with credentials in the URL.`), and `web::extension_checked(client, authorize,
 check_redirect)` follows redirects itself (give it `ReqwestClient::manual()`): up to 20 hops under one 30 s deadline,
-refusing non-http(s) targets and targets with credentials, checking each target (without its fragment) with
-`check_redirect(next, args, url)`, and rewriting the request as a browser does (303, or 301/302 after a POST, become a
+refusing non-http(s) targets and targets with credentials, discarding each redirect's body, checking each target
+(without its fragment) with `check_redirect(next, args, url)`, and rewriting the request as a browser does (303, or 301/302 after a POST, become a
 GET without body or content headers; another origin loses `authorization`, `cookie` and `proxy-authorization`). The
 response's `url` is the last target as written and `redirected` whether any hop was followed. `ProgressRows::interrupt_running` settles the rows of calls still running as errors when an
 execution is interrupted.
@@ -175,8 +185,8 @@ execution is interrupted.
     names its tools), which the 2.3.0 corpus carries.
   - `tests/fixtures/upstream-2.3.0/`: the 2.3.0 suite on the bytecode VM, the only engine from 2.3.0. 1 841 of
     1 843 recordings match; the 2 others, in `tests/fixtures/replay-skips-2.3.0.txt`, are the same 2 permanent
-    divergences. A record listed with a batch tag (`P6:`) is a 2.3.0 feature not ported yet: when it starts to match
-    the test fails, so the batch deletes its line. No recorded program differs because of the engine: on the 1 859 programs both
+    divergences (no 2.3.0 feature is left unported; a record listed with a batch tag such as `P5:` must still differ,
+    so a batch that ports its feature deletes the line). No recorded program differs because of the engine: on the 1 859 programs both
     suites run, upstream's own results are identical except the namespace-call message, and so are the 3 340
     sampled test262 files. Replayed once against the full 2.3.0 test262 recording (13 330 files), ocd is identical
     except 9 files that write array indices near 2^32, beyond this crate's dense 10 000 000-element arrays (the
@@ -235,6 +245,12 @@ execution is interrupted.
   (the `gap` of `tests/upstream_2_3_0.rs`).
 - `tests/openapi.rs` — every recorded `OpenAPI.fromSpec` call and HTTP round trip, plus 49 extra upstream-generated
   cases.
+- `tests/fetch_stream.rs` — 46 programs reading streaming responses from a local server (readers, `for await`
+  with a streaming `TextDecoder`, one-shot bodies, null bodies, lock and reader errors, `Headers`, the response as
+  JSON, a redirect) with the `execute` outputs upstream core 2.3.0 gave against the same routes
+  (`tests/fixtures/fetch-2.3.0.json`, `tests/recorder/fetch-cases.ts`), plus the bodies the server sees cancelled
+  (left open at the program's end, a cancelled reader, a `break`, a redirect's body) and a pending request aborted
+  when `execute` is interrupted.
 - `tests/fetch.rs` (including the 2.2.7 fragment, credential and redirect rules), `tests/teardown.rs`, and unit
   tests in `number`, `tool_schema`, `catalog`, `execute_tool` (including upstream's `execute-output.test.ts`).
 

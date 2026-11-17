@@ -1,0 +1,808 @@
+{
+ "cases": [
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return Object.keys(res)",
+   "output": {
+    "output": "[\"url\",\"status\",\"statusText\",\"ok\",\"headers\",\"redirected\",\"body\",\"text\",\"json\",\"bytes\",\"arrayBuffer\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return res",
+   "output": {
+    "output": "{\"url\":\"http://BASE/json\",\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-length\":\"17\",\"content-type\":\"application/json;charset=utf-8\",\"date\":\"DATE\"},\"redirected\":false,\"body\":{}}",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return JSON.stringify(res)",
+   "output": {
+    "output": "{\"url\":\"http://BASE/json\",\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-length\":\"17\",\"content-type\":\"application/json;charset=utf-8\",\"date\":\"DATE\"},\"redirected\":false,\"body\":{}}",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return [res.status, res.ok, res.statusText, res.redirected, res.bodyUsed, res.body === null, typeof res.body, res.body.locked, res.headers instanceof Headers, res.url === BASE + \"/json\"]",
+   "output": {
+    "output": "[200,true,\"OK\",false,false,false,\"object\",false,true,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return [typeof res.text, res.text.name, res.text.length, res.json.length, res.body.getReader.name, res.body.getReader.length, res.body.cancel.length, typeof res.body[Symbol.asyncIterator], Object.keys(res.body)]",
+   "output": {
+    "output": "[\"function\",\"\",0,0,\"\",1,1,\"function\",[\"cancel\",\"getReader\"]]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return res.body",
+   "output": {
+    "output": "{}",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); return res.headers",
+   "output": {
+    "output": "{\"content-length\":\"17\",\"content-type\":\"application/json;charset=utf-8\",\"date\":\"DATE\"}",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/missing\"); return [res.status, res.ok, res.statusText, await res.text()]",
+   "output": {
+    "output": "[404,false,\"Not Found\",\"no such thing\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/missing"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const a = await res.json(); const b = await res.text().catch(e => [e.name, e.message]); return [a, b, res.bodyUsed, res.body.locked]",
+   "output": {
+    "output": "[{\"a\":1,\"b\":[1,2]},[\"TypeError\",\"Body already used\"],true,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const t = await res.text(); return [t, await res.json().catch(e => [e.name, e.message]), await res.bytes().catch(e => e.name)]",
+   "output": {
+    "output": "[\"{\\\"a\\\":1,\\\"b\\\":[1,2]}\",[\"TypeError\",\"Body already used\"],\"TypeError\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const b = await res.bytes(); return [b instanceof Uint8Array, [...b].length, b[0]]",
+   "output": {
+    "output": "[true,17,123]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const b = await res.arrayBuffer(); return [b instanceof Uint8Array, b.length]",
+   "output": {
+    "output": "[true,17]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/text\"); return await res.json().catch(e => [e.name, e.message])",
+   "output": {
+    "output": "[\"SyntaxError\",\"JSON Parse error: Unexpected identifier \\\"hello\\\"\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/bad-json\"); return await res.json().catch(e => [e.name, e.message])",
+   "output": {
+    "output": "[\"SyntaxError\",\"JSON Parse error: Unexpected identifier \\\"not\\\"\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/bad-json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/empty\"); return [res.body === null, await res.text(), res.bodyUsed, await res.text().catch(e => e.message)]",
+   "output": {
+    "output": "[false,\"\",true,\"Body already used\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/empty"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/empty\"); return await res.json().catch(e => [e.name, e.message])",
+   "output": {
+    "output": "[\"SyntaxError\",\"Unexpected end of JSON input\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/empty"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/bom\"); return [await res.text()]",
+   "output": {
+    "output": "[\"hi�\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/bom"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/chunks\"); return await res.text()",
+   "output": {
+    "output": "abcdef",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/chunks"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/nocontent\"); return [res.status, res.body, res.bodyUsed, await res.text(), await res.text(), res.bodyUsed, [...await res.bytes()], await res.json().catch(e => [e.name, e.message])]",
+   "output": {
+    "output": "[204,null,false,\"\",\"\",false,[],[\"SyntaxError\",\"Unexpected end of JSON input\"]]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/nocontent"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\", { method: \"HEAD\" }); return [res.body, res.bodyUsed, await res.text(), await res.text()]",
+   "output": {
+    "output": "[null,false,\"\",\"\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "HEAD",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/chunks\"); const r = res.body.getReader(); const out = []; for (;;) { const { value, done } = await r.read(); if (done) break; out.push(...value) } return [new TextDecoder().decode(new Uint8Array(out)), res.bodyUsed, res.body.locked]",
+   "output": {
+    "output": "[\"abcdef\",true,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/chunks"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); return [Object.keys(r), r.read.name, r.read.length, r.cancel.name, r.cancel.length, r.releaseLock.name, r.releaseLock.length]",
+   "output": {
+    "output": "[[\"read\",\"cancel\",\"releaseLock\"],\"read\",0,\"cancel\",1,\"releaseLock\",0]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); const a = await r.read(); const b = await r.read(); const c = await r.read(); return [Object.keys(a), a.done, a.value instanceof Uint8Array, Object.keys(b), b, c.done, res.body.locked]",
+   "output": {
+    "output": "[[\"value\",\"done\"],false,true,[\"value\",\"done\"],{\"done\":true},true,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); return [res.bodyUsed, res.body.locked, await res.text().catch(e => [e.name, e.message])]",
+   "output": {
+    "output": "[true,true,[\"TypeError\",\"Body already used\"]]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); res.body.getReader(); try { res.body.getReader() } catch (e) { return [e.name, e.message] }",
+   "output": {
+    "output": "[\"TypeError\",\"Invalid state: ReadableStream is locked\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); try { res.body.getReader({ mode: \"byob\" }) } catch (e) { return [e.name, e.message, res.body.locked] }",
+   "output": {
+    "output": "[\"TypeError\",\"Only the default stream reader is supported.\",false]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); try { res.body.getReader({ mode: null }) } catch (e) { return [e.name, e.message] }",
+   "output": {
+    "output": "[\"TypeError\",\"Only the default stream reader is supported.\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); res.body.getReader({}); res.body.getReader === undefined; return res.body.locked",
+   "output": {
+    "output": "true",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); r.releaseLock(); r.releaseLock(); return [res.body.locked, res.bodyUsed, await r.read().catch(e => [e.name, e.message]), await r.cancel().catch(e => e.message), await res.text().catch(e => e.message)]",
+   "output": {
+    "output": "[false,true,[\"TypeError\",\"Invalid state: The reader is not attached to a stream\"],\"Invalid state: The reader is not attached to a stream\",\"Body already used\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); await r.read(); r.releaseLock(); const again = res.body.getReader(); return [await again.read(), res.body.locked]",
+   "output": {
+    "output": "[{\"done\":true},true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); res.body.getReader(); return await res.body.cancel().catch(e => [e.name, e.message])",
+   "output": {
+    "output": "[\"TypeError\",\"Invalid state: ReadableStream is locked\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const c = await res.body.cancel(\"stop\"); return [c, res.bodyUsed, res.body.locked, await res.body.cancel(), await res.body.getReader().read(), await res.text().catch(e => e.message)]",
+   "output": {
+    "output": "[null,true,false,null,{\"done\":true},\"Body already used\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const r = res.body.getReader(); const c = await r.cancel(); return [c, await r.read(), res.body.locked, res.bodyUsed]",
+   "output": {
+    "output": "[null,{\"done\":true},true,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/open\"); const r = res.body.getReader(); return (await r.read()).value[0]",
+   "output": {
+    "output": "42",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/open"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/open\"); const r = res.body.getReader(); const chunk = await r.read(); await r.cancel(); return [chunk.value[0], await r.read()]",
+   "output": {
+    "output": "[42,{\"done\":true}]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/open"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/chunks\"); const d = new TextDecoder(); let text = \"\"; for await (const chunk of res.body) text += d.decode(chunk, { stream: true }); return [text + d.decode(), res.body.locked, res.bodyUsed]",
+   "output": {
+    "output": "[\"abcdef\",false,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/chunks"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/split\"); const d = new TextDecoder(); let text = \"\"; for await (const chunk of res.body) text += d.decode(chunk, { stream: true }); return [text + d.decode(), [...text].length]",
+   "output": {
+    "output": "[\"é😀\",2]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/split"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/open\"); let first; for await (const chunk of res.body) { first = chunk[0]; break } return [first, res.body.locked, res.bodyUsed]",
+   "output": {
+    "output": "[42,false,true]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/open"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const it = res.body[Symbol.asyncIterator](); const a = await it.next(); const b = await it.next(); return [Object.keys(it), it.next.name, it.return.name, Object.keys(a), a.done, b, res.body.locked]",
+   "output": {
+    "output": "[[\"next\",\"return\"],\"next\",\"return\",[\"value\",\"done\"],false,{\"done\":true},false]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const it = res.body[Symbol.asyncIterator](); const r = await it.return(); return [r, res.body.locked, res.bodyUsed, await it.next(), await it.return()]",
+   "output": {
+    "output": "[{\"done\":true},false,true,{\"done\":true},{\"done\":true}]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); res.body.getReader(); try { for await (const c of res.body) {} } catch (e) { return [e.name, e.message] }",
+   "output": {
+    "output": "[\"TypeError\",\"Invalid state: ReadableStream is locked\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/json\"); const it = res.body[Symbol.asyncIterator](); return [res.body.locked, res.bodyUsed, await res.text().catch(e => e.message)]",
+   "output": {
+    "output": "[true,true,\"Body already used\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/headers\"); return [[...res.headers].filter(([k]) => k !== \"date\" && k !== \"content-length\"), res.headers.get(\"X-A\"), res.headers.getSetCookie(), res.headers.has(\"x-b\"), typeof res.headers.entries().next]",
+   "output": {
+    "output": "[[[\"content-type\",\"text/plain;charset=utf-8\"],[\"x-a\",\"1, 3\"],[\"x-b\",\"2\"],[\"set-cookie\",\"a=1\"],[\"set-cookie\",\"b=2\"]],\"1, 3\",[\"a=1\",\"b=2\"],true,\"function\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/headers"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/headers\"); const h = new Headers(res.headers); h.set(\"x-c\", \"4\"); return [h.get(\"x-c\"), res.headers.get(\"x-c\"), res.headers.get(\"content-type\")]",
+   "output": {
+    "output": "[\"4\",null,\"text/plain;charset=utf-8\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/headers"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/redirect\"); return [res.redirected, res.url === BASE + \"/json\", res.status, await res.json()]",
+   "output": {
+    "output": "[true,true,200,{\"a\":1,\"b\":[1,2]}]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/redirect"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const get = async (p) => (await fetch(BASE + p)).text(); return await Promise.all([get(\"/text\"), get(\"/json\"), get(\"/chunks\")])",
+   "output": {
+    "output": "[\"hello world\",\"{\\\"a\\\":1,\\\"b\\\":[1,2]}\",\"abcdef\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     },
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/json"
+      }
+     },
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/chunks"
+      }
+     }
+    ],
+    "files": []
+   }
+  }
+ ],
+ "closed": [
+  "open",
+  "open",
+  "open",
+  "redirect"
+ ]
+}

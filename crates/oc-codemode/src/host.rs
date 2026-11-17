@@ -129,6 +129,24 @@ pub enum HostValue {
     /// A host value the program cannot hold, described as "a symbol", "a bigint", "a Uint16Array", ...
     /// Crossing into the program throws `<label> produced <description>, which the program cannot hold.`
     Unrepresentable(String),
+    /// A live host object (upstream builds these for a streaming `fetch` response): properties in order, each a
+    /// value copied once, or an accessor read from the host on every access (non-enumerable, like upstream's
+    /// `defineAccessor`); a key may be `Symbol.asyncIterator`. Crossing in, it becomes an ordinary object.
+    Live(Vec<(HostKey, HostProperty)>),
+}
+
+/// A property key of a [`HostValue::Live`] object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostKey {
+    String(String),
+    AsyncIterator,
+}
+
+/// A property of a [`HostValue::Live`] object.
+#[derive(Clone)]
+pub enum HostProperty {
+    Value(HostValue),
+    Getter(Arc<dyn Fn() -> HostValue + Send + Sync>),
 }
 
 impl fmt::Debug for HostValue {
@@ -152,6 +170,16 @@ impl fmt::Debug for HostValue {
             HostValue::Error { name, message, .. } => write!(f, "{name}: {message}"),
             HostValue::Function(func) => write!(f, "[Function {}]", func.name()),
             HostValue::Unrepresentable(d) => write!(f, "<{d}>"),
+            HostValue::Live(props) => f
+                .debug_map()
+                .entries(props.iter().map(|(k, p)| {
+                    let value = match p {
+                        HostProperty::Value(v) => format!("{v:?}"),
+                        HostProperty::Getter(_) => "<getter>".to_string(),
+                    };
+                    (k, value)
+                }))
+                .finish(),
         }
     }
 }
@@ -316,7 +344,45 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// A response body as it arrives: chunks, or the error that ended it (a program sees it as `Error: <message>`).
+pub type BodyStream = futures::stream::BoxStream<'static, Result<Vec<u8>, String>>;
+
+/// An HTTP response whose body is still arriving (the `fetch` extension's responses since 2.3.0).
+pub struct HttpStreamingResponse {
+    /// Final URL after redirects.
+    pub url: String,
+    pub status: u16,
+    pub status_text: String,
+    pub redirected: bool,
+    /// Header names lowercased, in response order.
+    pub headers: Vec<(String, String)>,
+    /// Dropping it cancels the body.
+    pub body: BodyStream,
+}
+
+impl From<HttpResponse> for HttpStreamingResponse {
+    fn from(response: HttpResponse) -> HttpStreamingResponse {
+        let body = response.body;
+        let chunks: Vec<Result<Vec<u8>, String>> = if body.is_empty() { Vec::new() } else { vec![Ok(body)] };
+        HttpStreamingResponse {
+            url: response.url,
+            status: response.status,
+            status_text: response.status_text,
+            redirected: response.redirected,
+            headers: response.headers,
+            body: Box::pin(futures::stream::iter(chunks)),
+        }
+    }
+}
+
 /// The host's HTTP transport. Errors are the message a program sees (thrown as a `TypeError`, like `fetch`).
 pub trait HttpClient: Send + Sync {
     fn send(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, String>>;
+
+    /// Sends a request and returns once the response head arrives; the body streams after. The default buffers the
+    /// body with [`HttpClient::send`] and streams it as one chunk.
+    fn send_streaming(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpStreamingResponse, String>> {
+        let sent = self.send(request);
+        Box::pin(async move { sent.await.map(HttpStreamingResponse::from) })
+    }
 }
