@@ -89,13 +89,15 @@ fn answer(path: &str, port: u16) -> Vec<u8> {
     format!("HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
 
-async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(stream: &mut S, port: u16) -> Option<String> {
+/// Reads one request and answers it. The request is recorded (`record`) before the answer goes out, so a client that
+/// has its answer always finds its request in `seen`.
+async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(stream: &mut S, port: u16, record: impl FnOnce(String)) {
     let mut data = Vec::new();
     let mut buf = [0u8; 4096];
     let header_end = loop {
-        let n = stream.read(&mut buf).await.ok()?;
+        let Ok(n) = stream.read(&mut buf).await else { return };
         if n == 0 {
-            return None;
+            return;
         }
         data.extend_from_slice(&buf[..n]);
         if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -108,16 +110,18 @@ async fn exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(strea
         .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
         .unwrap_or(0);
     while data.len() < header_end + length {
-        let n = stream.read(&mut buf).await.ok()?;
+        let Ok(n) = stream.read(&mut buf).await else { return };
         if n == 0 {
             break;
         }
         data.extend_from_slice(&buf[..n]);
     }
     let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
-    stream.write_all(&answer(&path, port)).await.ok()?;
-    let _ = stream.shutdown().await;
-    Some(path)
+    let answer = answer(&path, port);
+    record(path);
+    if stream.write_all(&answer).await.is_ok() {
+        let _ = stream.shutdown().await;
+    }
 }
 
 impl Server {
@@ -153,15 +157,11 @@ impl Server {
                         Some(acceptor) => {
                             let Ok(mut stream) = acceptor.accept(socket).await else { return };
                             let certified = stream.get_ref().1.peer_certificates().is_some_and(|c| !c.is_empty());
-                            if let Some(path) = exchange(&mut stream, port).await {
-                                recorded.lock().push(Seen { path, certified });
-                            }
+                            exchange(&mut stream, port, |path| recorded.lock().push(Seen { path, certified })).await;
                         }
                         None => {
                             let mut socket = socket;
-                            if let Some(path) = exchange(&mut socket, port).await {
-                                recorded.lock().push(Seen { path, certified: false });
-                            }
+                            exchange(&mut socket, port, |path| recorded.lock().push(Seen { path, certified: false })).await;
                         }
                     }
                 });
