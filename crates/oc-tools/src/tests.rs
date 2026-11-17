@@ -583,8 +583,9 @@ async fn patch_case_only_moves() {
 }
 
 // A case-only move onto a name that already exists (as on a case-insensitive file system) writes in place and
-// renames instead of writing the new name and deleting the old one.
-#[cfg(unix)]
+// renames instead of writing the new name and deleting the old one. A case-sensitive file system stands in for one
+// with a second file under the new name; on a case-insensitive one (the macOS and Windows default) the new name is
+// the file itself.
 #[tokio::test]
 async fn patch_case_only_move_onto_an_existing_name_renames() {
     let dir = tempfile::tempdir().unwrap();
@@ -592,10 +593,14 @@ async fn patch_case_only_move_onto_an_existing_name_renames() {
     let ctx = context(dir.path(), host.clone());
     let tool = tools::patch::PatchTool::new(Arc::new(Formatter::new()));
     std::fs::write(dir.path().join("note.txt"), "before\n").unwrap();
-    std::fs::write(dir.path().join("Note.txt"), "other\n").unwrap();
+    let case_insensitive = dir.path().join("Note.txt").exists();
+    if !case_insensitive {
+        std::fs::write(dir.path().join("Note.txt"), "other\n").unwrap();
+    }
     let patch = "*** Begin Patch\n*** Update File: note.txt\n*** Move to: Note.txt\n@@\n-before\n+after\n*** End Patch";
     run(&tool, json!({"patchText": patch}), ctx.clone()).await.unwrap();
-    assert!(!dir.path().join("note.txt").exists());
+    let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec!["Note.txt"], "case-insensitive: {case_insensitive}");
     assert_eq!(std::fs::read_to_string(dir.path().join("Note.txt")).unwrap(), "after\n");
 }
 

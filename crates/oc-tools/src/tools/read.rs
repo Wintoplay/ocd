@@ -1172,17 +1172,19 @@ mod tests {
     #[test]
     fn ignores_a_nul_after_a_chunked_page_but_rejects_it_for_a_past_end_offset() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("nul.txt");
+        // Upstream names it `nul.txt`, but Windows (before 11) maps any `NUL.*` name to its null device, which takes
+        // the writes and fails the read (`Incorrect function`).
+        let file = dir.path().join("late-nul.txt");
         std::fs::write(&file, format!("{}\nselected\n\0\ntail", "x".repeat(256 * 1024))).unwrap();
         for offset in [2, -3] {
-            match read(&file, "nul.txt", page(Some(offset), Some(1))).unwrap() {
+            match read(&file, "late-nul.txt", page(Some(offset), Some(1))).unwrap() {
                 ReadOutput::TextPage { content, offset, truncated, next, .. } => {
                     assert_eq!((content.as_str(), offset, truncated, next), ("selected", 2, true, Some(3)));
                 }
                 other => panic!("{other:?}"),
             }
         }
-        assert!(matches!(read(&file, "nul.txt", page(Some(5), Some(1))), Err(ReadError::Binary { .. })));
+        assert!(matches!(read(&file, "late-nul.txt", page(Some(5), Some(1))), Err(ReadError::Binary { .. })));
     }
 
     /// "keeps a split byte order mark in a past-end tail and strips it at a negative offset" (2.3.0, #63030).

@@ -162,8 +162,15 @@ fn launch(description: &str, prompt: &str) -> Value {
     json!({"agent": "general", "description": description, "prompt": prompt})
 }
 
-fn wait_command(release: &std::path::Path) -> String {
-    format!("while [ ! -e '{}' ]; do sleep 0.025; done; printf done", release.display())
+/// A background command that runs until `release` exists, in the shell the tool picks (`compat`): PowerShell, as on
+/// Windows by default (upstream's test assumes it there), or a POSIX shell.
+fn wait_command(app: &App, release: &std::path::Path) -> String {
+    use oc_tools::shell::select;
+    if select::ps(&select::resolve(select::Priority::Compat, None, Some(&app.global.bin))) {
+        format!("while (!(Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 25 }}; Write-Output done", release.display())
+    } else {
+        format!("while [ ! -e '{}' ]; do sleep 0.025; done; printf done", release.display())
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -318,7 +325,7 @@ async fn subagent_reports() {
     // ---- "reports immediately with running background work and again after the shell exits", with the
     // `state="running"` tag (#63675) only in the model-facing text
     let release = root.join("release-a");
-    let command = wait_command(&release);
+    let command = wait_command(&h.app, &release);
     let p = h.session("Parent", None).await;
     let args = launch("run tests", "start the tests");
     let cmd = command.clone();
@@ -349,7 +356,7 @@ async fn subagent_reports() {
 
     // ---- "nested subagents report one level at a time"
     let release = root.join("release-b");
-    let command = wait_command(&release);
+    let command = wait_command(&h.app, &release);
     let p = h.session("Parent", None).await;
     let args = launch("child review", "review the child fixture");
     let cmd = command.clone();

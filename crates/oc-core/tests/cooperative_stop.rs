@@ -321,6 +321,19 @@ async fn user_stop_lets_tools_settle_their_own_calls() {
     }
 
     // ---- the shell tool, through a whole run ----
+    // The commands run in the shell the tool picks (`compat`): PowerShell, as on Windows by default (upstream's tests
+    // assume it there), or a POSIX shell.
+    use oc_tools::shell::select;
+    let shell = select::resolve(select::Priority::Compat, None, Some(&app.global.bin));
+    let (first_second, idle, ready) = if select::ps(&shell) {
+        (
+            "[Console]::Out.Write('first' + [char]10 + 'second' + [char]10); Start-Sleep -Seconds 60",
+            "Start-Sleep -Seconds 60",
+            "[Console]::Out.Write('ready'); Start-Sleep -Seconds 60",
+        )
+    } else {
+        ("printf 'first\\nsecond\\n'; sleep 60", "sleep 60", "printf ready; sleep 60")
+    };
     let run = |dir: std::path::PathBuf, command: &'static str| {
         let app = app.clone();
         let session = session.clone();
@@ -340,8 +353,8 @@ async fn user_stop_lets_tools_settle_their_own_calls() {
     };
 
     // A stopped command keeps its file, and the call fails with the output so far, the file and the shell ID.
-    let sid = run(project.clone(), "printf 'first\\nsecond\\n'; sleep 60").await;
-    until("the command's output", || running(&shells, true).is_some()).await;
+    let sid = run(project.clone(), first_second).await;
+    until(&format!("the command's output (in {shell})"), || running(&shells, true).is_some()).await;
     let info = running(&shells, true).unwrap();
     assert!(app.coordinator().interrupt(&sid, Some(Reason::User), true).await);
     let msgs = messages(&app, &sid);
@@ -356,7 +369,7 @@ async fn user_stop_lets_tools_settle_their_own_calls() {
     assert_eq!(assistant_error(&msgs).map(|e| e.message).as_deref(), Some("Step interrupted"));
 
     // A command that wrote nothing says so once.
-    let sid = run(project.clone(), "sleep 60").await;
+    let sid = run(project.clone(), idle).await;
     until("the command", || running(&shells, false).is_some()).await;
     let info = running(&shells, false).unwrap();
     assert!(app.coordinator().interrupt(&sid, Some(Reason::User), true).await);
@@ -365,22 +378,25 @@ async fn user_stop_lets_tools_settle_their_own_calls() {
     shells.wait(&info.id).await.unwrap();
 
     // A command that ignores SIGTERM: the call settles after the short wait, not the 3 s grace before SIGKILL.
-    let sid = run(project.clone(), "trap '' TERM; printf 'kept\\n'; while :; do sleep 1; done").await;
-    until("the command's output", || running(&shells, true).is_some()).await;
-    let info = running(&shells, true).unwrap();
-    let started = tokio::time::Instant::now();
-    assert!(app.coordinator().interrupt(&sid, Some(Reason::User), true).await);
-    assert!(started.elapsed() < Duration::from_millis(2500), "{:?}", started.elapsed());
-    let (error, _) = failure(&messages(&app, &sid));
-    assert_eq!(
-        error.message,
-        format!("kept\n\n[full output saved to {}]\n\nCommand interrupted by the user (shell ID: {}); it is still being stopped.", info.file, info.id)
-    );
-    // The stop still ends it.
-    assert_eq!(tokio::time::timeout(Duration::from_secs(10), shells.wait(&info.id)).await.unwrap().unwrap().status, ShellStatus::Killed);
+    // Windows ends a stopped command at once, so nothing there ignores the stop (upstream skips this case there).
+    if cfg!(unix) {
+        let sid = run(project.clone(), "trap '' TERM; printf 'kept\\n'; while :; do sleep 1; done").await;
+        until("the command's output", || running(&shells, true).is_some()).await;
+        let info = running(&shells, true).unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(app.coordinator().interrupt(&sid, Some(Reason::User), true).await);
+        assert!(started.elapsed() < Duration::from_millis(2500), "{:?}", started.elapsed());
+        let (error, _) = failure(&messages(&app, &sid));
+        assert_eq!(
+            error.message,
+            format!("kept\n\n[full output saved to {}]\n\nCommand interrupted by the user (shell ID: {}); it is still being stopped.", info.file, info.id)
+        );
+        // The stop still ends it.
+        assert_eq!(tokio::time::timeout(Duration::from_secs(10), shells.wait(&info.id)).await.unwrap().unwrap().status, ShellStatus::Killed);
+    }
 
     // A server shutdown interrupts the call; the command is stopped and its file stays.
-    let sid = run(project.clone(), "printf ready; sleep 60").await;
+    let sid = run(project.clone(), ready).await;
     until("the command's output", || running(&shells, true).is_some()).await;
     let info = running(&shells, true).unwrap();
     assert!(app.coordinator().interrupt(&sid, Some(Reason::Shutdown), true).await);
