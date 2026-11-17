@@ -515,6 +515,31 @@ async fn permission_evaluate_and_session_hooks() {
     s.shutdown().await;
 }
 
+/// 2.3.0: request hooks read a stored message's metadata, which never reaches the provider (session-runner.test.ts
+/// #63590); a plugin's `fork` hook runs on every fork, and one that throws still returns the saved fork with its
+/// notice (instances.test.ts #63235). The fixture's setup returns a hooks object, which is not a cleanup (#63548).
+#[tokio::test]
+async fn request_metadata_and_fork_hook() {
+    require_bun!();
+    let s = setup(json!([fixture("fork-metadata-plugin")]), vec![Turn::Text("done")]).await;
+    let session = s.h.session().await;
+    s.run(&session, "check the canary").await;
+    let body = s.mock.bodies.lock()[0].clone();
+    let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["content"], json!([{ "type": "text", "text": "CANARY-TOKEN" }, { "type": "text", "text": "check the canary" }]), "{body}");
+    assert!(!body.to_string().contains("\"metadata\""), "{body}");
+
+    let r = s.h.post(&format!("/api/session/{session}/fork"), json!({})).await;
+    assert_eq!(r.status, 200, "{:?}", String::from_utf8_lossy(&r.body));
+    let fork = r.json()["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(s.h.app.db.kv_get(&kv_key("fixture.fork-metadata", "forks")).unwrap(), Some(json!([fork])));
+    let inbox = s.h.get(&format!("/api/session/{fork}/inbox")).await.json()["data"].clone();
+    assert_eq!(inbox[0]["id"], json!(format!("msg_fork_notice_{fork}")), "{inbox}");
+    let got = s.h.get(&format!("/api/session/{fork}")).await.json()["data"].clone();
+    assert_eq!(got["fork"]["sessionID"], json!(session));
+    s.shutdown().await;
+}
+
 #[tokio::test]
 async fn storage_events_and_rpc() {
     require_bun!();

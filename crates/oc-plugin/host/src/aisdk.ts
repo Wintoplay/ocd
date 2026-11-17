@@ -326,7 +326,7 @@ async function loadSDKFactory(io: BridgeIO, name: string) {
 // Packages upstream bundles in its binary, at the versions it pins (packages/core/package.json);
 // ocd installs exactly those versions on first use.
 const PINNED: Record<string, string> = {
-  "gitlab-ai-provider": "gitlab-ai-provider@6.23.1",
+  "gitlab-ai-provider": "gitlab-ai-provider@6.24.0",
 }
 
 const pinned = (io: BridgeIO, name: string) => importInstalled(io, PINNED[name]!, name)

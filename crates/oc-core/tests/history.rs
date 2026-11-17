@@ -360,3 +360,31 @@ fn history_never_decodes_rows_before_the_latest_compaction_or_its_kept_tail() {
     assert_eq!(kept(&history[0]), "[User]: Kept question");
     assert!(matches!(&history[1], Message::User { text, .. } if text == "After"));
 }
+
+/// session-runner.test.ts (2.3.0, #63667) "hides an update a revert left behind once the source is removed": an
+/// instruction update before the current baseline's epoch is already covered by it, so the model context hides it.
+/// Clients still see every message.
+#[test]
+fn hides_instruction_updates_before_the_baseline_epoch() {
+    let (db, sid) = setup();
+    user(&db, &sid, "First");
+    store(&db, &sid, "system", json!({ "time": { "created": 0 }, "text": "Entered mode", "metadata": { "notice": "instructions" } }));
+    store(&db, &sid, "system", json!({ "time": { "created": 0 }, "text": "Other notice", "metadata": { "notice": "other" } }));
+    let second = user(&db, &sid, "Second");
+    let seq_of = |id: &str| -> i64 {
+        db.with(|c| c.query_row("SELECT seq FROM session_message WHERE id = ?", [id], |r| r.get(0))).unwrap()
+    };
+    let context = |db: &Database| -> Vec<String> { texts(&history::entries(db, &sid, Boundary::Latest).unwrap().into_iter().map(|(_, m)| m).collect::<Vec<_>>()) };
+    // Without an instruction state, every update replays.
+    assert_eq!(context(&db), ["First", "Entered mode", "Other notice", "Second"]);
+    // A fresh baseline rendered at "Second" covers the update before it.
+    db.with(|c| {
+        c.execute(
+            "INSERT INTO instruction_state (session_id, epoch_start, through_seq, initial_values, current_values) VALUES (?, ?, ?, '{}', '{}')",
+            rusqlite::params![sid, seq_of(&second), seq_of(&second)],
+        )
+    })
+    .unwrap();
+    assert_eq!(context(&db), ["First", "Other notice", "Second"]);
+    assert_eq!(db.session_messages(&sid).unwrap().iter().filter(|(_, m)| matches!(m, Message::System { .. })).count(), 2);
+}

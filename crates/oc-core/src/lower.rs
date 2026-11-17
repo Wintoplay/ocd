@@ -308,7 +308,7 @@ fn assistant(m: &Assistant, model: &ModelRef, key: &str) -> Vec<Message> {
     if meaningful.is_empty() {
         return results;
     }
-    let mut out = vec![Message { id: Some(m.id.clone()), role: Role::Assistant, content: meaningful, metadata: m.metadata.clone(), provider_metadata: None, native: None }];
+    let mut out = vec![Message { id: Some(m.id.clone()), role: Role::Assistant, content: meaningful, metadata: None, provider_metadata: None, native: None }];
     out.extend(results);
     out
 }
@@ -321,8 +321,8 @@ fn variant_effort(v: &Option<String>) -> Option<Option<String>> {
     }
 }
 
-fn msg(id: &str, role: Role, text: String, metadata: Option<Metadata>) -> Message {
-    Message { id: Some(id.into()), role, content: vec![ContentPart::text(text)], metadata, provider_metadata: None, native: None }
+fn msg(id: &str, role: Role, text: String) -> Message {
+    Message { id: Some(id.into()), role, content: vec![ContentPart::text(text)], metadata: None, provider_metadata: None, native: None }
 }
 
 pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> Vec<Message> {
@@ -339,10 +339,10 @@ pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> 
                 _ => vec![],
             }
         }
-        SessionMessage::LocationSwitched { id, location, metadata, .. } => {
-            vec![msg(id, Role::User, format!("The working directory has been changed to {}.", location.directory), metadata.clone())]
+        SessionMessage::LocationSwitched { id, location, .. } => {
+            vec![msg(id, Role::User, format!("The working directory has been changed to {}.", location.directory))]
         }
-        SessionMessage::User { id, metadata, text, files, agents, skills, .. } => {
+        SessionMessage::User { id, text, files, skills, .. } => {
             let mut content: Vec<ContentPart> = skills
                 .iter()
                 .flatten()
@@ -355,14 +355,10 @@ pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> 
             if content.is_empty() {
                 return vec![];
             }
-            let mut meta = metadata.clone().unwrap_or_default();
-            if let Some(a) = agents.as_ref().filter(|a| !a.is_empty()) {
-                meta.insert("agents".into(), serde_json::to_value(a).unwrap());
-            }
-            vec![Message { id: Some(id.clone()), role: Role::User, content, metadata: Some(meta), provider_metadata: None, native: None }]
+            vec![Message { id: Some(id.clone()), role: Role::User, content, metadata: None, provider_metadata: None, native: None }]
         }
-        SessionMessage::Synthetic { id, text, .. } => vec![msg(id, Role::User, text.clone(), None)],
-        SessionMessage::Skill { id, text, metadata, .. } => vec![msg(id, Role::User, text.clone(), metadata.clone())],
+        SessionMessage::Synthetic { id, text, .. } => vec![msg(id, Role::User, text.clone())],
+        SessionMessage::Skill { id, text, .. } => vec![msg(id, Role::User, text.clone())],
         SessionMessage::System { text, .. } => vec![Message::system(text.clone())],
         SessionMessage::Shell { id, metadata, command, output, .. } => {
             if metadata.as_ref().and_then(|m| m.get("background")) == Some(&Value::Bool(true)) {
@@ -375,7 +371,6 @@ pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> 
                     "The following shell command was executed by the user:\n\nCommand:\n{command}\n\nOutput:\n{}",
                     output.as_ref().map(|o| o.output.as_str()).unwrap_or("")
                 ),
-                metadata.clone(),
             )]
         }
         SessionMessage::Assistant(a) => assistant(a, model, key),
@@ -397,7 +392,7 @@ pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> 
                 lines.push(format!("<recent-context>\n{recent}\n</recent-context>"));
             }
             lines.push("</conversation-checkpoint>".into());
-            vec![msg(&c.id, Role::User, lines.join("\n"), c.metadata.clone())]
+            vec![msg(&c.id, Role::User, lines.join("\n"))]
         }
     }
 }
@@ -405,4 +400,30 @@ pub fn to_llm_message(message: &SessionMessage, model: &ModelRef, key: &str) -> 
 pub fn to_llm_messages(messages: &[SessionMessage], model: &ModelRef, key: Option<&str>) -> Vec<Message> {
     let key = key.unwrap_or(&model.provider_id).to_string();
     messages.iter().flat_map(|m| to_llm_message(m, model, &key)).collect()
+}
+
+/// `baseTranscript` messages (2.3.0, #63590): like [`to_llm_messages`], but the message built from a stored message
+/// (the one with its ID) carries the stored message's `metadata`, for request hooks to read. It is stripped before
+/// the request is sent ([`strip_metadata`]).
+pub fn to_request_messages(messages: &[SessionMessage], model: &ModelRef, key: Option<&str>) -> Vec<Message> {
+    let key = key.unwrap_or(&model.provider_id).to_string();
+    messages
+        .iter()
+        .flat_map(|m| {
+            let mut items = to_llm_message(m, model, &key);
+            if let Some(metadata) = m.metadata() {
+                for item in items.iter_mut().filter(|item| item.id.as_deref() == Some(m.id())) {
+                    item.metadata = Some(metadata.clone().into_iter().collect());
+                }
+            }
+            items
+        })
+        .collect()
+}
+
+/// Strips the stored metadata hooks could read, so it never reaches the provider.
+pub fn strip_metadata(messages: &mut [Message]) {
+    for message in messages {
+        message.metadata = None;
+    }
 }

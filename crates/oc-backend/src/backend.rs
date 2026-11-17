@@ -163,7 +163,9 @@ impl Backend for Engine {
         if !self.app.bus.media_blob_known(&parent.location.directory) {
             let _ = self.locations.get(&parent.location.directory).await;
         }
-        self.fork_session(&req.session_id, req.body.before)
+        let forked = self.fork_session(&req.session_id, req.body.before)?;
+        self.fork_hook(&forked.id).await;
+        Ok(forked)
     }
 
     async fn session_switch_agent(&self, _ctx: &RequestContext, req: SessionSwitchAgentRequest) -> Result<(), ApiError> {

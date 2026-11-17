@@ -755,7 +755,7 @@ impl Engine {
             &loaded.initial,
         );
         let key = model.language_model.route.provider_metadata_key.clone().unwrap_or_else(|| model.language_model.provider.clone());
-        let mut messages = crate::lower::to_llm_messages(&loaded.messages, &model_ref, Some(&key));
+        let mut messages = crate::lower::to_request_messages(&loaded.messages, &model_ref, Some(&key));
         if step_limit {
             messages.push(LlmMessage::assistant(vec![ContentPart::text(MAX_STEPS_PROMPT)]));
         }

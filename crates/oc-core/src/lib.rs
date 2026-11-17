@@ -19,6 +19,7 @@ pub mod shared_cache;
 pub mod provider_reload;
 pub mod discovery;
 pub mod errors;
+pub mod fork_notice;
 pub mod form;
 pub mod generate;
 pub mod goal;

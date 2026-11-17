@@ -180,6 +180,8 @@ pub async fn shape(
     } else if matches!(kind, Kind::Compaction | Kind::Title) {
         shaped.result = preset;
     }
+    // Strip the stored metadata hooks could read, so it never reaches the provider (#63590).
+    crate::lower::strip_metadata(&mut req.messages);
     model_request(plugins, key, kind, session_id, agent, model, req).await?;
     shaped.http = http_hooks(plugins, key, kind, session_id, agent, model);
     Ok(shaped)

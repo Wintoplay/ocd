@@ -527,8 +527,10 @@ export class LocationRuntime {
   private async teardown(activation: Slot) {
     const exit = await Effect.runPromiseExit(Scope.close(activation.scope, Exit.void))
     for (const remove of Array.from(activation.registrations)) remove()
+    // Later plugins, including the config agents and commands, are already closed. A failing finalizer must not
+    // abort the swap, or they stay unregistered until the next reload.
     if (Exit.isFailure(exit))
-      log("warn", "failed to unload plugin", { "plugin.id": activation.plugin.id, cause: Cause.pretty(exit.cause) })
+      log("error", "failed to clean up plugin", { "plugin.id": activation.plugin.id, cause: Cause.pretty(exit.cause) })
   }
 
   private computeInventory() {

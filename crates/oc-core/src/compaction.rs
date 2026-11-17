@@ -958,7 +958,7 @@ impl Run<'_> {
             &self.loaded.rendered,
         );
         let key = metadata_key(model);
-        let mut lowered = crate::lower::to_llm_messages(messages, &model.model_ref(), Some(&key));
+        let mut lowered = crate::lower::to_request_messages(messages, &model.model_ref(), Some(&key));
         crate::prompt::unsupported_parts(&mut lowered, &model.capabilities().input, &model.model.provider_id);
         crate::prompt::bound_images(&mut lowered);
         req.messages = lowered;

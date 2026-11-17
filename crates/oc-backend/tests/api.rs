@@ -191,6 +191,18 @@ async fn prompt_inbox_and_messages() {
     assert_eq!(fork["fork"]["sessionID"], json!(id));
     let msgs = h.get(&format!("/api/session/{fid}/message")).await.json();
     assert_eq!(msgs["data"].as_array().unwrap().len(), 2);
+    // session-create.test.ts (2.3.0, #63235): the fork notice waits in the fork's inbox, after the copied history and
+    // before the first prompt, without resuming the fork. The original gets none.
+    let inbox = h.get(&format!("/api/session/{fid}/inbox")).await.json()["data"].clone();
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
+    assert_eq!(inbox[0]["type"], "synthetic");
+    assert_eq!(inbox[0]["id"], json!(format!("msg_fork_notice_{fid}")));
+    assert_eq!(inbox[0]["delivery"], "steer");
+    assert_eq!(inbox[0]["payload"]["description"], "Fork notice");
+    assert_eq!(inbox[0]["payload"]["text"], json!(oc_core::fork_notice::NOTICE));
+    assert!(oc_core::fork_notice::NOTICE.starts_with("<fork-notice>\nThis conversation is a fork of another conversation"));
+    let original = h.get(&format!("/api/session/{id}/inbox")).await.json()["data"].clone();
+    assert!(!original.to_string().contains("fork-notice"), "{original}");
     let r = h.post(&format!("/api/session/{id}/fork"), json!({"before": "msg_missing"})).await;
     assert_eq!(r.status, 404);
     let empty = h.session().await;

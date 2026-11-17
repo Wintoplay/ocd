@@ -367,6 +367,23 @@ impl Message {
         }
     }
 
+    /// The stored message's own `metadata`.
+    pub fn metadata(&self) -> Option<&Metadata> {
+        match self {
+            Message::AgentSwitched { metadata, .. }
+            | Message::ModelSwitched { metadata, .. }
+            | Message::LocationSwitched { metadata, .. }
+            | Message::User { metadata, .. }
+            | Message::Synthetic { metadata, .. }
+            | Message::System { metadata, .. }
+            | Message::Skill { metadata, .. }
+            | Message::Shell { metadata, .. }
+            | Message::Idle { metadata, .. } => metadata.as_ref(),
+            Message::Assistant(a) => a.metadata.as_ref(),
+            Message::Compaction(c) => c.metadata.as_ref(),
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Message::AgentSwitched { .. } => "agent-switched",

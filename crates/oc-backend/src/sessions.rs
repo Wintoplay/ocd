@@ -293,6 +293,26 @@ impl Engine {
         self.session_api(&s)
     }
 
+    /// The `fork` session hook, run in the fork's location once its plugins are active (2.3.0, #63235): the built-in
+    /// fork notice plugin admits its notice, then plugins' hooks run. A failure is logged; the fork stays.
+    pub async fn fork_hook(&self, id: &str) {
+        let result: Result<(), String> = async {
+            let (_, loc) = self.session_scope(id).await.map_err(|e| e.to_string())?;
+            self.app.plugins.await_activation(&loc.key).await;
+            if self.app.plugins.builtin_enabled(&loc.key, oc_core::fork_notice::PLUGIN_ID) {
+                oc_core::fork_notice::admit(&self.app.sessions, id).await.map_err(|e| e.to_string())?;
+            }
+            if self.app.plugins.has_hook(&loc.key, "session.fork", None) {
+                self.app.plugins.trigger(&loc.key, "session.fork", json!({ "sessionID": id })).await.map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(cause) = result {
+            tracing::warn!(sessionID = %id, %cause, "fork hook failed");
+        }
+    }
+
     /// Prompt preparation (`SessionPrompt.prepare`): attachments and skills.
     async fn prepare_prompt(
         &self,

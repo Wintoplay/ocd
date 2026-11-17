@@ -133,10 +133,19 @@ fn entries_before(db: &Database, session: &str, boundary: Boundary, before: Opti
     // baseline supersedes the chronological updates before it. Forks seed their baseline at sequence 0 but
     // retain parent sequences, so the copied checkpoint still retires them.
     let native = entries.iter().rev().find(|(_, m)| is_native_compaction(m)).map(|(seq, _)| *seq);
+    // The instruction baseline covers every update before its epoch. A committed revert that removes an update
+    // clears the state, so the next baseline is rendered fresh and covers every surviving update (2.3.0, #63667).
+    let epoch = crate::instruction_state::epoch_start(db, session)?.unwrap_or(i64::MAX);
+    let stale_update = |seq: i64, m: &Message| {
+        matches!(m, Message::System { metadata: Some(metadata), .. } if metadata.get("notice").and_then(Value::as_str) == Some("instructions"))
+            && seq < epoch
+    };
     // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
     Ok(entries
         .into_iter()
-        .filter(|(seq, m)| !(matches!(m, Message::System { .. }) && native.is_some_and(|n| *seq < n)) && replayable(m, boundary))
+        .filter(|(seq, m)| {
+            !(matches!(m, Message::System { .. }) && native.is_some_and(|n| *seq < n)) && !stale_update(*seq, m) && replayable(m, boundary)
+        })
         .collect())
 }
 

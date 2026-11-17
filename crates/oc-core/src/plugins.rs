@@ -37,7 +37,7 @@ use crate::location::Location;
 
 /// Built-in (internal) plugin ids in activation order (`core/src/plugin/internal.ts` `pre`, the
 /// provider and web-search plugins, `post`), as `plugin.list` reports them.
-pub const BUILTIN_PLUGINS: [&str; 93] = [
+pub const BUILTIN_PLUGINS: [&str; 94] = [
     "opencode.tool.input.repair",
     "opencode.config.worktree",
     "opencode.config.mcp",
@@ -45,6 +45,7 @@ pub const BUILTIN_PLUGINS: [&str; 93] = [
     "opencode.wellknown",
     "opencode.vcs.git",
     "opencode.agent",
+    "opencode.fork-notice",
     "opencode.plan",
     "opencode.command",
     "opencode.goal",
@@ -136,7 +137,7 @@ pub const BUILTIN_PLUGINS: [&str; 93] = [
 ];
 
 /// Index of the first `post` internal plugin in [`BUILTIN_PLUGINS`].
-const POST_START: usize = 75;
+const POST_START: usize = 76;
 
 /// The ocd-native internal plugins in upstream order.
 pub fn internal_plugins() -> InternalPlugins {

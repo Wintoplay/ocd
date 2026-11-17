@@ -30,6 +30,14 @@ fn find(bus: &Bus, session: &str) -> anyhow::Result<Option<Stored>> {
     }))
 }
 
+/// `epochStart`: where the current baseline starts; updates before it are already folded into the baseline.
+pub fn epoch_start(db: &oc_storage::Database, session: &str) -> anyhow::Result<Option<i64>> {
+    let row: Option<Option<i64>> = db.with(|c| {
+        c.query_row("SELECT epoch_start FROM instruction_state WHERE session_id = ?", [session], |r| r.get(0)).optional()
+    })?;
+    Ok(row.flatten())
+}
+
 fn load_blobs(bus: &Bus, hashes: &[String]) -> anyhow::Result<HashMap<String, Value>> {
     let mut out = HashMap::new();
     for h in hashes {
