@@ -13,7 +13,6 @@ use std::time::Duration;
 use oc_schema::Metadata;
 use oc_schema::message::{ShellInfo, ShellOutput, ShellStatus, ShellTime};
 use parking_lot::Mutex;
-use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
 use super::result::{ShellResult, Written, capture_start, capture_tail};
@@ -232,12 +231,19 @@ impl ShellService {
             .current_dir(&invocation.cwd)
             .env_clear()
             .envs(&invocation.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(Stdio::null());
+        // stdout and stderr share one pipe, so the output keeps the order the command wrote it in (two pipes read
+        // by two tasks could swap chunks written back to back, like `echo out; echo err >&2`).
+        let (reader, writer) = std::io::pipe().map_err(|e| e.to_string())?;
+        let stderr_writer = writer.try_clone().map_err(|e| e.to_string())?;
+        command.stdout(Stdio::from(writer)).stderr(Stdio::from(stderr_writer));
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let spawned = command.spawn();
+        // Close this process's copies of the write end, so the reader sees the end once the command (and anything
+        // it left running with the pipe) is gone.
+        drop(command);
+        let mut child = spawned.map_err(|e| e.to_string())?;
         let pid = child.id();
         let info = ShellInfo {
             id: id.clone(),
@@ -270,44 +276,32 @@ impl ShellService {
         }
 
         let out = std::sync::Arc::new(Mutex::new(std::fs::File::create(&file).map_err(|e| e.to_string())?));
-        let pump = |mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>, active: Arc<Active>, out: Arc<Mutex<std::fs::File>>| async move {
-            let mut buffer = vec![0u8; 16 * 1024];
-            loop {
-                match reader.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        use std::io::Write;
-                        let chunk = &buffer[..n];
-                        // stdout and stderr share the file: count under its lock, so offsets follow the bytes.
-                        let mut file = out.lock();
-                        let _ = file.write_all(chunk);
-                        let size = active.size.load(Ordering::SeqCst);
-                        let mut line_starts = active.line_starts.lock();
-                        for (index, _) in chunk.iter().enumerate().filter(|(_, b)| **b == b'\n') {
-                            active.newlines.fetch_add(1, Ordering::SeqCst);
-                            *line_starts = [line_starts[1], size + index as u64 + 1];
+        let output_task = {
+            let active = active.clone();
+            let out = out.clone();
+            tokio::task::spawn_blocking(move || {
+                use std::io::{Read, Write};
+                let mut reader = reader;
+                let mut buffer = vec![0u8; 16 * 1024];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let chunk = &buffer[..n];
+                            let mut file = out.lock();
+                            let _ = file.write_all(chunk);
+                            let size = active.size.load(Ordering::SeqCst);
+                            let mut line_starts = active.line_starts.lock();
+                            for (index, _) in chunk.iter().enumerate().filter(|(_, b)| **b == b'\n') {
+                                active.newlines.fetch_add(1, Ordering::SeqCst);
+                                *line_starts = [line_starts[1], size + index as u64 + 1];
+                            }
+                            active.size.store(size + n as u64, Ordering::SeqCst);
                         }
-                        active.size.store(size + n as u64, Ordering::SeqCst);
                     }
                 }
-            }
-        };
-        let stdout = child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>);
-        let stderr = child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>);
-        let output_task = {
-            let a = active.clone();
-            let o = out.clone();
-            tokio::spawn(async move {
-                let first = stdout.map(|s| tokio::spawn(pump(s, a.clone(), o.clone())));
-                let second = stderr.map(|s| tokio::spawn(pump(s, a.clone(), o.clone())));
-                if let Some(t) = first {
-                    let _ = t.await;
-                }
-                if let Some(t) = second {
-                    let _ = t.await;
-                }
-                use std::io::Write;
-                let _ = o.lock().flush();
+                let _ = out.lock().flush();
             })
         };
 
@@ -450,8 +444,20 @@ mod tests {
         assert_eq!(result.info.status, ShellStatus::Exited);
         assert_eq!(result.info.exit, Some(3));
         let capture = result.capture.unwrap();
-        assert!(capture.output.contains("hi\n") && capture.output.contains("err\n"));
+        assert_eq!(capture.output, "hi\nerr\n");
         assert!(!capture.truncated);
+    }
+
+    /// stdout and stderr written back to back keep their order (they share one pipe).
+    #[tokio::test]
+    async fn interleaved_stdout_and_stderr_keep_their_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = ShellService::new(dir.path().to_path_buf(), None);
+        let script = "i=0; while [ $i -lt 300 ]; do echo out$i; echo err$i 1>&2; i=$((i+1)); done";
+        let info = service.spawn(&invocation(script, dir.path(), 0), Metadata::new(), "p").await.unwrap();
+        let result = service.result(&info, 5000, 1 << 20).await;
+        let expected: String = (0..300).map(|i| format!("out{i}\nerr{i}\n")).collect();
+        assert_eq!(result.capture.unwrap().output, expected);
     }
 
     #[tokio::test]

@@ -80,7 +80,7 @@ upstream runs on Linux x86_64.
 
 ```sh
 git clone https://github.com/sphinxid/ocd.git && cd ocd
-cargo build --release -p ocd          # needs Rust 1.85+ and a C compiler
+cargo build --release -p ocd          # needs Rust 1.88+ and a C compiler
 ./target/release/ocd --version        # ocd v0.3.3+1a2b3c4 (opencode 2.2.7)
 ```
 

@@ -19,7 +19,7 @@ stands).
 | Need | Notes |
 |---|---|
 | Linux x86_64 | The only tested platform |
-| Rust via [rustup](https://rustup.rs) | Edition 2024 needs Rust 1.85 or newer; development and releases use 1.99 |
+| Rust via [rustup](https://rustup.rs) | Rust 1.88 or newer (edition 2024 with let chains); development and releases use 1.99 |
 | A C compiler (`gcc` or `clang`) | For the bundled SQLite, zstd and `ring` |
 | Disk space | About 15 GB for a full debug and test build; a release build needs less |
 
