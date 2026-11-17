@@ -1,9 +1,10 @@
 # Differential parity: upstream opencode v2 vs ocd
 
-Upstream reference: since the 2.2.7 catch-up, a local build of `anomalyco/opencode` at tag `v2.2.7` (commit
-`fedc6f2`, built in `packages/cli` with `OPENCODE_CHANNEL=detached bun run script/build.ts --single --skip-web-ui`;
-reports `0.0.0-detached-<timestamp>`, channel `detached`). Port: `target/debug/ocd` (workspace version 2.2.7,
-channel `latest`). From 2026-11-07 to 2026-11-10 the reference was the same kind of build at tag `v2.2.5` (commit
+Upstream reference: since the 2.3.0 catch-up, a local build of `anomalyco/opencode` at tag `v2.3.0` (commit
+`a6b15d3`, built in `packages/cli` with `OPENCODE_CHANNEL=detached bun run script/build.ts --single --skip-web-ui`;
+reports `0.0.0-detached-<timestamp>`, channel `detached`). Port: `target/debug/ocd` (workspace version 2.3.0,
+channel `latest`). From 2026-11-11 to 2026-11-16 the reference was the same kind of build at tag `v2.2.7` (commit
+`fedc6f2`); from 2026-11-07 to 2026-11-10 the reference was the same kind of build at tag `v2.2.5` (commit
 `9bbb8ce`); from 2026-10-30 to 2026-11-06 the reference was the same kind of build at tag `v2.2.2`
 (commit `098aa7f`); from 2026-10-27 to 2026-10-29 it was the same kind of build at tag `v2.1.4` (commit
 `68bc26b`; ocd then reported 2.1.4). Results before 2026-10-27 were against the build of
@@ -108,7 +109,7 @@ find VM differences: the VM's standard library is partly program code, so some e
 imports changed. ocd follows them (`crates/oc-codemode/tests/upstream_2_3_0.rs`) except the VM's lazy check of an
 iterator's `next`.
 
-## Scenarios (237)
+## Scenarios (246)
 
 | group | scenarios |
 |---|---|
@@ -242,6 +243,12 @@ until it completes, nothing of the root's answer to the report, and nothing afte
 `plugin_skill_files` is identical too: like 2.2.7, the files a third-party plugin passes to `add(skill, files)` are
 dropped (only the Console plugin attaches files, which ocd now keeps through the plugin transform and serves from
 the `skill` and `read` tools).
+
+**Final run against 2.3.0 (debug build, 2026-11-17):** all 246 scenarios against the local v2.3.0 build, ocd
+reporting 2.3.0: **241 of 246 identical**. Left: `cli_help` (the intended renames), `cli_inventory` (the upstream
+build's database file name), `stop_retry_exhausted` and `loop_http_400` (upstream races) and `loop_tool_error`
+(Effect's scheduler), the same five as against 2.2.7. The normalizer now masks 2.3.x versions and the shell PID
+inside `run --format json` lines.
 
 **Run after closing the 2.2.7 gaps (debug build, 2026-11-15):** all 216 scenarios against a fresh local v2.2.7
 build: **211 of 216 identical**, including the new `acp` (3), `local` (5) and `plugin_skill_files` scenarios. Left:

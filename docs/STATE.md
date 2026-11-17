@@ -7,13 +7,13 @@ Goal (user request): an exact behavioral replica of **opencode v2** in Rust — 
 `docs/PORTING.md`. Specs: `docs/spec/01..08` (~18k lines, all complete).
 
 ## Upstream reference
-- Repo `anomalyco/opencode`, tag `v2.2.7`, commit `fedc6f208aa2bd54c1019227214568083f6380ad`, MIT (`LICENSE-opencode`).
+- Repo `anomalyco/opencode`, tag `v2.3.0`, commit `a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`, MIT (`LICENSE-opencode`).
   The port started from branch `v2` at `4617210822bdbb31e5749751afbfb4584ccedac8` (2.0.26) and caught up with
-  2.1.4 (`docs/UPGRADE-2.1.4.md`), 2.2.2 (`docs/UPGRADE-2.2.2.md`), 2.2.5 (`docs/UPGRADE-2.2.5.md`) and 2.2.7
-  (`docs/UPGRADE-2.2.7.md`) in batches; the specs in `docs/spec/` still
+  2.1.4 (`docs/UPGRADE-2.1.4.md`), 2.2.2 (`docs/UPGRADE-2.2.2.md`), 2.2.5 (`docs/UPGRADE-2.2.5.md`), 2.2.7
+  (`docs/UPGRADE-2.2.7.md`) and 2.3.0 (`docs/UPGRADE-2.3.0.md`) in batches; the specs in `docs/spec/` still
   cite the 4617210 sources. The 2.2 tags are not descendants of `v2.1.4`: compare trees, not commit logs.
 - Read-only checkout (may vanish with the session scratchpad; re-clone if missing):
-  `git clone https://github.com/anomalyco/opencode.git && git -C opencode checkout v2.2.7`
+  `git clone https://github.com/anomalyco/opencode.git && git -C opencode checkout v2.3.0`
   (was at `$OCD_SCRATCH/src/opencode`).
 - Toolchain: rustup in `~/.cargo` (Rust 1.99, edition 2024). Always `export PATH=$HOME/.cargo/bin:$PATH`.
   Machine: 8 cores, 13 GB RAM. No git commits (user's global rule: only commit when asked; never add AI attribution).
@@ -94,6 +94,12 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-17: CAUGHT UP WITH 2.3.0 (`docs/UPGRADE-2.3.0.md`): a triage of upstream dev after 2.2.7 (180 commits) plus
+  the 11 commits 2.3.0 added, then eleven batches in three waves (API/config, Code Mode engine replay, freeform tools,
+  subagents, step lifecycle, MCP OAuth and pasted sign-ins, Code Mode search/fetch, small items, TUI, local discovery,
+  client certificates). ocd reports 2.3.0; releases and the web UI build from v2.3.0 (`a6b15d3`). Tests 2,751 passed;
+  side by side 241 of 246 identical (the same five known differences). Not ported: shell commands in the process
+  daemon, MCP Events (flag), background shell timeouts (flag), video generation (library only), P-521 client keys.
 - 2026-11-17: 2.3.0 CATCH-UP, STEP LIFECYCLE: a retryable failure after output started retries into a fresh
   assistant message (no `Continue` outcome, no "The previous response was interrupted" synthetic); `lower.rs` replays
   a failed or interrupted assistant cut at its last locally-run call (unrun calls dropped, `tool.input*` errors kept,

@@ -2,11 +2,11 @@
 
 [← README](../README.md)
 
-ocd targets opencode **2.2.7** (`anomalyco/opencode`, tag `v2.2.7`, commit `fedc6f2`). It was first ported from
-branch `v2` at commit `4617210` (2.0.26). It then caught up with 2.1.4, 2.2.2, 2.2.5 and 2.2.7 in batches, listed with
+ocd targets opencode **2.3.0** (`anomalyco/opencode`, tag `v2.3.0`, commit `a6b15d3`). It was first ported from
+branch `v2` at commit `4617210` (2.0.26). It then caught up with 2.1.4, 2.2.2, 2.2.5, 2.2.7 and 2.3.0 in batches, listed with
 what each one checked in [UPGRADE-2.1.4.md](UPGRADE-2.1.4.md), [UPGRADE-2.2.2.md](UPGRADE-2.2.2.md),
-[UPGRADE-2.2.5.md](UPGRADE-2.2.5.md) and [UPGRADE-2.2.7.md](UPGRADE-2.2.7.md). Wherever it has to look like opencode,
-ocd reports version 2.2.7.
+[UPGRADE-2.2.5.md](UPGRADE-2.2.5.md), [UPGRADE-2.2.7.md](UPGRADE-2.2.7.md) and [UPGRADE-2.3.0.md](UPGRADE-2.3.0.md). Wherever it has to look like opencode,
+ocd reports version 2.3.0.
 
 - [How it is compared](#how-it-is-compared)
 - [Same as upstream](#same-as-upstream)
@@ -16,7 +16,7 @@ ocd reports version 2.2.7.
 
 ## How it is compared
 
-- **Side by side:** both binaries run the same 216 scenarios, and `scripts/parity.py` diffs their outputs. Results
+- **Side by side:** both binaries run the same 246 scenarios, and `scripts/parity.py` diffs their outputs. Results
   are in [PARITY.md](PARITY.md). The scenarios cover:
   - the agent loop, sessions, permissions and forms;
   - the read-only endpoints and 74 error cases;
@@ -25,11 +25,13 @@ ocd reports version 2.2.7.
   - the 2.2 changes: provider wire, `/goal`, background compaction and tools;
   - Mercurial repositories and the desktop browser attachment;
   - the 2.2.7 changes: `run`, MCP OAuth, Copilot Auto, tools, the API and config;
+  - the 2.3.0 changes: freeform tools, subagent reports, the step lifecycle, Code Mode search and `fetch`,
+    MCP OAuth refresh, pasted sign-ins and client certificates;
   - the editor integration (ACP) following subagents after a turn;
   - local model discovery for LM Studio, Ollama and vLLM against mock servers.
 - **Model requests:** every request ocd sends to the model is compared too: system prompt, tool definitions,
   headers and prompt-cache markers.
-- **Result:** 211 of the 216 scenarios are identical. The other five differ in ways that are expected or harmless:
+- **Result:** 241 of the 246 scenarios are identical. The other five differ in ways that are expected or harmless:
   - the intended renames;
   - the upstream test build's database file name;
   - two timing races that also vary between runs of upstream (one is the title rename racing a failed step);
@@ -121,4 +123,4 @@ ocd reports version 2.2.7.
 | TUI working status line | After you press Enter, a line above the prompt shows what's happening: waiting for the model, thinking, writing, running a tool, retrying or compacting. It also shows a timer ticking every second, the output token count and the interrupt key. A running shell command goes on the row below. Upstream shows only its moving progress bar, which ocd keeps, plus a live "Thinking" row in the transcript, which ocd leaves out while the status line shows it |
 | `ocd upgrade` and update checks | Installs from ocd's GitHub releases with checksum verification, and checks once a day instead of every 10 minutes ([details](INSTALL.md#upgrading)) |
 | Heap snapshots | The server has no JavaScript heap, so `POST /api/debug/heap-dump` answers `500 UnknownError`. `ocd debug heap-dump --server URL` still captures one from an upstream server |
-| Version | `ocd --version` shows ocd's own build next to the compatible opencode version. Clients, plugins and the service see 2.2.7 on the `latest` channel ([details](INSTALL.md#versions)) |
+| Version | `ocd --version` shows ocd's own build next to the compatible opencode version. Clients, plugins and the service see 2.3.0 on the `latest` channel ([details](INSTALL.md#versions)) |
