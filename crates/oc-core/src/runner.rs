@@ -1534,7 +1534,7 @@ impl ToolRunner for LocalTools {
         };
         match result {
             Ok(result) => {
-                let result = oc_tools::tool_output::truncate(result.clone(), max_lines, max_bytes, &data).unwrap_or(result);
+                let result = oc_tools::tool_output::truncate(result, max_lines, max_bytes, &data);
                 ToolRun::Ok { content: result.content, metadata: result.metadata }
             }
             Err(e) => match e.kind {

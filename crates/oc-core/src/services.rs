@@ -81,15 +81,9 @@ pub fn default_services(app: &Arc<App>) -> oc_tools::tools::Services {
 fn shell_event(ev: &oc_tools::shell::service::ShellEvent) -> (&'static str, Value) {
     use oc_tools::shell::service::ShellEvent as E;
     match ev {
-        // Upstream announces the info captured before spawning, so `pid` is never part of the event
-        // (core/src/shell.ts publishes `info`, while the stored command gets `pid`).
-        E::Created { info } => {
-            let mut info = serde_json::to_value(info).unwrap_or(Value::Null);
-            if let Some(o) = info.as_object_mut() {
-                o.remove("pid");
-            }
-            ("shell.created", serde_json::json!({"info": info}))
-        }
+        // Upstream 2.3.0 runs commands in its process daemon, which announces the command with the `pid` it was
+        // started with (core/src/shell.ts `Shell.Event.Created, { info: run.info }`).
+        E::Created { info } => ("shell.created", serde_json::json!({"info": info})),
         E::Exited { id, exit, status } => {
             // `exit` is omitted when the command has no exit code (killed, timed out, signalled).
             let mut data = serde_json::json!({ "id": id });

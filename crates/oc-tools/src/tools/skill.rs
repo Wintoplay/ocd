@@ -119,7 +119,7 @@ impl Tool for SkillTool {
         super::assert(&ctx, "skill", vec![skill.id.clone()], Some(vec![skill.id.clone()]), None).await.map_err(super::perm(leaf))?;
         let (directory, output) = prepare(&skill);
         Ok(ToolResult::text(output.clone())
-            .with_output(json!({"name": skill.name, "directory": directory, "output": output}))
+            .with_output(json!({"directory": directory, "content": output}))
             .with_metadata(meta(vec![("name", json!(skill.name)), ("directory", json!(directory))])))
     }
 }

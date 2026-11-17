@@ -1201,6 +1201,8 @@ async fn shell_commands() {
     .await
     .unwrap();
     assert_eq!(created.data["info"]["id"], json!(id));
+    // 2.3.0 announces the command with the process id it was started with.
+    assert!(created.data["info"]["pid"].as_u64().is_some_and(|pid| pid > 0), "{}", created.data);
     // Wait for exit, then page the output.
     let mut status = String::new();
     for _ in 0..100 {

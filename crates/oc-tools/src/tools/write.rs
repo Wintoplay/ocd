@@ -86,6 +86,7 @@ impl Tool for WriteTool {
         }
         ctx.host.files_changed(&ctx.session_id, std::slice::from_ref(&target.absolute)).await;
         let text = format!("{} file successfully: {}", if result.existed { "Wrote" } else { "Created" }, result.resource);
-        Ok(ToolResult::text(text).with_output(result.to_json()))
+        // The confirmation is the structured output too (#63616).
+        Ok(ToolResult::text(text.clone()).with_output(Value::String(text)))
     }
 }

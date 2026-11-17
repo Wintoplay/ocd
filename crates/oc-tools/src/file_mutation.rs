@@ -120,6 +120,16 @@ pub fn remove(path: &Path) -> Result<(), FileError> {
     }
 }
 
+/// `Environment.files.move`: renames `from` to `to`, or into `to` when it is a directory. Symlinks are not followed.
+pub fn rename(from: &Path, to: &Path) -> Result<(), FileError> {
+    std::fs::symlink_metadata(from).map_err(|e| FileError::from_io(&e, from))?;
+    let destination = match std::fs::symlink_metadata(to) {
+        Ok(meta) if meta.is_dir() => to.join(from.file_name().unwrap_or_default()),
+        _ => to.to_path_buf(),
+    };
+    std::fs::rename(from, destination).map_err(|e| FileError::from_io(&e, from))
+}
+
 /// `FileMutation.syncTextBom`.
 pub fn sync_text_bom(path: &Path, bom_wanted: bool) -> Result<String, FileError> {
     let (text, bytes) = bom::sync_bytes(&read_bytes(path)?, bom_wanted);

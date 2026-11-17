@@ -106,6 +106,8 @@ class Normalizer:
         # Build version/channel embedded in text (e.g. the built-in report skill's diagnostics).
         s = BUILD_RE.sub("<version>", s)
         s = re.sub(r"install/channel: (v2|detached|latest)", "install/channel: <channel>", s)
+        # The OS process id a backgrounded shell command reports in its result text (`PID: <pid>`, 2.3.0).
+        s = re.sub(r"\bPID: \d+\b", "PID: <pid>", s)
         # Plugin failure references (`err_` + 8 random hex digits).
         s = re.sub(r"\berr_[0-9a-f]{8}\b", "<err-ref>", s)
         # The module that imported a missing AI SDK package: upstream's bundle chunk inside the compiled binary

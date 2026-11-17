@@ -58,6 +58,11 @@ struct ShellOutput {
     base: Output,
     shell_id: Option<String>,
     running: bool,
+    /// Seconds from the command's start to its end (or to now, for a command still running).
+    wall_time_seconds: f64,
+    /// The output file, when the output was cut or the command runs on in the background.
+    output_path: Option<String>,
+    pid: Option<u32>,
 }
 
 fn result_messages(output: &ShellOutput, timeout: Option<u64>) -> Vec<String> {
@@ -72,6 +77,34 @@ fn result_messages(output: &ShellOutput, timeout: Option<u64>) -> Vec<String> {
     out
 }
 
+/// `wallTimeSeconds`: elapsed seconds, never negative.
+fn wall_time_seconds(started: u64, end: u64) -> f64 {
+    end.saturating_sub(started) as f64 / 1_000.0
+}
+
+/// The structured output (`StructuredOutput`, 2.3.0), in its schema's key order.
+fn structured(output: &ShellOutput) -> Value {
+    let mut value = serde_json::Map::new();
+    value.insert("output".into(), json!(output.base.output));
+    value.insert("exitCode".into(), output.base.exit.map_or(Value::Null, |exit| json!(exit)));
+    // A JS number: whole seconds have no fraction.
+    let seconds = output.wall_time_seconds;
+    value.insert("wallTimeSeconds".into(), if seconds.fract() == 0.0 { json!(seconds as i64) } else { json!(seconds) });
+    if let Some(path) = &output.output_path {
+        value.insert("outputPath".into(), json!(path));
+    }
+    if let Some(signal) = &output.base.signal {
+        value.insert("signal".into(), json!(signal));
+    }
+    if let Some(id) = &output.shell_id {
+        value.insert("shellID".into(), json!(id));
+    }
+    if let Some(pid) = output.pid {
+        value.insert("pid".into(), json!(pid));
+    }
+    Value::Object(value)
+}
+
 fn tool_result(output: ShellOutput, timeout: Option<u64>) -> ToolResult {
     let mut metadata = meta(vec![("status", json!(if output.running { "running" } else { "completed" }))]);
     for (k, v) in shell_result::metadata(&output.base) {
@@ -80,27 +113,34 @@ fn tool_result(output: ShellOutput, timeout: Option<u64>) -> ToolResult {
     if let Some(id) = &output.shell_id {
         metadata.insert("shellID".into(), json!(id));
     }
-    let mut value = shell_result::value(&output.base);
-    if let Some(id) = &output.shell_id {
-        value["shellID"] = json!(id);
+    if let Some(pid) = output.pid {
+        metadata.insert("pid".into(), json!(pid));
     }
-    value["status"] = json!(if output.running { "running" } else { "completed" });
     ToolResult {
         content: result_messages(&output, timeout).into_iter().map(|text| ToolContent::Text { text }).collect(),
-        output: Some(value),
+        output: Some(structured(&output)),
         metadata: Some(metadata),
     }
 }
 
-fn background_result(shell_id: &str, file: &str) -> ShellOutput {
+/// `backgroundText`: what a call whose command moved to the background returns.
+fn background_text(info: &oc_schema::message::ShellInfo) -> String {
+    let mut lines = vec![format!("Command moved to the background (shell ID: {}).", info.id)];
+    if let Some(pid) = info.pid {
+        lines.push(format!("PID: {pid}"));
+    }
+    lines.push(format!("Output is streaming to: {}", info.file));
+    lines.join("\n")
+}
+
+fn background_result(info: &oc_schema::message::ShellInfo, now: u64) -> ShellOutput {
     ShellOutput {
-        base: Output {
-            output: format!("Command moved to the background (shell ID: {shell_id}).\nOutput is streaming to: {file}"),
-            truncated: false,
-            ..Default::default()
-        },
-        shell_id: Some(shell_id.to_string()),
+        base: Output { output: background_text(info), truncated: false, ..Default::default() },
+        shell_id: Some(info.id.clone()),
         running: true,
+        wall_time_seconds: wall_time_seconds(info.time.started, now),
+        output_path: Some(info.file.clone()),
+        pid: info.pid,
     }
 }
 
@@ -332,7 +372,14 @@ impl Tool for ShellTool {
             if result.capture.is_none() {
                 return Err("Command failed".to_string());
             }
-            let output = ShellOutput { base: shell_result::output(&result), shell_id: None, running: false };
+            let completed = result.info.time.completed.unwrap_or_else(crate::util::now_ms);
+            let truncated = result.capture.as_ref().is_some_and(|c| c.truncated);
+            let output = ShellOutput {
+                base: shell_result::output(&result),
+                wall_time_seconds: wall_time_seconds(result.info.time.started, completed),
+                output_path: truncated.then(|| result.info.file.clone()),
+                ..Default::default()
+            };
             let text = result_messages(&output, Some(job_timeout.load(Ordering::SeqCst))).join("\n\n");
             let _ = settled_tx.send(Some(output));
             Ok(text)
@@ -357,7 +404,7 @@ impl Tool for ShellTool {
         if background {
             let _ = ctx.host.job_background(&job.id).await;
             spawn_notifier(&ctx, job.id.clone(), info.id.clone(), info.command.clone(), settled_rx);
-            return Ok(tool_result(background_result(&info.id, &info.file), None));
+            return Ok(tool_result(background_result(&info, crate::util::now_ms()), None));
         }
 
         // A user's stop arrives through `stop`; an interrupt (a server shutdown) cancels the job, which stops the
@@ -376,7 +423,7 @@ impl Tool for ShellTool {
                 let _ = self.service.timeout(&info.id, 0);
                 final_timeout.store(0, Ordering::SeqCst);
                 spawn_notifier(&ctx, job.id.clone(), info.id.clone(), info.command.clone(), settled_rx);
-                return Ok(tool_result(background_result(&info.id, &info.file), None));
+                return Ok(tool_result(background_result(&info, crate::util::now_ms()), None));
             }
             Ok(Some(JobBlockResult::Finished(job_info))) if job_info.status == JobStatus::Error => {
                 return Err(ToolError::with_cause(leaf, ErrorCause::Error(job_info.error.unwrap_or_else(|| "Command failed".into()))));
@@ -420,23 +467,67 @@ mod tests {
         assert!(description(Some("bash")).contains(&format!("Commands run on {} using bash. Quote", os_name())));
     }
 
+    fn info(pid: Option<u32>) -> oc_schema::message::ShellInfo {
+        oc_schema::message::ShellInfo {
+            id: "sh_1".into(),
+            status: oc_schema::message::ShellStatus::Running,
+            command: "sleep 1".into(),
+            cwd: "/d".into(),
+            shell: "/bin/bash".into(),
+            file: "/d/sh_1.out".into(),
+            pid,
+            exit: None,
+            signal: None,
+            metadata: Default::default(),
+            time: oc_schema::message::ShellTime { started: 1_000, completed: None },
+        }
+    }
+
+    /// tool-shell.test.ts (2.3.0): a backgrounded command reports its PID, output file and elapsed time.
     #[test]
     fn background_content() {
-        let result = tool_result(background_result("sh_1", "/d/sh_1.out"), None);
+        let result = tool_result(background_result(&info(Some(4242)), 3_500), None);
         assert_eq!(
             result.content,
             vec![
-                ToolContent::Text { text: "Command moved to the background (shell ID: sh_1).\nOutput is streaming to: /d/sh_1.out".into() },
+                ToolContent::Text { text: "Command moved to the background (shell ID: sh_1).\nPID: 4242\nOutput is streaming to: /d/sh_1.out".into() },
                 ToolContent::Text { text: BACKGROUND_INSTRUCTION.into() },
             ]
         );
-        assert_eq!(serde_json::to_string(&result.metadata).unwrap(), r#"{"status":"running","truncated":false,"shellID":"sh_1"}"#);
+        assert_eq!(serde_json::to_string(&result.metadata).unwrap(), r#"{"status":"running","truncated":false,"shellID":"sh_1","pid":4242}"#);
+        assert_eq!(
+            serde_json::to_string(&result.output).unwrap(),
+            r#"{"output":"Command moved to the background (shell ID: sh_1).\nPID: 4242\nOutput is streaming to: /d/sh_1.out","exitCode":null,"wallTimeSeconds":2.5,"outputPath":"/d/sh_1.out","shellID":"sh_1","pid":4242}"#
+        );
+        let without = tool_result(background_result(&info(None), 500), None);
+        assert_eq!(
+            without.content[0],
+            ToolContent::Text { text: "Command moved to the background (shell ID: sh_1).\nOutput is streaming to: /d/sh_1.out".into() }
+        );
+        assert_eq!(without.output.unwrap()["wallTimeSeconds"], json!(0));
     }
 
     #[test]
     fn completed_content() {
-        let result = tool_result(ShellOutput { base: Output { output: "x".into(), exit: Some(1), ..Default::default() }, shell_id: None, running: false }, Some(120_000));
+        let output = ShellOutput { base: Output { output: "x".into(), exit: Some(1), ..Default::default() }, wall_time_seconds: 2.0, ..Default::default() };
+        let result = tool_result(output, Some(120_000));
         assert_eq!(result.content, vec![ToolContent::Text { text: "x".into() }, ToolContent::Text { text: "Exit code: 1".into() }]);
         assert_eq!(serde_json::to_string(&result.metadata).unwrap(), r#"{"status":"completed","truncated":false,"exit":1}"#);
+        assert_eq!(serde_json::to_string(&result.output).unwrap(), r#"{"output":"x","exitCode":1,"wallTimeSeconds":2}"#);
+    }
+
+    /// A signalled command has no exit code; a cut output names its file.
+    #[test]
+    fn signalled_and_truncated_output() {
+        let output = ShellOutput {
+            base: Output { output: "y".into(), truncated: true, signal: Some("SIGTERM".into()), ..Default::default() },
+            wall_time_seconds: 0.25,
+            output_path: Some("/d/sh_1.out".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&tool_result(output, None).output).unwrap(),
+            r#"{"output":"y","exitCode":null,"wallTimeSeconds":0.25,"outputPath":"/d/sh_1.out","signal":"SIGTERM"}"#
+        );
     }
 }

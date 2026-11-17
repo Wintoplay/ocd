@@ -32,6 +32,7 @@ rand.workspace = true
 chrono.workspace = true
 bytes.workspace = true
 unicode-normalization = "0.1"
+unicode-segmentation.workspace = true
 libc = "0.2"
 fancy-regex = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

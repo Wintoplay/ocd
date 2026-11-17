@@ -1134,6 +1134,72 @@ mod tests {
         assert_eq!(huge, want);
     }
 
+    /// "reads the end of a file many chunks long" (2.3.0, #63030).
+    #[test]
+    fn reads_the_end_of_a_file_many_chunks_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // 60,000 lines of 51 bytes span 12 chunks.
+        let lines = padded(60_000, 50, 'x');
+        let content = lines.join("\n") + "\n";
+        let with = |header: &str, from: usize, to: usize| [vec![header.to_string()], numbered(&lines, from, to)].concat();
+        assert_eq!(
+            lines_of(d, "negative.txt", &content, page(Some(-5), None)),
+            with("Read file negative.txt, lines 59996-60000", 59_996, 60_000)
+        );
+        assert_eq!(
+            lines_of(d, "past.txt", &content, page(Some(70_000), Some(3))),
+            with("Read file past.txt, lines 59998-60000 (offset 70000 is past the end; the file has 60000 lines)", 59_998, 60_000)
+        );
+        let mut deep = with("Read file deep.txt, lines 45000-45001", 45_000, 45_001);
+        deep.push("[Output truncated. Continue reading with offset: 45002]".into());
+        assert_eq!(lines_of(d, "deep.txt", &content, page(Some(45_000), Some(2))), deep);
+        // Far from the end, a negative offset still reads from the line it counts back to.
+        let mut far = with("Read file far.txt, lines 50001-50003", 50_001, 50_003);
+        far.push("[Output truncated. Continue reading with offset: 50004]".into());
+        assert_eq!(lines_of(d, "far.txt", &content, page(Some(-10_000), Some(3))), far);
+
+        // A null byte in an earlier scanned chunk still marks the file as binary.
+        let mut early = content.into_bytes();
+        early[10] = 0;
+        let file = d.join("early-nul.txt");
+        std::fs::write(&file, &early).unwrap();
+        assert!(matches!(read(&file, "early-nul.txt", page(Some(-5), None)), Err(ReadError::Binary { .. })));
+        assert!(matches!(read(&file, "early-nul.txt", page(Some(70_000), None)), Err(ReadError::Binary { .. })));
+    }
+
+    /// "ignores a NUL after a chunked page but rejects it for a past-end offset" (2.3.0, #63030).
+    #[test]
+    fn ignores_a_nul_after_a_chunked_page_but_rejects_it_for_a_past_end_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("nul.txt");
+        std::fs::write(&file, format!("{}\nselected\n\0\ntail", "x".repeat(256 * 1024))).unwrap();
+        for offset in [2, -3] {
+            match read(&file, "nul.txt", page(Some(offset), Some(1))).unwrap() {
+                ReadOutput::TextPage { content, offset, truncated, next, .. } => {
+                    assert_eq!((content.as_str(), offset, truncated, next), ("selected", 2, true, Some(3)));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(read(&file, "nul.txt", page(Some(5), Some(1))), Err(ReadError::Binary { .. })));
+    }
+
+    /// "keeps a split byte order mark in a past-end tail and strips it at a negative offset" (2.3.0, #63030).
+    #[test]
+    fn keeps_a_split_bom_in_a_past_end_tail_and_strips_it_at_a_negative_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("marked.txt");
+        // The first byte of the three-byte UTF-8 mark is the last byte of the first chunk.
+        std::fs::write(&file, format!("{}\n\u{FEFF}selected", "x".repeat(256 * 1024 - 2))).unwrap();
+        let page_of = |offset: i64| match read(&file, "marked.txt", page(Some(offset), Some(1))).unwrap() {
+            ReadOutput::TextPage { content, offset, truncated, .. } => (content, offset, truncated),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(page_of(3), ("\u{FEFF}selected".to_string(), 2, false));
+        assert_eq!(page_of(-1), ("selected".to_string(), 2, false));
+    }
+
     /// "rejects a negative offset for a directory".
     #[test]
     fn negative_offset_for_a_directory() {

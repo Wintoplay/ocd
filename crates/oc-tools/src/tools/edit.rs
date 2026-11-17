@@ -487,8 +487,9 @@ impl Tool for EditTool {
             files.first().map(|f| f.file.as_str()).unwrap_or("undefined"),
             if replacements == 1 { "" } else { "s" }
         );
+        // The summary is the structured output too (#63635); the diffs go in the metadata.
         Ok(ToolResult {
-            output: Some(json!({"files": files_json, "replacements": replacements})),
+            output: Some(Value::String(text.clone())),
             content: vec![ToolContent::Text { text }],
             metadata: Some(meta(vec![("files", Value::Array(files_json))])),
         })

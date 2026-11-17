@@ -118,12 +118,15 @@ async fn edit_tool_flow() {
     assert!(host.requests.lock()[0].metadata.is_none());
     let ok = run(&tool, json!({"path": "a.txt", "oldString": "two\n", "newString": "dos\n"}), ctx.clone()).await.unwrap();
     assert_eq!(text(&ok), "Edited a.txt (1 replacement)");
+    // tool-edit.test.ts (2.3.0, #63635): the summary is the structured output; the diffs are metadata.
+    assert_eq!(ok.output, Some(json!("Edited a.txt (1 replacement)")));
     assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "\u{FEFF}one\r\ndos\r\none\r\n");
     let files = &ok.metadata.as_ref().unwrap()["files"][0];
     assert_eq!(files["file"], json!("a.txt"));
     assert_eq!(files["additions"], json!(1));
     let all = run(&tool, json!({"path": "a.txt", "oldString": "one", "newString": "1", "replaceAll": true}), ctx.clone()).await.unwrap();
     assert_eq!(text(&all), "Edited a.txt (2 replacements)");
+    assert_eq!(all.output, Some(json!("Edited a.txt (2 replacements)")));
     let err = run(&tool, json!({"path": "a.txt", "oldString": "x", "newString": "x"}), ctx.clone()).await.unwrap_err();
     assert_eq!(err.message, "No changes to apply: oldString and newString are identical.");
     let err = run(&tool, json!({"path": "missing.txt", "oldString": "x", "newString": "y"}), ctx.clone()).await.unwrap_err();
@@ -151,7 +154,7 @@ async fn edit_trailing_whitespace_matches_preserve_crlf() {
     std::fs::write(dir.path().join("overlap.txt"), "a  \na  \na  \n").unwrap();
     std::fs::write(dir.path().join("windows.txt"), "a  \r\nb\t\r\n").unwrap();
     let ok = run(&tool, json!({"path": "overlap.txt", "oldString": "a\na", "newString": "x", "replaceAll": true}), ctx.clone()).await.unwrap();
-    assert_eq!(ok.output.as_ref().unwrap()["replacements"], json!(1));
+    assert_eq!(ok.output, Some(json!("Edited overlap.txt (1 replacement)")));
     run(&tool, json!({"path": "windows.txt", "oldString": "a\nb", "newString": "x"}), ctx.clone()).await.unwrap();
     assert_eq!(std::fs::read_to_string(dir.path().join("overlap.txt")).unwrap(), "x\na  \n");
     assert_eq!(std::fs::read_to_string(dir.path().join("windows.txt")).unwrap(), "x\r\n");
@@ -206,7 +209,7 @@ async fn edit_endings_only_applies_exact_bytes() {
     std::fs::write(dir.path().join("whole.sh"), "x\r\ny\r\n").unwrap();
     std::fs::write(dir.path().join("add.bat"), "p\nq\n").unwrap();
     let ok = run(&tool, json!({"path": "strip.sh", "oldString": "\r", "newString": "", "replaceAll": true}), ctx.clone()).await.unwrap();
-    assert_eq!(ok.output.as_ref().unwrap()["replacements"], json!(2));
+    assert_eq!(ok.output, Some(json!("Edited strip.sh (2 replacements)")));
     run(&tool, json!({"path": "whole.sh", "oldString": "x\r\ny\r\n", "newString": "x\ny\n"}), ctx.clone()).await.unwrap();
     run(&tool, json!({"path": "add.bat", "oldString": "p\nq", "newString": "p\r\nq"}), ctx.clone()).await.unwrap();
     // The exact bytes are gone now, so the same edit finds nothing.
@@ -282,6 +285,28 @@ async fn subagent_model_failures() {
     ));
 }
 
+// tool-skill.test.ts (2.3.0, #63623): the skill tool returns `{directory, content}`; the name is metadata.
+#[tokio::test]
+async fn skill_tool_returns_directory_and_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(MockHost::default());
+    let ctx = context(dir.path(), host.clone());
+    let skill = crate::host::SkillInfo {
+        id: "effect".into(),
+        name: "Effect".into(),
+        description: None,
+        path: "skill://effect/SKILL.md".into(),
+        content: "Body".into(),
+        files: vec![("references/a.md".into(), "A".into())],
+    };
+    host.skills.lock().push(skill.clone());
+    let ok = run(&tools::skill::SkillTool, json!({"id": "effect"}), ctx).await.unwrap();
+    let content = tools::skill::to_model_output(&skill, &["skill://effect/references/a.md".into()]);
+    assert_eq!(ok.output, Some(json!({"directory": "skill://effect", "content": content})));
+    assert_eq!(text(&ok), content);
+    assert_eq!(ok.metadata, Some(crate::tool::meta(vec![("name", json!("Effect")), ("directory", json!("skill://effect"))])));
+}
+
 #[tokio::test]
 async fn permission_outcomes() {
     let dir = tempfile::tempdir().unwrap();
@@ -299,8 +324,12 @@ async fn permission_outcomes() {
     *host.deny.lock() = None;
     let ok = run(&tool, json!({"path": "sub/x.txt", "content": "hi"}), ctx.clone()).await.unwrap();
     assert_eq!(text(&ok), "Created file successfully: sub/x.txt");
+    // tool-write.test.ts (2.3.0, #63616): the confirmation is the structured output.
+    assert_eq!(ok.output, Some(json!("Created file successfully: sub/x.txt")));
     let ok = run(&tool, json!({"path": "sub/x.txt", "content": "ho"}), ctx.clone()).await.unwrap();
     assert_eq!(text(&ok), "Wrote file successfully: sub/x.txt");
+    assert_eq!(ok.output, Some(json!("Wrote file successfully: sub/x.txt")));
+    assert!(ok.metadata.is_none());
     let request = host.requests.lock().last().cloned().unwrap();
     assert_eq!(request.metadata.unwrap()["files"][0]["status"], json!("modified"));
 }
@@ -523,6 +552,46 @@ async fn patch_self_moves_and_multi_hunk_moves() {
     assert_eq!(std::fs::read_to_string(dir.path().join("same.txt")).unwrap(), "after\n");
 }
 
+// tool-patch.test.ts (2.3.0, #63655): a move that only changes case renames the file, and a move into a directory
+// whose name differs only in case writes there.
+#[tokio::test]
+async fn patch_case_only_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(MockHost::default());
+    let ctx = context(dir.path(), host.clone());
+    let tool = tools::patch::PatchTool::new(Arc::new(Formatter::new()));
+    std::fs::write(dir.path().join("same.txt"), "before\n").unwrap();
+    let patch = "*** Begin Patch\n*** Update File: same.txt\n*** Move to: Same.txt\n@@\n-before\n+after\n*** End Patch";
+    let ok = run(&tool, json!({"patchText": patch}), ctx.clone()).await.unwrap();
+    assert_eq!(text(&ok), "Success. Updated the following files:\nM Same.txt");
+    let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec!["Same.txt"]);
+    assert_eq!(std::fs::read_to_string(dir.path().join("Same.txt")).unwrap(), "after\n");
+
+    std::fs::create_dir(dir.path().join("Foo")).unwrap();
+    std::fs::write(dir.path().join("Foo").join("a.txt"), "before\n").unwrap();
+    let patch = "*** Begin Patch\n*** Update File: Foo/a.txt\n*** Move to: foo/a.txt\n@@\n-before\n+after\n*** End Patch";
+    run(&tool, json!({"patchText": patch}), ctx.clone()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(dir.path().join("foo").join("a.txt")).unwrap(), "after\n");
+}
+
+// A case-only move onto a name that already exists (as on a case-insensitive file system) writes in place and
+// renames instead of writing the new name and deleting the old one.
+#[cfg(unix)]
+#[tokio::test]
+async fn patch_case_only_move_onto_an_existing_name_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(MockHost::default());
+    let ctx = context(dir.path(), host.clone());
+    let tool = tools::patch::PatchTool::new(Arc::new(Formatter::new()));
+    std::fs::write(dir.path().join("note.txt"), "before\n").unwrap();
+    std::fs::write(dir.path().join("Note.txt"), "other\n").unwrap();
+    let patch = "*** Begin Patch\n*** Update File: note.txt\n*** Move to: Note.txt\n@@\n-before\n+after\n*** End Patch";
+    run(&tool, json!({"patchText": patch}), ctx.clone()).await.unwrap();
+    assert!(!dir.path().join("note.txt").exists());
+    assert_eq!(std::fs::read_to_string(dir.path().join("Note.txt")).unwrap(), "after\n");
+}
+
 #[tokio::test]
 async fn patch_tool_flow() {
     let dir = tempfile::tempdir().unwrap();
@@ -534,6 +603,8 @@ async fn patch_tool_flow() {
     let patch = "*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: app.py\n*** Move to: main.py\n@@ def greet():\n-    print(\"Hi\")\n+    print(\"Hello, world!\")\n*** Delete File: old.txt\n*** End Patch";
     let ok = run(&tool, json!({"patchText": patch}), ctx.clone()).await.unwrap();
     assert_eq!(text(&ok), "Success. Updated the following files:\nA hello.txt\nM main.py\nD old.txt");
+    // tool-patch.test.ts (2.3.0, #63618): the structured output is empty; the files are metadata.
+    assert_eq!(ok.output, Some(json!({})));
     assert_eq!(std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "Hello world\n");
     assert_eq!(std::fs::read_to_string(dir.path().join("main.py")).unwrap(), "def greet():\n    print(\"Hello, world!\")\n");
     assert!(!dir.path().join("app.py").exists());
@@ -667,6 +738,11 @@ async fn shell_tool_flow() {
     let tool = tools::shell::ShellTool::new(service);
     let ok = run(&tool, json!({"command": "echo hello && exit 2"}), ctx.clone()).await.unwrap();
     assert_eq!(ok.content, vec![ToolContent::Text { text: "hello\n".into() }, ToolContent::Text { text: "Exit code: 2".into() }]);
+    // tool-shell.test.ts (2.3.0, #63647): the structured output has the exit code and the elapsed time.
+    let output = ok.output.clone().unwrap();
+    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["output", "exitCode", "wallTimeSeconds"]);
+    assert_eq!((output["output"].clone(), output["exitCode"].clone()), (json!("hello\n"), json!(2)));
+    assert!(output["wallTimeSeconds"].as_f64().unwrap() >= 0.0);
     let request = host.requests.lock()[0].clone();
     assert_eq!(request.action, "shell");
     assert_eq!(request.resources, vec!["echo hello", "exit 2"]);
@@ -683,6 +759,29 @@ async fn shell_tool_flow() {
         ]
     );
     assert_eq!(ok.metadata.as_ref().unwrap()["signal"], json!("SIGTERM"));
+    let output = ok.output.clone().unwrap();
+    assert!(output.get("timeout").is_none());
+    assert_eq!((output["exitCode"].clone(), output["signal"].clone()), (json!(null), json!("SIGTERM")));
+
+    // A background command reports its PID, output file and elapsed time (#63647).
+    let ok = run(&tool, json!({"command": "sleep 0.2", "background": true}), ctx.clone()).await.unwrap();
+    let metadata = ok.metadata.clone().unwrap();
+    let pid = metadata["pid"].as_u64().unwrap();
+    assert!(pid > 0);
+    assert_eq!((metadata["status"].clone(), metadata["truncated"].clone()), (json!("running"), json!(false)));
+    let output = ok.output.clone().unwrap();
+    let file = output["outputPath"].as_str().unwrap().to_string();
+    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["output", "exitCode", "wallTimeSeconds", "outputPath", "shellID", "pid"]);
+    assert_eq!((output["exitCode"].clone(), output["pid"].clone(), output["shellID"].clone()), (json!(null), json!(pid), metadata["shellID"].clone()));
+    assert_eq!(
+        ok.content[0],
+        ToolContent::Text {
+            text: format!(
+                "Command moved to the background (shell ID: {}).\nPID: {pid}\nOutput is streaming to: {file}",
+                metadata["shellID"].as_str().unwrap()
+            )
+        }
+    );
     let err = run(&tool, json!({"command": "ls", "workdir": "nope"}), ctx.clone()).await.unwrap_err();
     assert_eq!(err.message, "Unable to execute command: ls");
     assert_eq!(err.model_message(), format!("Working directory does not exist: {}", dir.path().join("nope").to_string_lossy()));

@@ -48,16 +48,6 @@ enum Op {
     Update,
 }
 
-impl Op {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Op::Add => "add",
-            Op::Delete => "delete",
-            Op::Update => "update",
-        }
-    }
-}
-
 struct Prepared {
     op: Op,
     target: Target,
@@ -68,7 +58,6 @@ struct Prepared {
 }
 
 struct Applied {
-    op: Op,
     resource: String,
     target: PathBuf,
 }
@@ -250,20 +239,34 @@ impl PatchTool {
                 (Op::Delete, _) => {
                     file_mutation::remove(&change.target.absolute)
                         .map_err(|e| fail(format!("Failed to delete {}", change.target.resource), e, applied))?;
-                    applied.push(Applied { op: change.op, resource: change.target.resource.clone(), target: change.target.absolute.clone() });
+                    applied.push(Applied { resource: change.target.resource.clone(), target: change.target.absolute.clone() });
                 }
                 (Op::Update, Some(dest)) => {
-                    file_mutation::write_bytes(&dest.absolute, change.content.as_bytes())
+                    // On macOS and Windows a move that only changes case targets the same file, so the new name
+                    // already exists, and writing it then removing the old one would delete the file. Such a move
+                    // writes in place and renames. Symlinks keep the write-and-remove path, which leaves their target
+                    // alone (#63655).
+                    let recased = dest.absolute.to_string_lossy().to_lowercase()
+                        == change.target.absolute.to_string_lossy().to_lowercase()
+                        && std::fs::symlink_metadata(&change.target.absolute).is_ok_and(|m| m.is_file())
+                        && std::fs::symlink_metadata(&dest.absolute).is_ok();
+                    let written = if recased { &change.target.absolute } else { &dest.absolute };
+                    file_mutation::write_bytes(written, change.content.as_bytes())
                         .map_err(|e| fail(format!("Failed to write {}", dest.resource), e, applied))?;
-                    file_mutation::remove(&change.target.absolute).map_err(|e| {
-                        fail(format!("Wrote {} but failed to remove {}", dest.resource, change.target.resource), e, applied)
-                    })?;
-                    applied.push(Applied { op: change.op, resource: dest.resource.clone(), target: dest.absolute.clone() });
+                    if recased {
+                        file_mutation::rename(&change.target.absolute, &dest.absolute)
+                            .map_err(|e| fail(format!("Failed to rename {}", change.target.resource), e, applied))?;
+                    } else {
+                        file_mutation::remove(&change.target.absolute).map_err(|e| {
+                            fail(format!("Wrote {} but failed to remove {}", dest.resource, change.target.resource), e, applied)
+                        })?;
+                    }
+                    applied.push(Applied { resource: dest.resource.clone(), target: dest.absolute.clone() });
                 }
                 _ => {
                     file_mutation::write_bytes(&change.target.absolute, change.content.as_bytes())
                         .map_err(|e| fail(format!("Failed to write {}", change.target.resource), e, applied))?;
-                    applied.push(Applied { op: change.op, resource: change.target.resource.clone(), target: change.target.absolute.clone() });
+                    applied.push(Applied { resource: change.target.resource.clone(), target: change.target.absolute.clone() });
                 }
             }
         }
@@ -338,20 +341,17 @@ impl Tool for PatchTool {
         let files = self.run(hunks, &ctx, &mut applied).await?;
         let files_json: Vec<Value> = files.iter().map(FileDiff::to_json).collect();
         let mut lines = vec!["Success. Updated the following files:".to_string()];
-        for item in &applied {
-            let letter = match item.op {
-                Op::Add => "A",
-                Op::Delete => "D",
-                Op::Update => "M",
+        for file in &files {
+            let letter = match file.status.as_str() {
+                "added" => "A",
+                "deleted" => "D",
+                _ => "M",
             };
-            lines.push(format!("{letter} {}", item.resource));
+            lines.push(format!("{letter} {}", file.file));
         }
-        let applied_json: Vec<Value> = applied
-            .iter()
-            .map(|a| json!({"type": a.op.as_str(), "resource": a.resource, "target": a.target.to_string_lossy()}))
-            .collect();
         Ok(ToolResult {
-            output: Some(json!({"applied": applied_json, "files": files_json})),
+            // The multi-file patch contract intentionally leaves structured output empty (#63618).
+            output: Some(json!({})),
             content: vec![oc_schema::ToolContent::Text { text: lines.join("\n") }],
             metadata: Some(meta(vec![("files", Value::Array(files_json))])),
         })
