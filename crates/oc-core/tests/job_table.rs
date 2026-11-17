@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use oc_core::job::Jobs;
+use oc_core::job::{Jobs, SubagentOutboxReport, SubagentReportState};
 use oc_storage::Database;
 use oc_tools::host::{JobRecovery, JobStatus};
 use serde_json::{Value, json};
@@ -221,4 +221,264 @@ async fn cancel_session_matches_a_subagent_by_its_child_and_deletes_child_rows()
     assert_eq!(jobs.cancel_session("ses_child").len(), 1);
     assert!(rows(&db).is_empty());
     assert!(jobs.get("ses_child").is_none());
+}
+
+fn subagent(parent: &str, child: &str, description: &str) -> JobRecovery {
+    JobRecovery::Subagent { parent_session_id: parent.into(), child_session_id: child.into(), agent: "explore".into(), description: description.into() }
+}
+
+fn background(id: &str, recovery: JobRecovery, notification_id: Option<&str>, run: futures::future::BoxFuture<'static, Result<String, String>>) -> oc_core::job::StartInput {
+    oc_core::job::StartInput {
+        id: id.into(),
+        kind: "subagent".into(),
+        title: None,
+        metadata_session: None,
+        recovery: Some(recovery),
+        notification_id: notification_id.map(str::to_string),
+        background: true,
+        run,
+    }
+}
+
+/// job.test.ts "does not restore a consumed background row when its running work settles" (2.3.0).
+#[tokio::test]
+async fn does_not_restore_a_consumed_background_row_when_its_running_work_settles() {
+    let db = Database::memory().unwrap();
+    let jobs = Arc::new(Jobs::new(db.clone()));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let job = jobs.start(
+        "shell_consumed_before_settle".into(),
+        "shell".into(),
+        None,
+        Some(shell("ses_consumed_before_settle", "shell_consumed_before_settle", "bun test")),
+        Box::pin(async move {
+            let _ = rx.await;
+            Ok("done".to_string())
+        }),
+    );
+    let nid = jobs.background(&job.id).unwrap().notification_id.unwrap();
+    let waiting = {
+        let jobs = jobs.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { jobs.wait(&id).await })
+    };
+    // The waiter observes the job before its notice is acknowledged.
+    tokio::task::yield_now().await;
+    jobs.complete_background(&nid);
+    assert!(jobs.pending_background().is_empty());
+    assert!(jobs.background_jobs().is_empty());
+    tx.send(()).unwrap();
+    let info = waiting.await.unwrap().unwrap();
+    assert_eq!((info.status, info.output.as_deref()), (JobStatus::Completed, Some("done")));
+    // Settling a consumed job must not re-insert the row its notification already cleared.
+    assert!(jobs.pending_background().is_empty());
+    assert!(jobs.background_jobs().is_empty());
+    assert!(jobs.get(&job.id).is_none());
+}
+
+/// "classifies a backgrounded subagent report and marks it settling"
+#[tokio::test]
+async fn classifies_a_backgrounded_subagent_report_and_marks_it_settling() {
+    let db = Database::memory().unwrap();
+    let jobs = Arc::new(Jobs::new(db.clone()));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let recovery = subagent("ses_report_parent", "ses_report_child", "Report work");
+    let mut input = background(
+        "ses_report_child",
+        recovery.clone(),
+        None,
+        Box::pin(async move {
+            let _ = rx.await;
+            Ok("done".to_string())
+        }),
+    );
+    input.title = Some("Report work".into());
+    let job = jobs.start_input(input);
+    let nid = job.notification_id.clone().unwrap();
+    assert!(jobs.current_generation(&job.id).unwrap().1);
+    assert_eq!(
+        jobs.prepare_subagent_report(&job.id, None),
+        SubagentReportState::Background { notification_id: nid.clone(), recovery: recovery.clone(), started_at: job.started_at }
+    );
+    assert!(!jobs.current_generation(&job.id).unwrap().1);
+    assert_eq!(jobs.prepare_subagent_report(&job.id, None), SubagentReportState::None);
+    assert!(jobs.current_generation("job_missing").is_none());
+    tx.send(()).unwrap();
+    jobs.wait(&job.id).await;
+    // The settlement commit owns the terminal row while this generation is settling.
+    let pending = jobs.pending_background();
+    assert_eq!((pending[0]["notificationID"].as_str(), pending[0]["status"].as_str()), (Some(nid.as_str()), Some("running")));
+    let report = SubagentOutboxReport {
+        notification_id: nid.clone(),
+        recovery,
+        status: JobStatus::Completed,
+        output: Some("done".into()),
+        error: None,
+        started_at: Some(job.started_at),
+    };
+    db.with(|c| Jobs::record_subagent_report(c, &report)).unwrap();
+    let pending = jobs.pending_background();
+    assert_eq!((pending[0]["status"].as_str(), pending[0]["output"].as_str()), (Some("completed"), Some("done")));
+    jobs.complete_background(&nid);
+}
+
+/// "starts a fresh generation while the previous subagent report is settling"
+#[tokio::test]
+async fn starts_a_fresh_generation_while_the_previous_subagent_report_is_settling() {
+    let db = Database::memory().unwrap();
+    let jobs = Arc::new(Jobs::new(db));
+    let recovery = subagent("ses_settling_parent", "ses_settling_child", "Settling work");
+    let (old_tx, old_rx) = tokio::sync::oneshot::channel::<()>();
+    let job = jobs.start_input(background(
+        "ses_settling_child",
+        recovery.clone(),
+        None,
+        Box::pin(async move {
+            let _ = old_rx.await;
+            Ok("old".to_string())
+        }),
+    ));
+    let (generation, _) = jobs.current_generation(&job.id).unwrap();
+    let old_wait = {
+        let jobs = jobs.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { jobs.wait(&id).await })
+    };
+    tokio::task::yield_now().await;
+    assert!(matches!(jobs.prepare_subagent_report(&job.id, None), SubagentReportState::Background { .. }));
+    assert_eq!(jobs.current_generation(&job.id), Some((generation, false)));
+    let (new_tx, new_rx) = tokio::sync::oneshot::channel::<String>();
+    jobs.start_input(background("ses_settling_child", recovery, None, Box::pin(async move { Ok(new_rx.await.unwrap()) })));
+    let current = jobs.current_generation(&job.id).unwrap();
+    assert_ne!(current.0, generation);
+    assert!(current.1);
+    old_tx.send(()).unwrap();
+    // The superseded generation still resolves its waiters instead of dropping the settlement.
+    let old = old_wait.await.unwrap().unwrap();
+    assert_eq!((old.status, old.output.as_deref()), (JobStatus::Completed, Some("old")));
+    assert_eq!(jobs.get(&job.id).unwrap().status, JobStatus::Running);
+    new_tx.send("new".into()).unwrap();
+    let new = jobs.wait(&job.id).await.unwrap();
+    assert_eq!((new.status, new.output.as_deref()), (JobStatus::Completed, Some("new")));
+}
+
+/// "matches an external cancel to its busy period through the bound generation"
+#[tokio::test]
+async fn matches_an_external_cancel_to_its_busy_period_through_the_bound_generation() {
+    let jobs = Arc::new(Jobs::new(Database::memory().unwrap()));
+    let job = jobs.start_input(background(
+        "ses_cancel_bound_child",
+        subagent("ses_cancel_bound_parent", "ses_cancel_bound_child", "Cancelled during the busy period"),
+        None,
+        Box::pin(futures::future::pending()),
+    ));
+    let (generation, _) = jobs.current_generation(&job.id).unwrap();
+    jobs.cancel(&job.id);
+    assert_eq!(jobs.get(&job.id).unwrap().status, JobStatus::Cancelled);
+    // The cancel consumed the live entry; its matching generation still belongs to this busy period.
+    assert_eq!(jobs.prepare_subagent_report(&job.id, Some(generation - 1)), SubagentReportState::None);
+    assert!(matches!(jobs.prepare_subagent_report(&job.id, Some(generation)), SubagentReportState::Background { .. }));
+    assert_eq!(jobs.prepare_subagent_report(&job.id, None), SubagentReportState::None);
+}
+
+/// "persists a background marker before forking background work"
+#[tokio::test]
+async fn persists_a_background_marker_before_forking_background_work() {
+    let db = Database::memory().unwrap();
+    let jobs = Arc::new(Jobs::new(db));
+    let probe = jobs.clone();
+    let job = jobs.start_input(background(
+        "ses_atomic_child",
+        subagent("ses_atomic_parent", "ses_atomic_child", "Atomic start"),
+        Some("msg_atomic"),
+        Box::pin(async move {
+            // The row is already durable when the run begins.
+            Ok(probe.pending_background().iter().any(|r| r["notificationID"] == "msg_atomic" && r["status"] == "running").to_string())
+        }),
+    ));
+    assert_eq!(job.notification_id.as_deref(), Some("msg_atomic"));
+    let info = jobs.wait(&job.id).await.unwrap();
+    assert_eq!((info.status, info.output.as_deref()), (JobStatus::Completed, Some("true")));
+    let pending = jobs.pending_background();
+    assert_eq!((pending[0]["status"].as_str(), pending[0]["output"].as_str()), (Some("completed"), Some("true")));
+    jobs.complete_background("msg_atomic");
+}
+
+/// "distinguishes caller cancellation from teardown" (the explicit half: a registry dropped without cancelling
+/// leaves nothing cancelled, which `recovers_a_background_marker_after_its_process_local_registry_closes` covers).
+#[tokio::test]
+async fn distinguishes_caller_cancellation() {
+    let jobs = Arc::new(Jobs::new(Database::memory().unwrap()));
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+    struct Guard(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.take().map(|tx| tx.send(()));
+        }
+    }
+    let job = jobs.start(
+        "job_explicit_cancel".into(),
+        "test".into(),
+        None,
+        None,
+        Box::pin(async move {
+            let _guard = Guard(Some(dropped_tx));
+            futures::future::pending::<()>().await;
+            Ok(String::new())
+        }),
+    );
+    assert!(!jobs.is_cancelled(&job.id));
+    // The run has started before it is cancelled.
+    tokio::task::yield_now().await;
+    jobs.cancel(&job.id);
+    assert!(jobs.is_cancelled(&job.id));
+    tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx).await.unwrap().unwrap();
+    // A session teardown (`cancelSession`) is not a caller cancellation.
+    let other = jobs.start("job_session_cancel".into(), "test".into(), None, Some(shell("ses_teardown", "job_session_cancel", "x")), Box::pin(futures::future::pending()));
+    let generation = jobs.current_generation(&other.id).unwrap().0;
+    assert!(!jobs.is_cancelled_generation(&other.id, generation));
+}
+
+/// "matches a creation-tick cancellation without a bound generation exactly once"
+#[tokio::test]
+async fn matches_a_creation_tick_cancellation_without_a_bound_generation_exactly_once() {
+    let jobs = Arc::new(Jobs::new(Database::memory().unwrap()));
+    jobs.start_input(background(
+        "ses_creation_child",
+        subagent("ses_creation_parent", "ses_creation_child", "Cancelled on creation"),
+        None,
+        Box::pin(futures::future::pending()),
+    ));
+    jobs.cancel("ses_creation_child");
+    assert!(matches!(jobs.prepare_subagent_report("ses_creation_child", None), SubagentReportState::Background { .. }));
+    assert_eq!(jobs.prepare_subagent_report("ses_creation_child", None), SubagentReportState::None);
+}
+
+/// "excludes settling and consumed work from running background snapshots"
+#[tokio::test]
+async fn excludes_settling_and_consumed_work_from_running_background_snapshots() {
+    let db = Database::memory().unwrap();
+    let jobs = Arc::new(Jobs::new(db.clone()));
+    let recovery = subagent("ses_snapshot_parent", "ses_snapshot_child", "Snapshot work");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let job = jobs.start_input(background(
+        "ses_snapshot_child",
+        recovery.clone(),
+        None,
+        Box::pin(async move {
+            let _ = rx.await;
+            Ok("done".to_string())
+        }),
+    ));
+    let nid = job.notification_id.clone().unwrap();
+    assert_eq!(jobs.running_background(), vec![recovery]);
+    assert!(matches!(jobs.prepare_subagent_report("ses_snapshot_child", None), SubagentReportState::Background { .. }));
+    assert!(jobs.running_background().is_empty());
+    // A settling live entry without its row must not leak back into the durable list.
+    db.with(|c| Jobs::delete_background_row(c, &nid)).unwrap();
+    assert!(jobs.background_jobs().is_empty());
+    tx.send(()).unwrap();
+    jobs.wait("ses_snapshot_child").await;
+    jobs.complete_background(&nid);
+    assert!(jobs.running_background().is_empty());
 }

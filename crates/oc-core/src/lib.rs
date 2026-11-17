@@ -58,6 +58,7 @@ pub mod shell_cmd;
 pub mod skill_discovery;
 pub mod skills;
 pub mod step;
+pub mod subagent_report;
 pub mod title;
 pub mod transfer;
 pub mod vcs;

@@ -42,7 +42,6 @@ struct Child {
     label: String,
     description: String,
     status: SubagentStatus,
-    background: bool,
     title: Option<String>,
     last_updated: i64,
     frames: Vec<(String, StreamCommit)>,
@@ -131,7 +130,6 @@ impl SubagentTracker {
                     label: FALLBACK_LABEL.into(),
                     description: String::new(),
                     status: SubagentStatus::Running,
-                    background: false,
                     title: None,
                     last_updated: 0,
                     frames: Vec::new(),
@@ -181,9 +179,6 @@ impl SubagentTracker {
         }
         if let Some(d) = text(meta.get("description")) {
             child.description = d;
-        }
-        if meta.get("background").and_then(|b| b.as_bool()) == Some(true) {
-            child.background = true;
         }
     }
 
@@ -499,7 +494,6 @@ impl SubagentTracker {
         let child = self.children.get_mut(&sid).unwrap();
         Self::apply_meta(child, pending.as_ref());
         if event.kind == "session.tool.success" && running {
-            child.background = true;
             child.status = SubagentStatus::Running;
         }
         if event.kind == "session.tool.success" && !running && child.status == SubagentStatus::Running {
@@ -553,9 +547,6 @@ impl SubagentTracker {
         }
         let child = self.children.get_mut(&sid).unwrap();
         Self::apply_meta(child, Some(&tool.input));
-        if tool.status == ToolStatus::Completed && running {
-            child.background = true;
-        }
         if child.status == SubagentStatus::Running {
             let still = running && active.get(&sid).is_some();
             child.status = if still { SubagentStatus::Running } else { SubagentStatus::Completed };
@@ -775,7 +766,6 @@ impl SubagentTracker {
                 label: c.label.clone(),
                 description: if !c.description.is_empty() { c.description.clone() } else { c.title.clone().unwrap_or_default() },
                 status: c.status,
-                background: c.background,
                 title: c.title.clone(),
             })
             .collect();

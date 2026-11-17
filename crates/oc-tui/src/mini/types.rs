@@ -500,7 +500,6 @@ pub struct SubagentTab {
     pub label: String,
     pub description: String,
     pub status: SubagentStatus,
-    pub background: bool,
     pub title: Option<String>,
 }
 

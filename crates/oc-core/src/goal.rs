@@ -624,45 +624,7 @@ impl Engine {
 
     /// `SessionBackground.outstanding`: background jobs still running for the session or any descendant.
     pub fn outstanding(&self, session_id: &str) -> Background {
-        let descends = |from: &str| {
-            let mut seen = std::collections::HashSet::new();
-            let mut current = Some(from.to_string());
-            while let Some(id) = current {
-                if id == session_id {
-                    return true;
-                }
-                if !seen.insert(id.clone()) {
-                    return false;
-                }
-                current = self.app.db.session_get(&id).ok().flatten().and_then(|s| s.parent_id);
-            }
-            false
-        };
-        use oc_tools::host::JobRecovery;
-        self.app
-            .jobs
-            .running_background()
-            .into_iter()
-            .filter(|r| match r {
-                JobRecovery::Subagent { parent_session_id, .. } => descends(parent_session_id),
-                JobRecovery::Shell { session_id, .. } | JobRecovery::Image { session_id, .. } => descends(session_id),
-            })
-            .map(|r| match r {
-                JobRecovery::Shell { session_id, shell_id, command } => {
-                    json!({ "kind": "shell", "sessionID": session_id, "shellID": shell_id, "command": command })
-                }
-                JobRecovery::Image { session_id, path, model } => {
-                    json!({ "kind": "image", "sessionID": session_id, "path": path, "model": model })
-                }
-                JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } => json!({
-                    "kind": "subagent",
-                    "sessionID": parent_session_id,
-                    "childSessionID": child_session_id,
-                    "agent": agent,
-                    "description": description,
-                }),
-            })
-            .collect()
+        crate::job::outstanding(&self.app, session_id, &[])
     }
 
     /// The goal plugin's `experimental.idle` hook. Failures pause the goal instead of failing the execution.

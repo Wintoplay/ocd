@@ -66,8 +66,9 @@ responses always match `openapi.json` key order and shapes (a mismatch is a defe
   + follow), `interrupt`, `background` (no jobs → no-op), `message.get`, `message.list`,
   `environment`, `view`, `active`, `shell` (runner `session_shell`, awaited like upstream; 500
   without a runner), `background` (`app.jobs.background_all` + the synthetic notice + wake).
-  Subagent config commands create a child session and start/background a `SubagentJob` through
-  `oc_core::host::CoreHost`. The engine installs `app.session_mover`, so the `opencode.session_move` tool moves
+  Subagent config commands create a child session and start its background `SubagentJob`
+  (`oc_core::job::start_subagent`). `remove` deletes the parent before its children (2.3.0), so an interrupted
+  child's report finds no parent and its job row is dropped. The engine installs `app.session_mover`, so the `opencode.session_move` tool moves
   sessions through the same `move` with steer delivery.
 * **job**: `experimental.job.list` (`GET /api/experimental/job`, 2.2.7): `app.jobs.background_jobs()` filtered by
   `oc_core::job::list_background` (kind, status, owning session, `descendants` through the parent chain); an unknown

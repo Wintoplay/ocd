@@ -9,7 +9,6 @@ pub enum GroupId {
     Escape,
     Queued,
     Subagents,
-    Background,
     Agent,
     Model,
     Context,
@@ -18,13 +17,12 @@ pub enum GroupId {
     Menu,
 }
 
-const ORDER: [GroupId; 12] = [
+const ORDER: [GroupId; 11] = [
     GroupId::Spinner,
     GroupId::Status,
     GroupId::Escape,
     GroupId::Queued,
     GroupId::Subagents,
-    GroupId::Background,
     GroupId::Agent,
     GroupId::Model,
     GroupId::Context,
@@ -212,7 +210,6 @@ mod tests {
                     work: vec![
                         (GroupId::Queued, Action { key: "ctrl+x q".into(), label: "12 queued".into(), expanded: None }),
                         (GroupId::Subagents, Action { key: if mono { "down" } else { "\u{2193}" }.into(), label: "2 sub".into(), expanded: Some("2 subagents".into()) }),
-                        (GroupId::Background, Action { key: "ctrl+b".into(), label: "bg".into(), expanded: Some("background".into()) }),
                     ],
                     ..shot.clone()
                 },

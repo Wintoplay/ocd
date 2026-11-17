@@ -5,13 +5,11 @@ use oc_schema::ModelRef;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::host::{JobBlockResult, JobRecovery, JobStatus};
+use crate::host::JobRecovery;
 use crate::tool::{DefinitionContext, ErrorCause, Tool, ToolContext, ToolDefinition, ToolError, ToolOptions, ToolResult, decode, meta};
 use crate::util::js;
 
-pub const NO_TEXT: &str = "Subagent completed without a text response.";
-
-pub const DESCRIPTION: &str = "Spawns an agent in a child session to work on the specified task.\nThe output includes a sessionID you can pass back later to continue that specific conversation with the subagent.\nNew child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.\nForeground (default) runs the subagent to completion and returns its final response.\nBackground mode (background=true) launches it asynchronously and returns immediately; you are notified when it finishes.\nUse background only for independent work that can run while you continue elsewhere.";
+pub const DESCRIPTION: &str = "Spawns an agent in a child session to work on the specified task.\nSubagents always run in the background: the call returns immediately with a sessionID, and you receive a `<subagent>` message each time the child goes idle, including after later work.\nKeep working on non-overlapping tasks, or briefly tell the user what you launched and end your response. Do not sleep, poll, or proactively check on the child's progress.\nNew child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.\nPass the returned sessionID to continue that specific child conversation. A follow-up to a running child joins its current run.";
 
 /// Description after the session hook (`Available subagents:` list, sorted by id).
 pub fn description(subagents: Option<&[crate::tool::SubagentSummary]>) -> String {
@@ -31,8 +29,8 @@ pub fn description(subagents: Option<&[crate::tool::SubagentSummary]>) -> String
 
 pub fn background_text(session_id: &str) -> String {
     [
-        format!("The subagent is working in the background (sessionID: {session_id}). You will be notified automatically when it finishes."),
-        "DO NOT sleep, poll for progress, ask the subagent for status, or duplicate this subagent's work; avoid working with the same files or topics it is using.".into(),
+        format!("The subagent is working in the background (sessionID: {session_id}). You will receive a <subagent> message when it goes idle, and again after each later round of work."),
+        "DO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.".into(),
         "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.".into(),
         "To send it follow-ups or change its instructions while it runs, call subagent again with this sessionID.".into(),
     ]
@@ -62,7 +60,6 @@ struct Input {
     model: Option<String>,
     #[serde(rename = "sessionID")]
     session_id: Option<String>,
-    background: Option<bool>,
 }
 
 pub struct SubagentTool;
@@ -209,10 +206,12 @@ impl Tool for SubagentTool {
                     .map_err(|m| ToolError::with_cause(format!("Parent session not found: {}", ctx.session_id), ErrorCause::Error(m)))?
             }
         };
-        let background = input.background == Some(true);
+        // A child that is not draining yet must be admitted without waking: the job's resume owns the start, so the
+        // period cannot run before its boundary is registered.
+        let running = existing.is_some() && host.subagent_running(&child.id).await;
         ctx.progress(meta(vec![("sessionID", json!(child.id)), ("status", json!("running"))]));
         let text = if existing.is_none() { format!("You are a subagent spawned by another session.\n{}", input.prompt) } else { input.prompt.clone() };
-        host.session_prompt(&child.id, &text, (background && existing.is_none()).then_some(false))
+        host.session_prompt(&child.id, &text, (!running).then_some(false))
             .await
             .map_err(|m| ToolError::with_cause(format!("Failed to prompt subagent: {}", child.id), ErrorCause::Error(m)))?;
         let recovery = JobRecovery::Subagent {
@@ -221,51 +220,11 @@ impl Tool for SubagentTool {
             agent: agent.name.clone(),
             description: input.description.clone(),
         };
-        host.subagent_job_start(recovery.clone()).await.map_err(|m| ToolError::with_cause(format!("Failed to prompt subagent: {}", child.id), ErrorCause::Error(m)))?;
-        let finish = |status: &str, output: String| {
-            let content = if status == "completed" {
-                format!("<subagent sessionID=\"{}\" state=\"completed\">\n{output}\n</subagent>", child.id)
-            } else {
-                output.clone()
-            };
-            ToolResult::text(content)
-                .with_output(json!({"sessionID": child.id, "status": status, "output": output}))
-                .with_metadata(meta(vec![("sessionID", json!(child.id)), ("status", json!(status))]))
-        };
-        if background {
-            let _ = host.subagent_job_background(recovery).await;
-            return Ok(finish("running", background_text(&child.id)));
-        }
-        let result = tokio::select! {
-            result = host.job_block(&child.id, &ctx.session_id) => result,
-            _ = ctx.cancel.cancelled() => {
-                let _ = host.session_interrupt(&child.id).await;
-                let _ = host.job_cancel(&child.id).await;
-                return Err(ToolError::interrupted());
-            }
-        };
-        let info = match result {
-            Ok(Some(JobBlockResult::Backgrounded(info))) => {
-                let _ = host.subagent_job_notify(recovery, info.started_at).await;
-                return Ok(finish("running", background_text(&child.id)));
-            }
-            Ok(Some(JobBlockResult::Finished(info))) => Some(info),
-            Ok(None) => None,
-            Err(m) => return Err(ToolError::new(format!("Subagent failed (sessionID: {}): {m}", child.id))),
-        };
-        if let Some(info) = &info {
-            if info.status == JobStatus::Error {
-                return Err(ToolError::new(format!(
-                    "Subagent failed (sessionID: {}): {}",
-                    child.id,
-                    info.error.clone().unwrap_or_else(|| "unknown error".into())
-                )));
-            }
-            if info.status == JobStatus::Cancelled {
-                return Err(ToolError::new(format!("Subagent cancelled (sessionID: {})", child.id)));
-            }
-        }
-        Ok(finish("completed", info.and_then(|i| i.output).unwrap_or_else(|| NO_TEXT.into())))
+        host.subagent_job_start(recovery).await.map_err(|m| ToolError::with_cause(format!("Failed to prompt subagent: {}", child.id), ErrorCause::Error(m)))?;
+        let output = background_text(&child.id);
+        Ok(ToolResult::text(output.clone())
+            .with_output(json!({"sessionID": child.id, "status": "running", "output": output}))
+            .with_metadata(meta(vec![("sessionID", json!(child.id)), ("status", json!("running"))])))
     }
 }
 

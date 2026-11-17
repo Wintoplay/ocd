@@ -1,18 +1,25 @@
-//! Restart recovery (`core/session/execution/restart.ts`): resume root sessions whose execution
-//! claim survived a process exit, and settle background jobs that were pending at that time.
+//! Restart recovery (`core/session/execution/restart.ts`, 2.3.0): resume sessions whose execution claim survived a
+//! process exit, and settle background jobs that were pending at that time. Shell and image outcomes are admitted
+//! first, then subagent rows: a finished row replays its formatted report, a running child only counts its restart
+//! attempt. Wakes from replayed reports wait until every suspended session counted its attempt; directly driven
+//! children resume like root sessions; recovered subagent jobs start last.
+//!
+//! Not ported: shell commands that survive the restart in the process daemon (`ShellTool.reattach`,
+//! `settleBackgroundedCalls`); ocd runs shells itself, so a running shell row is reported cancelled.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use oc_schema::event::SessionEvent;
 use oc_schema::types::SessionError;
 use oc_tools::host::{JobRecovery, JobStatus};
 
-use crate::job::{deliver_subagent, parse_status};
+use crate::job::{parse_status, subagent_notice, SubagentNotice};
+use crate::session::SessionError as Admission;
 use crate::runner::Engine;
 
 pub const DEFAULT_MAX_ATTEMPTS: i64 = 10;
@@ -42,10 +49,10 @@ fn background(v: &Value) -> Option<Background> {
 }
 
 impl Engine {
-    /// `SessionStore.listSuspended`: root sessions with an unreleased claim.
+    /// `SessionStore.listSuspended`: sessions with an unreleased claim, including directly driven children.
     fn list_suspended(&self) -> anyhow::Result<Vec<String>> {
         self.app.db.with(|c| {
-            let mut s = c.prepare("SELECT id FROM session_v2 WHERE time_suspended IS NOT NULL AND parent_id IS NULL")?;
+            let mut s = c.prepare("SELECT id FROM session_v2 WHERE time_suspended IS NOT NULL")?;
             let r = s.query_map([], |r| r.get(0))?.collect();
             r
         })
@@ -115,117 +122,191 @@ impl Engine {
         self.app.jobs.complete_background(&bg.notification_id);
     }
 
-    async fn recover_subagent(self: &Arc<Self>, bg: Background, suspended: &Arc<Mutex<HashSet<String>>>) {
-        let JobRecovery::Subagent { parent_session_id, child_session_id, description, .. } = bg.recovery.clone() else { return };
+    /// `deliverSubagentSafe`: replay a formatted report. A deleted parent acknowledges the row; a conflicting
+    /// notification ID keeps it for the next boot; any other failure is logged and keeps it too.
+    async fn deliver_subagent_safe(&self, notices: &Notices, bg_nid: &str, recovery: &JobRecovery, status: JobStatus, output: Option<String>, error: Option<String>) {
+        let JobRecovery::Subagent { parent_session_id, child_session_id, .. } = recovery else { return };
+        let Some(notice) = subagent_notice(status, output, error, Some(bg_nid.to_string()), recovery) else { return };
+        match notices.synthetic(&self.app, notice).await {
+            Ok(()) => self.app.jobs.complete_background(bg_nid),
+            Err(Admission::NotFound(_)) => self.app.jobs.complete_background(bg_nid),
+            Err(Admission::PromptConflict(_)) => tracing::warn!(
+                notificationID = bg_nid,
+                parentSessionID = parent_session_id.as_str(),
+                childSessionID = child_session_id.as_str(),
+                "Failed to admit recovered subagent notification due to ID conflict"
+            ),
+            Err(e) => {
+                if self.app.sessions.get(parent_session_id).is_err() {
+                    self.app.jobs.complete_background(bg_nid);
+                } else {
+                    tracing::warn!(
+                        notificationID = bg_nid,
+                        parentSessionID = parent_session_id.as_str(),
+                        childSessionID = child_session_id.as_str(),
+                        error = %e,
+                        "Unexpected failure delivering recovered subagent notification"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `recoverSubagent`: replay a finished row, terminalize a child past its budget, or count its attempt and report
+    /// it as resumable (it starts only after every suspended session counted its own).
+    async fn recover_subagent(&self, bg: &Background, notices: &Notices) -> bool {
+        let JobRecovery::Subagent { parent_session_id, child_session_id, .. } = &bg.recovery else { return false };
         let parent_of_child: Option<Option<String>> = self
             .app
             .db
-            .with(|c| c.query_row("SELECT parent_id FROM session_v2 WHERE id = ?", [&child_session_id], |r| r.get(0)).optional())
+            .with(|c| c.query_row("SELECT parent_id FROM session_v2 WHERE id = ?", [child_session_id], |r| r.get(0)).optional())
             .ok()
             .flatten();
-        let parent_exists = self.app.sessions.get(&parent_session_id).is_ok();
+        let parent_exists = self.app.sessions.get(parent_session_id).is_ok();
         if parent_of_child.flatten().as_deref() != Some(parent_session_id.as_str()) || !parent_exists {
             self.app.jobs.complete_background(&bg.notification_id);
-            return;
+            return false;
         }
         if bg.status != JobStatus::Running {
-            let resume = !suspended.lock().contains(&parent_session_id);
-            deliver_subagent(&self.app, bg.status, bg.output, bg.error, Some(bg.notification_id), &bg.recovery, resume).await;
-            return;
+            // The outbox row already holds the formatted result; replay it without touching the child.
+            self.deliver_subagent_safe(notices, &bg.notification_id, &bg.recovery, bg.status, bg.output.clone(), bg.error.clone()).await;
+            return false;
         }
-        let coordinator = self.app.coordinator();
-        if coordinator.is_active(&child_session_id) {
-            return;
+        if self.app.coordinator().is_active(child_session_id) {
+            return false;
         }
-        if !self.prepare_resume(&child_session_id).await.unwrap_or(false) {
-            let resume = !suspended.lock().contains(&parent_session_id);
-            deliver_subagent(&self.app, JobStatus::Error, None, Some(RESUME_EXHAUSTED.into()), Some(bg.notification_id), &bg.recovery, resume)
+        // An exhausted child is terminalized directly on the bus, outside the coordinator, so no report settles it.
+        if !self.prepare_resume(child_session_id).await.unwrap_or(false) {
+            self.deliver_subagent_safe(notices, &bg.notification_id, &bg.recovery, JobStatus::Error, None, Some(RESUME_EXHAUSTED.into()))
                 .await;
-            return;
+            return false;
         }
-        let app = self.app.clone();
-        let child = child_session_id.clone();
-        let run = Box::pin(async move {
-            if let crate::coordinator::Exit::Failure(e) = app.coordinator().run(&child).await {
-                return Err(e.to_string());
-            }
-            let msgs = app.db.session_messages(&child).map_err(|e| e.to_string())?;
-            let last = msgs.iter().rev().map(|(_, m)| m).find(|m| {
-                matches!(m, oc_schema::Message::Assistant(a) if a.time.completed.is_some() && a.error.is_none())
-            });
-            Ok(crate::job::subagent_text(last))
-        });
-        self.app.jobs.start(bg.id.clone(), "subagent".into(), Some(description), Some(bg.recovery.clone()), run);
-        self.app.jobs.set_notification_id(&bg.id, &bg.notification_id);
-        self.app.jobs.background(&bg.id);
-        let (app, suspended, recovery, id) = (self.app.clone(), suspended.clone(), bg.recovery, bg.id);
-        tokio::spawn(async move {
-            let Some(info) = app.jobs.wait(&id).await else { return };
-            // Async observers consult the suspended set at delivery; later completions wake parents normally.
-            let resume = !suspended.lock().contains(&parent_session_id);
-            deliver_subagent(&app, info.status, info.output, info.error, info.notification_id, &recovery, resume).await;
-        });
+        true
     }
 
-    /// `resumeSuspendedSessions` (called at managed server boot).
+    /// `resumeSuspendedSessions` (called at managed server boot). Returns how many sessions it resumed.
     pub async fn resume_suspended(self: &Arc<Self>) -> anyhow::Result<usize> {
         let coordinator = self.app.coordinator();
-        let mut pending: Vec<Background> = self.app.jobs.pending_background().iter().filter_map(background).collect();
-        let children: Vec<String> = pending
+        let active: HashSet<String> = coordinator.active().into_iter().collect();
+        let pending: Vec<Background> = self.app.jobs.pending_background().iter().filter_map(background).collect();
+        let children: HashSet<String> = pending
             .iter()
             .filter_map(|b| match &b.recovery {
                 JobRecovery::Subagent { child_session_id, .. } if b.status == JobStatus::Running => Some(child_session_id.clone()),
                 _ => None,
             })
             .collect();
+        self.release_orphaned_child_claims()?;
+        // A cancel persisted before its child could release the claim (a crash in between) leaves the claim behind.
+        for bg in &pending {
+            if let (JobStatus::Cancelled, JobRecovery::Subagent { child_session_id, .. }, None) = (bg.status, &bg.recovery, &bg.error) {
+                if !active.contains(child_session_id) && !children.contains(child_session_id) {
+                    self.app.db.with(|c| crate::session::Sessions::release(c, child_session_id))?;
+                }
+            }
+        }
         // Early notices wait for recovery's accounting, including sessions that exhaust their budget.
-        let suspended: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(
-            self.list_suspended()?.into_iter().chain(children.iter().cloned()).filter(|s| !coordinator.is_active(s)).collect(),
-        ));
-        self.release_child_claims(&children)?;
-        // Admit shell outcomes before a recovered child can start its first model request.
-        pending.sort_by_key(|b| matches!(b.recovery, JobRecovery::Subagent { .. }));
-        for bg in pending {
-            if self.app.jobs.get(&bg.id).is_some_and(|j| j.status == JobStatus::Running) {
+        let suspended: HashSet<String> =
+            self.list_suspended()?.into_iter().chain(children.iter().cloned()).filter(|s| !active.contains(s)).collect();
+        let notices = Notices { suspended: Mutex::new(suspended), wakes: Mutex::new(Vec::new()) };
+        let result = self.sweep(&pending, &children, &notices).await;
+        // Deferred wakes go out even when the sweep failed part way.
+        let wakes = std::mem::take(&mut *notices.wakes.lock());
+        for id in wakes {
+            self.wake_owner(&id);
+        }
+        result
+    }
+
+    async fn sweep(self: &Arc<Self>, pending: &[Background], children: &HashSet<String>, notices: &Notices) -> anyhow::Result<usize> {
+        let coordinator = self.app.coordinator();
+        let recoverable = |bg: &Background| !self.app.jobs.get(&bg.id).is_some_and(|j| j.status == JobStatus::Running);
+        // Shell and tool outcomes first, and only then recovered children.
+        for bg in pending.iter().filter(|b| !matches!(b.recovery, JobRecovery::Subagent { .. })) {
+            if !recoverable(bg) {
                 continue;
             }
             match bg.recovery {
-                JobRecovery::Shell { .. } => self.recover_shell(&bg).await,
-                JobRecovery::Image { .. } => self.recover_image(&bg).await,
-                JobRecovery::Subagent { .. } => self.recover_subagent(bg, &suspended).await,
+                JobRecovery::Shell { .. } => self.recover_shell(bg).await,
+                JobRecovery::Image { .. } => self.recover_image(bg).await,
+                JobRecovery::Subagent { .. } => {}
             }
         }
-        // Background completion can wake a parent, so inspect local ownership only after recovery.
-        let mut resumed = 0;
+        let mut resumable = Vec::new();
+        for bg in pending.iter().filter(|b| matches!(b.recovery, JobRecovery::Subagent { .. })) {
+            if recoverable(bg) && self.recover_subagent(bg, notices).await {
+                resumable.push(bg);
+            }
+        }
+        // A directly driven child can also settle and wake its parent. Count every claimed execution before starting
+        // any of them, leaving running jobs to their subagent job.
+        let resumed: HashSet<String> = coordinator.active().into_iter().collect();
+        let mut direct = Vec::new();
         for id in self.list_suspended()? {
-            if coordinator.is_active(&id) {
+            if resumed.contains(&id) || children.contains(&id) {
                 continue;
             }
-            if !self.prepare_resume(&id).await? {
-                continue;
+            if self.prepare_resume(&id).await? {
+                direct.push(id);
             }
+        }
+        let count = direct.len() + resumable.len();
+        for id in direct {
+            notices.suspended.lock().remove(&id);
             let c = coordinator.clone();
             tokio::spawn(async move {
                 c.run(&id).await;
             });
-            resumed += 1;
         }
-        suspended.lock().clear();
-        Ok(resumed)
+        // Start children only now: their reports wake parents, whose restart budget must already be charged.
+        for bg in resumable {
+            crate::job::start_subagent(&self.app, bg.recovery.clone(), Some(bg.notification_id.clone()));
+            if let JobRecovery::Subagent { child_session_id, .. } = &bg.recovery {
+                notices.suspended.lock().remove(child_session_id);
+            }
+        }
+        Ok(count)
     }
 
-    /// `SessionStore.releaseChildClaims`: clear orphaned child claims except recoverable subagent children.
-    fn release_child_claims(&self, recoverable: &[String]) -> anyhow::Result<()> {
-        self.app.db.with(|c| {
-            let ids: Vec<String> = {
-                let mut s = c.prepare("SELECT id FROM session_v2 WHERE time_suspended IS NOT NULL AND parent_id IS NOT NULL")?;
-                let r: rusqlite::Result<Vec<String>> = s.query_map([], |r| r.get(0))?.collect();
-                r?
-            };
-            for id in ids.iter().filter(|id| !recoverable.contains(id)) {
-                c.execute("UPDATE session_v2 SET time_suspended = NULL, resume_attempts = 0 WHERE id = ?", params![id])?;
+    /// `wake`: wake a session that still exists and has no staged revert.
+    fn wake_owner(&self, id: &str) {
+        if let Ok(s) = self.app.sessions.get(id) {
+            if s.revert.is_none() {
+                self.app.coordinator().wake(id, crate::inbox::Scope::Input);
             }
-            Ok(())
-        })
+        }
+    }
+
+    /// `SessionStore.releaseOrphanedChildClaims`: release the claims of children whose parent was deleted.
+    fn release_orphaned_child_claims(&self) -> anyhow::Result<()> {
+        self.app.db.with(|c| {
+            c.execute(
+                "UPDATE session_v2 SET time_suspended = NULL, resume_attempts = 0 \
+                 WHERE time_suspended IS NOT NULL AND parent_id NOT IN (SELECT id FROM session_v2)",
+                [],
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// Restart notices admitted without waking; a wake is held until every suspended session counted its restart
+/// attempt (`notices.synthetic` in `resumeSuspendedSessions`), and never sent to a session the sweep resumes.
+struct Notices {
+    suspended: Mutex<HashSet<String>>,
+    wakes: Mutex<Vec<String>>,
+}
+
+impl Notices {
+    async fn synthetic(&self, app: &crate::app::App, notice: SubagentNotice) -> Result<(), Admission> {
+        let session = notice.session_id.clone();
+        app.sessions.synthetic(&session, notice.id, notice.text, Some(notice.description), Some(notice.metadata), None).await?;
+        if !self.suspended.lock().contains(&session) {
+            let mut wakes = self.wakes.lock();
+            if !wakes.contains(&session) {
+                wakes.push(session);
+            }
+        }
+        Ok(())
     }
 }

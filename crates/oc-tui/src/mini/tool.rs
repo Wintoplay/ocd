@@ -836,6 +836,7 @@ pub fn tool_entry_body(commit: &StreamCommit, raw: &str, shell_output_opt: Optio
         }
         if commit.phase == Phase::Final
             && ctx.status == "completed"
+            && ctx.meta.get("status").and_then(Value::as_str) != Some("running")
             && let Some(result) = task_result(&ctx.output)
         {
             return Some(EntryBody::Markdown(result));

@@ -191,7 +191,7 @@ fn acp_initialize_new_session_prompt_and_eof() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Background following of child sessions (`turn.ts` `handoff`/`followChildren`, 2.2.7)
+// Background following of child sessions (`turn.ts` `handoff`/`followChildren`, 2.3.0)
 
 /// One scripted answer: the first unused turn whose `matches` occurs in the request body answers it.
 #[derive(Clone)]
@@ -395,12 +395,13 @@ fn child_kinds(messages: &[Value]) -> Vec<String> {
 }
 
 fn launch(task: &str) -> Turn {
-    tool_turn("start the research", "call_launch", "subagent", json!({"agent": "general", "description": "Research notes", "prompt": task, "background": true}))
+    tool_turn("start the research", "call_launch", "subagent", json!({"agent": "general", "description": "Research notes", "prompt": task}))
 }
 
 /// The root turn starts a background subagent and ends. The agent keeps following the child: its updates and its
-/// permission ask (`read: ask`) reach the client after the prompt's response; the root's answer to the child's
-/// report is not streamed.
+/// permission ask (`read: ask`) reach the client after the prompt's response, and so does the root's answer to the
+/// child's report (background-turn.subprocess.test.ts "streams the parent's response to a subagent report after
+/// end_turn"). A later prompt then runs as usual.
 #[test]
 fn acp_follows_a_background_child_after_the_turn() {
     let env = common::Env::new();
@@ -411,20 +412,19 @@ fn acp_follows_a_background_child_after_the_turn() {
         Turn { delay_ms: 1500, ..tool_turn("CHILD-A: read notes", "call_notes", "read", json!({"path": "notes.txt"})) },
         text_turn("note line one", "Child report: done."),
         text_turn("Child report: done.", "ROOT-REACTION"),
+        text_turn("and now?", "NEXT-ANSWER"),
     ]);
     let mut acp = Client::start(&env, port, json!({"permission": {"read": "ask"}}));
     let sid = acp.open_session(&env);
     let id = acp.start_request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": "start the research"}]}));
     assert_eq!(acp.response(id)["result"]["stopReason"], "end_turn");
     assert!(acp.wait(30, child_status("completed")).is_some(), "the child's completion was not sent");
-    // The root reacts to the report (the mock answered it), but that is not streamed.
-    for _ in 0..100 {
-        if used(&script, 4) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    // The root reacts to the report, and its answer is streamed.
+    let reaction = acp.wait(30, |v| v.get("method") == Some(&json!("session/update")) && v.to_string().contains("ROOT-REACTION"));
     assert!(used(&script, 4), "the root did not react to the report");
+    let reaction = reaction.expect("the root's reaction is streamed");
+    assert_eq!(reaction["params"]["sessionId"], json!(sid));
+    assert_eq!(reaction["params"]["update"]["sessionUpdate"], "agent_message_chunk");
     acp.drain(1500);
     let after = acp.after(id);
     assert_eq!(child_kinds(&after), ["tool_call", "tool_call_update", "tool_call_update", "agent_message_chunk", "completed"], "{after:#?}");
@@ -434,9 +434,15 @@ fn acp_follows_a_background_child_after_the_turn() {
     assert_eq!(child["title"], "Research notes");
     assert_eq!(ask["params"]["toolCall"]["toolCallId"], json!(format!("{}:call_notes", child["id"].as_str().unwrap())));
     let text: String = after.iter().filter_map(|v| v.pointer("/params/update/content/text").and_then(Value::as_str)).collect();
-    assert_eq!(text, "Child report: done.");
-    assert!(after.iter().all(|v| v.get("method") != Some(&json!("session/update"))), "{after:#?}");
-    assert!(!acp.seen.iter().any(|v| v.to_string().contains("ROOT-REACTION")));
+    assert_eq!(text, "Child report: done.ROOT-REACTION");
+    let root: Vec<&Value> = after.iter().filter(|v| v.get("method") == Some(&json!("session/update"))).collect();
+    assert_eq!(root.len(), 1, "{after:#?}");
+    // The follower ended with the root's turn; the next prompt is answered as usual.
+    let next = acp.start_request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": "and now?"}]}));
+    assert_eq!(acp.response(next)["result"]["stopReason"], "end_turn");
+    acp.drain(500);
+    assert_eq!(acp.seen.iter().filter(|v| v.to_string().contains("NEXT-ANSWER")).count(), 1);
+    assert_eq!(acp.seen.iter().filter(|v| v.to_string().contains("ROOT-REACTION")).count(), 1);
     acp.close();
 }
 

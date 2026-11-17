@@ -1,8 +1,9 @@
-"""`opencode acp` over stdio (2.2.7 `cli/src/acp`): a background subagent the root turn starts keeps running after the
-turn ends or is cancelled, and the agent follows it (`turn.ts` `handoff`/`followChildren`): its child updates and its
-permission asks still reach the client until it ends, while the root session's own later work (its answer to the
-subagent's report) is not streamed. Both binaries run `acp` in the project with the isolated environment and talk to
-their own private server; the dump is every JSON-RPC message the client received, in order."""
+"""`opencode acp` over stdio (`cli/src/acp`, 2.2.7 and 2.3.0): a subagent the root turn starts (always in the
+background since 2.3.0) keeps running after the turn ends or is cancelled, and the agent follows it after the prompt's
+response (`turn.ts` `handoff`/`followChildren`): its child updates and its permission asks still reach the client
+until it ends, and since 2.3.0 so does the root session's own turn that the subagent's report starts (its answer is
+streamed as session updates). Both binaries run `acp` in the project with the isolated environment and talk to their
+own private server; the dump is every JSON-RPC message the client received, in order."""
 import json
 import os
 import subprocess
@@ -157,13 +158,13 @@ def setup(ctx, script, config_extra=None):
 
 def launch(task, call="call_launch"):
     return {"match": "start the research", "tools": [{"name": "subagent", "id": call, "args": {
-        "agent": "general", "description": "Research notes", "prompt": task, "background": True}}]}
+        "agent": "general", "description": "Research notes", "prompt": task}}]}
 
 
 @scenario("acp")
 def acp_child_after_turn(ctx):
     """the root turn starts a background subagent and ends; the agent keeps sending the child's updates until it
-    completes, and the root session's answer to its report is not streamed."""
+    completes, then streams the root session's answer to its report."""
     acp, sid = setup(ctx, [
         launch("CHILD-A: summarize the notes"),
         {"match": "working in the background", "text": "Launched the research."},

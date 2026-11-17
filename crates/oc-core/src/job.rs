@@ -5,6 +5,7 @@
 //! migration `20261030054400_job`) until their completion notice is admitted, so a restart can settle them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
@@ -19,18 +20,60 @@ use oc_tools::host::{JobBlockResult, JobInfo, JobRecovery, JobStatus};
 const COMPLETED_LIMIT: usize = 25;
 pub const NO_TEXT: &str = "Subagent completed without a text response.";
 
+type Done = Arc<watch::Sender<Option<JobInfo>>>;
+
 struct Active {
     info: JobInfo,
-    done: watch::Sender<Option<JobInfo>>,
-    backgrounded: watch::Sender<Option<JobInfo>>,
+    done: Done,
+    backgrounded: Done,
     cancel: CancellationToken,
     generation: u64,
     blocking: HashMap<String, u32>,
     is_bg: bool,
+    /// A subagent generation whose busy period is reporting (`prepareSubagentReport`): its outbox row belongs to the
+    /// settlement commit, and a new start begins a fresh generation.
+    settling: bool,
     consumed: bool,
+    /// The generation already reported once.
+    reported: bool,
+    /// Stopped by an explicit caller cancel, not by teardown.
+    cancelled_by_caller: bool,
     recovery: Option<JobRecovery>,
     /// `info.metadata.sessionID`, which `matchesSession` checks first.
     metadata_session: Option<String>,
+}
+
+/// `Job.start` input (`StartInput`).
+pub struct StartInput {
+    pub id: String,
+    pub kind: String,
+    pub title: Option<String>,
+    /// The `sessionID` of the job's metadata (a shell job's session).
+    pub metadata_session: Option<String>,
+    pub recovery: Option<JobRecovery>,
+    /// Reuse this notification ID (a recovered job's row).
+    pub notification_id: Option<String>,
+    /// Start in the background: with a recovery, the row is written before the run starts.
+    pub background: bool,
+    pub run: BoxFuture<'static, Result<String, String>>,
+}
+
+/// `Job.SubagentReportState`: whether the busy period that just settled reports for a backgrounded subagent job.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubagentReportState {
+    Background { notification_id: String, recovery: JobRecovery, started_at: u64 },
+    None,
+}
+
+/// `Job.SubagentOutboxReport`: the formatted report a settlement commit writes to the job row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubagentOutboxReport {
+    pub notification_id: String,
+    pub recovery: JobRecovery,
+    pub status: JobStatus,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<u64>,
 }
 
 /// `ownerSessionID`: the parent session for a subagent.
@@ -144,6 +187,7 @@ impl Jobs {
             return;
         }
         job.consumed = true;
+        // Order history by first consumption, not by start time or later reads.
         let entry = jobs.shift_remove(id).unwrap();
         jobs.insert(id.to_string(), entry);
         let completed: Vec<String> = jobs
@@ -163,7 +207,7 @@ impl Jobs {
     }
 
     pub fn start(
-        self: &std::sync::Arc<Self>,
+        self: &Arc<Self>,
         id: String,
         kind: String,
         title: Option<String>,
@@ -175,7 +219,7 @@ impl Jobs {
 
     /// [`Jobs::start`] with the `sessionID` of the job's metadata (a shell job's session).
     pub fn start_with(
-        self: &std::sync::Arc<Self>,
+        self: &Arc<Self>,
         id: String,
         kind: String,
         title: Option<String>,
@@ -183,8 +227,15 @@ impl Jobs {
         recovery: Option<JobRecovery>,
         run: BoxFuture<'static, Result<String, String>>,
     ) -> JobInfo {
+        self.start_input(StartInput { id, kind, title, metadata_session, recovery, notification_id: None, background: false, run })
+    }
+
+    /// `Job.start`: a running job with this ID is joined (unless its generation is settling a report); otherwise a
+    /// new generation starts. Background work with a recovery is written to the `job` table before its run starts.
+    pub fn start_input(self: &Arc<Self>, input: StartInput) -> JobInfo {
+        let StartInput { id, kind, title, metadata_session, recovery, notification_id, background, run } = input;
         let mut jobs = self.jobs.lock();
-        if let Some(existing) = jobs.get(&id).filter(|j| j.info.status == JobStatus::Running) {
+        if let Some(existing) = jobs.get(&id).filter(|j| j.info.status == JobStatus::Running && !j.settling) {
             return existing.info.clone();
         }
         let generation = {
@@ -192,6 +243,7 @@ impl Jobs {
             *g += 1;
             *g
         };
+        let notification_id = notification_id.or_else(|| (background && recovery.is_some()).then(oc_schema::id::message));
         let info = JobInfo {
             id: id.clone(),
             kind,
@@ -201,64 +253,88 @@ impl Jobs {
             completed_at: None,
             output: None,
             error: None,
-            notification_id: None,
+            notification_id,
         };
         let cancel = CancellationToken::new();
-        jobs.insert(
-            id.clone(),
-            Active {
-                info: info.clone(),
-                done: watch::channel(None).0,
-                backgrounded: watch::channel(None).0,
-                cancel: cancel.clone(),
-                generation,
-                blocking: HashMap::new(),
-                is_bg: false,
-                consumed: false,
-                recovery,
-                metadata_session,
-            },
-        );
+        let done: Done = Arc::new(watch::channel(None).0);
+        let job = Active {
+            info: info.clone(),
+            done: done.clone(),
+            backgrounded: Arc::new(watch::channel(None).0),
+            cancel: cancel.clone(),
+            generation,
+            blocking: HashMap::new(),
+            is_bg: background,
+            settling: false,
+            consumed: false,
+            reported: false,
+            cancelled_by_caller: false,
+            recovery,
+            metadata_session,
+        };
+        // Background work becomes durable before its run starts, so no drain can observe an unmarked period.
+        if job.is_bg {
+            self.persist(&job);
+        }
+        jobs.insert(id.clone(), job);
         drop(jobs);
         let this = self.clone();
+        let base = info.clone();
         // The job's fiber is forked from the caller's and keeps its trace (a tool's job: the drain's).
         tokio::spawn(oc_util::trace::inherit(async move {
             let exit = tokio::select! {
                 r = run => Some(r),
                 _ = cancel.cancelled() => None,
             };
-            this.settle(&id, generation, exit);
+            this.settle(&id, generation, &done, base, exit);
         }));
         info
     }
 
-    fn settle(&self, id: &str, generation: u64, exit: Option<Result<String, String>>) {
+    fn settle(&self, id: &str, generation: u64, done: &Done, base: JobInfo, exit: Option<Result<String, String>>) {
+        let completed_at = now();
+        let terminal = |info: &mut JobInfo| {
+            info.completed_at = Some(completed_at);
+            match &exit {
+                Some(Ok(o)) => {
+                    info.status = JobStatus::Completed;
+                    info.output = Some(o.clone());
+                }
+                Some(Err(e)) => {
+                    info.status = JobStatus::Error;
+                    info.error = Some(e.clone());
+                }
+                None => info.status = JobStatus::Cancelled,
+            }
+        };
         let mut jobs = self.jobs.lock();
-        let Some(job) = jobs.get_mut(id) else { return };
-        if job.generation != generation || job.info.status != JobStatus::Running {
+        let Some(job) = jobs.get_mut(id).filter(|j| j.generation == generation) else {
+            // A newer generation replaced this one. Its waiters still need their result.
+            drop(jobs);
+            if done.borrow().is_none() {
+                let mut info = base;
+                terminal(&mut info);
+                let _ = done.send_replace(Some(info));
+            }
+            return;
+        };
+        if job.info.status != JobStatus::Running {
             return;
         }
         job.blocking.clear();
-        job.info.completed_at = Some(now());
-        match exit {
-            Some(Ok(o)) => {
-                job.info.status = JobStatus::Completed;
-                job.info.output = Some(o);
-            }
-            Some(Err(e)) => {
-                job.info.status = JobStatus::Error;
-                job.info.error = Some(e);
-            }
-            None => job.info.status = JobStatus::Cancelled,
-        }
+        terminal(&mut job.info);
         let snapshot = job.info.clone();
-        let _ = job.done.send_replace(Some(snapshot.clone()));
-        if job.info.status != JobStatus::Cancelled {
+        if job.consumed {
+            // A consumed job's notification row is gone; persisting here would resurrect it.
+            jobs.shift_remove(id);
+        } else if snapshot.status != JobStatus::Cancelled && !job.settling {
+            // A settling generation's row belongs to the settlement commit.
             let job = &jobs[id];
             self.persist(job);
         }
+        drop(jobs);
+        let _ = done.send_replace(Some(snapshot));
     }
-
     pub async fn wait(&self, id: &str) -> Option<JobInfo> {
         let (rx, generation, recoverable) = {
             let jobs = self.jobs.lock();
@@ -324,13 +400,6 @@ impl Jobs {
         self.persist(job);
     }
 
-    /// Reuse a persisted notification id for a recovered job (before `background`).
-    pub fn set_notification_id(&self, id: &str, notification_id: &str) {
-        if let Some(job) = self.jobs.lock().get_mut(id) {
-            job.info.notification_id = Some(notification_id.to_string());
-        }
-    }
-
     pub fn background(&self, id: &str) -> Option<JobInfo> {
         let mut jobs = self.jobs.lock();
         let job = jobs.get_mut(id)?;
@@ -374,15 +443,18 @@ impl Jobs {
             return Some(info);
         }
         job.blocking.clear();
+        job.cancelled_by_caller = persist;
         job.info.status = JobStatus::Cancelled;
         job.info.completed_at = Some(now());
-        job.cancel.cancel();
         let info = job.info.clone();
-        let _ = job.done.send_replace(Some(info.clone()));
-        if persist {
+        // Settling work owns its outbox row: the settlement commit writes or deletes it.
+        if persist && !job.settling {
             self.persist(job);
         }
+        let (done, cancel) = (job.done.clone(), job.cancel.clone());
         drop(jobs);
+        let _ = done.send_replace(Some(info.clone()));
+        cancel.cancel();
         self.consume(id, generation);
         Some(info)
     }
@@ -408,12 +480,13 @@ impl Jobs {
         cancelled
     }
 
-    /// `runningBackground`: recovery records of the backgrounded jobs still running.
+    /// `runningBackground`: recovery records of the backgrounded jobs still running (not settling a report or
+    /// already acknowledged).
     pub fn running_background(&self) -> Vec<JobRecovery> {
         self.jobs
             .lock()
             .values()
-            .filter(|j| j.is_bg && j.info.status == JobStatus::Running)
+            .filter(|j| j.is_bg && j.info.status == JobStatus::Running && !j.settling && !j.consumed)
             .filter_map(|j| j.recovery.clone())
             .collect()
     }
@@ -486,6 +559,9 @@ impl Jobs {
             items.push(ListedJob { id, status, title, started: created as u64, completed, recovery });
         }
         for live in jobs.values() {
+            if live.consumed || live.settling {
+                continue;
+            }
             let Some(recovery) = live.recovery.clone().filter(|_| live.is_bg) else { continue };
             if live.info.notification_id.as_ref().is_some_and(|nid| seen.contains(nid)) {
                 continue;
@@ -502,17 +578,99 @@ impl Jobs {
         items
     }
 
+    /// `completeBackground`: delete the row once its notice is admitted. Still-running work keeps its entry, but must
+    /// not write its row again when it settles.
     pub fn complete_background(&self, notification_id: &str) {
         if let Err(e) = self.db.with(|c| c.execute("DELETE FROM job WHERE notification_id = ?", [notification_id])) {
             tracing::error!(error = %e, notificationID = notification_id, "failed to complete background job");
         }
         let mut jobs = self.jobs.lock();
-        let key = jobs.iter().find(|(_, j)| j.info.notification_id.as_deref() == Some(notification_id)).map(|(k, j)| (k.clone(), j.info.status));
-        if let Some((k, status)) = key {
-            if status != JobStatus::Running {
+        let key = jobs.iter().find(|(_, j)| j.info.notification_id.as_deref() == Some(notification_id)).map(|(k, _)| k.clone());
+        if let Some(k) = key {
+            if jobs[&k].info.status == JobStatus::Running {
+                jobs[&k].consumed = true;
+            } else {
                 jobs.shift_remove(&k);
             }
         }
+    }
+
+    /// `currentGeneration`: the job's generation, and whether it is running and not settling a report.
+    pub fn current_generation(&self, id: &str) -> Option<(u64, bool)> {
+        let jobs = self.jobs.lock();
+        let job = jobs.get(id)?;
+        Some((job.generation, job.info.status == JobStatus::Running && !job.settling))
+    }
+
+    /// `isCancelled`: whether an explicit caller cancellation stopped this job (not teardown).
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        self.jobs.lock().get(id).is_some_and(|j| j.cancelled_by_caller)
+    }
+
+    /// [`Jobs::is_cancelled`] for one generation.
+    pub fn is_cancelled_generation(&self, id: &str, generation: u64) -> bool {
+        self.jobs.lock().get(id).is_some_and(|j| j.generation == generation && j.cancelled_by_caller)
+    }
+
+    /// `prepareSubagentReport`: claim the report of a backgrounded subagent job for the busy period that just settled.
+    /// A generation reports at most once. A running generation starts settling; a cancelled one still belongs to this
+    /// period when the bound generation matches (or none was bound, for a cancel in the creation tick).
+    pub fn prepare_subagent_report(&self, id: &str, bound_generation: Option<u64>) -> SubagentReportState {
+        let mut jobs = self.jobs.lock();
+        let Some(job) = jobs.get_mut(id) else { return SubagentReportState::None };
+        let (Some(notification_id), Some(recovery @ JobRecovery::Subagent { .. })) = (&job.info.notification_id, &job.recovery) else {
+            return SubagentReportState::None;
+        };
+        if !job.is_bg || job.reported {
+            return SubagentReportState::None;
+        }
+        let live = job.info.status == JobStatus::Running && !job.settling;
+        let cancelled = job.info.status == JobStatus::Cancelled && bound_generation.is_none_or(|g| g == job.generation);
+        if !live && !cancelled {
+            return SubagentReportState::None;
+        }
+        let state = SubagentReportState::Background {
+            notification_id: notification_id.clone(),
+            recovery: recovery.clone(),
+            started_at: job.info.started_at,
+        };
+        job.reported = true;
+        if job.info.status == JobStatus::Running {
+            job.settling = true;
+        }
+        state
+    }
+
+    /// `recordSubagentReport`: upsert the formatted report on its notification ID. Runs inside the terminal event's
+    /// commit, so it is pure SQL on that connection and never touches the live registry.
+    pub fn record_subagent_report(c: &rusqlite::Connection, report: &SubagentOutboxReport) -> rusqlite::Result<()> {
+        let JobRecovery::Subagent { parent_session_id, child_session_id, description, .. } = &report.recovery else { return Ok(()) };
+        let now = now() as i64;
+        let recovery = serde_json::to_string(&report.recovery).unwrap_or_default();
+        c.execute(
+            "INSERT INTO job (notification_id, id, session_id, child_session_id, kind, title, status, output, error, recovery, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?2, 'subagent', ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT (notification_id) DO UPDATE SET status = ?5, output = ?6, error = ?7, recovery = ?8, time_updated = ?10",
+            rusqlite::params![
+                report.notification_id,
+                child_session_id,
+                parent_session_id,
+                description,
+                report.status.as_str(),
+                report.output,
+                report.error,
+                recovery,
+                report.started_at.map(|t| t as i64).unwrap_or(now),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `deleteBackgroundRow`: pure SQL, for use inside a commit.
+    pub fn delete_background_row(c: &rusqlite::Connection, notification_id: &str) -> rusqlite::Result<()> {
+        c.execute("DELETE FROM job WHERE notification_id = ?", [notification_id])?;
+        Ok(())
     }
 }
 
@@ -586,8 +744,83 @@ pub fn list_background(jobs: Vec<ListedJob>, filter: &ListFilter, parent: impl F
     items.filter(|item| descends(item.session_id())).collect()
 }
 
-/// `SubagentCompletion.deliver`: admit the `<subagent>` notice in the parent (waking it unless `resume` is false)
-/// and complete the background record.
+const STILL_RUNNING: &str = "\n\nBackground work still running:\n";
+
+fn clean(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `SubagentCompletion.formatBody`: the report body, then the background work still running for the child or its
+/// descendants (`SessionBackground.outstanding` items), each from another session marked with it.
+pub fn format_body(body: &str, child_session_id: &str, background: &[Value]) -> String {
+    if background.is_empty() {
+        return body.to_string();
+    }
+    let field = |item: &Value, key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    let lines: Vec<String> = background
+        .iter()
+        .map(|item| {
+            let session = field(item, "sessionID");
+            let elsewhere = if session != child_session_id { format!(", in {session}") } else { String::new() };
+            match item.get("kind").and_then(Value::as_str) {
+                Some("shell") => format!("- shell ({}{elsewhere}): {}", field(item, "shellID"), clean(&field(item, "command"))),
+                Some("image") => format!("- image ({}{elsewhere}): {}", field(item, "model"), field(item, "path")),
+                _ => format!(
+                    "- subagent ({}, sessionID: {}): {}",
+                    field(item, "agent"),
+                    field(item, "childSessionID"),
+                    clean(&field(item, "description"))
+                ),
+            }
+        })
+        .collect();
+    format!("{body}{STILL_RUNNING}{}", lines.join("\n"))
+}
+
+/// The `<subagent>` notice `SubagentCompletion.deliver` admits in the parent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubagentNotice {
+    pub id: Option<String>,
+    pub session_id: String,
+    pub text: String,
+    pub description: String,
+    pub metadata: serde_json::Map<String, Value>,
+}
+
+/// `SubagentCompletion.deliver`'s notice for a finished period (`None` while running). The model-facing tag says
+/// `running` for a completed report that lists background work still running; the metadata keeps the real status.
+pub fn subagent_notice(
+    status: JobStatus,
+    output: Option<String>,
+    error: Option<String>,
+    notification_id: Option<String>,
+    recovery: &JobRecovery,
+) -> Option<SubagentNotice> {
+    let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } = recovery else { return None };
+    if status == JobStatus::Running {
+        return None;
+    }
+    let body = match status {
+        JobStatus::Completed => output.unwrap_or_else(|| NO_TEXT.into()),
+        JobStatus::Error => error.unwrap_or_else(|| "Subagent failed".into()),
+        _ => output.or(error).unwrap_or_else(|| "Subagent cancelled".into()),
+    };
+    let state = if status == JobStatus::Completed && body.contains(STILL_RUNNING) { "running" } else { status.as_str() };
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("source".into(), "subagent".into());
+    metadata.insert("childID".into(), child_session_id.clone().into());
+    metadata.insert("agent".into(), agent.clone().into());
+    metadata.insert("state".into(), status.as_str().into());
+    Some(SubagentNotice {
+        id: notification_id,
+        session_id: parent_session_id.clone(),
+        text: format!("<subagent sessionID=\"{child_session_id}\" state=\"{state}\" description=\"{description}\">\n{body}\n</subagent>"),
+        description: description.clone(),
+        metadata,
+    })
+}
+
+/// `SubagentCompletion.deliver`: admit the notice in the parent (without waking it) and acknowledge the row.
 pub async fn deliver_subagent(
     app: &crate::app::App,
     status: JobStatus,
@@ -595,42 +828,164 @@ pub async fn deliver_subagent(
     error: Option<String>,
     notification_id: Option<String>,
     recovery: &JobRecovery,
-    resume: bool,
-) {
-    let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } = recovery else { return };
-    if status == JobStatus::Running {
-        return;
-    }
-    let text = match status {
-        JobStatus::Completed => output.unwrap_or_else(|| NO_TEXT.into()),
-        JobStatus::Error => error.unwrap_or_else(|| "Subagent failed".into()),
-        _ => "Subagent cancelled".into(),
-    };
-    let state = status.as_str();
-    let mut meta = serde_json::Map::new();
-    meta.insert("source".into(), "subagent".into());
-    meta.insert("childID".into(), child_session_id.clone().into());
-    meta.insert("agent".into(), agent.clone().into());
-    meta.insert("state".into(), state.into());
-    let admitted = app
-        .sessions
-        .synthetic(
-            parent_session_id,
-            notification_id.clone(),
-            format!("<subagent sessionID=\"{child_session_id}\" state=\"{state}\" description=\"{description}\">\n{text}\n</subagent>"),
-            Some(description.clone()),
-            Some(meta),
-            None,
-        )
-        .await;
-    if admitted.is_ok() && resume {
-        if let Some(c) = app.coordinator.get() {
-            c.wake(parent_session_id, crate::inbox::Scope::Input);
-        }
-    }
+) -> Result<(), crate::session::SessionError> {
+    let Some(notice) = subagent_notice(status, output, error, notification_id.clone(), recovery) else { return Ok(()) };
+    app.sessions.synthetic(&notice.session_id, notice.id, notice.text, Some(notice.description), Some(notice.metadata), None).await?;
     if let Some(n) = &notification_id {
         app.jobs.complete_background(n);
     }
+    Ok(())
+}
+
+/// `SessionBackground.outstanding`: background jobs still running for the session or any of its descendants, as
+/// `{kind, sessionID, ...}` items. `active` adds descendants holding an execution right now (such as a subagent
+/// mid-turn whose job already settled), unless a running background job already lists them or their job was
+/// cancelled.
+pub fn outstanding(app: &crate::app::App, session_id: &str, active: &[String]) -> Vec<Value> {
+    let mut parents: HashMap<String, Option<String>> = HashMap::new();
+    let mut descends = |from: &str| {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(from.to_string());
+        while let Some(id) = current {
+            if id == session_id {
+                return true;
+            }
+            if !seen.insert(id.clone()) {
+                return false;
+            }
+            current = parents
+                .entry(id.clone())
+                .or_insert_with(|| app.db.session_get(&id).ok().flatten().and_then(|s| s.parent_id))
+                .clone();
+        }
+        false
+    };
+    let mut items: Vec<Value> = app
+        .jobs
+        .running_background()
+        .into_iter()
+        .filter(|r| descends(owner_session(r)))
+        .map(|r| match r {
+            JobRecovery::Shell { session_id, shell_id, command } => {
+                json!({ "kind": "shell", "sessionID": session_id, "shellID": shell_id, "command": command })
+            }
+            JobRecovery::Image { session_id, path, model } => {
+                json!({ "kind": "image", "sessionID": session_id, "path": path, "model": model })
+            }
+            JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } => json!({
+                "kind": "subagent",
+                "sessionID": parent_session_id,
+                "childSessionID": child_session_id,
+                "agent": agent,
+                "description": description,
+            }),
+        })
+        .collect();
+    if active.is_empty() {
+        return items;
+    }
+    let children: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|i| i["kind"] == "subagent")
+        .filter_map(|i| i["childSessionID"].as_str().map(str::to_string))
+        .collect();
+    for id in active {
+        if id == session_id || children.contains(id) {
+            continue;
+        }
+        // A cancelled child may still be draining while it cleans up.
+        if app.jobs.get(id).is_some_and(|j| j.status == JobStatus::Cancelled) {
+            continue;
+        }
+        if !descends(id) {
+            continue;
+        }
+        let Some(info) = app.db.session_get(id).ok().flatten() else { continue };
+        let Some(parent) = info.parent_id else { continue };
+        items.push(json!({
+            "kind": "subagent",
+            "sessionID": parent,
+            "childSessionID": id,
+            "agent": info.agent.unwrap_or_else(|| "subagent".into()),
+            "description": info.title.unwrap_or_else(|| "Subagent".into()),
+        }));
+    }
+    items
+}
+
+/// `SubagentJob.start`: a background job named after the child whose run is the child's execution
+/// (`execution.resume`). The busy period's settled hook owns the report. Only an explicit caller cancel interrupts
+/// the child; anything else leaves it resumable.
+pub fn start_subagent(app: &Arc<crate::app::App>, recovery: JobRecovery, notification_id: Option<String>) -> JobInfo {
+    let JobRecovery::Subagent { child_session_id, description, .. } = &recovery else {
+        unreachable!("start_subagent needs a subagent recovery")
+    };
+    let id = child_session_id.clone();
+    let title = description.clone();
+    let generation_of = std::sync::Arc::new(std::sync::OnceLock::<u64>::new());
+    struct Interrupt {
+        app: Arc<crate::app::App>,
+        id: String,
+        generation: std::sync::Arc<std::sync::OnceLock<u64>>,
+        finished: bool,
+    }
+    impl Drop for Interrupt {
+        fn drop(&mut self) {
+            if self.finished {
+                return;
+            }
+            let Some(generation) = self.generation.get() else { return };
+            if !self.app.jobs.is_cancelled_generation(&self.id, *generation) {
+                return;
+            }
+            if let (Some(c), Ok(handle)) = (self.app.coordinator.get().cloned(), tokio::runtime::Handle::try_current()) {
+                let id = self.id.clone();
+                handle.spawn(async move {
+                    c.interrupt(&id, Some(crate::coordinator::Reason::User), false).await;
+                });
+            }
+        }
+    }
+    let guard = Interrupt { app: app.clone(), id: id.clone(), generation: generation_of.clone(), finished: false };
+    let run_app = app.clone();
+    let child = id.clone();
+    let run = Box::pin(async move {
+        let mut guard = guard;
+        let Some(c) = run_app.coordinator.get().cloned() else {
+            guard.finished = true;
+            return Ok(String::new());
+        };
+        let exit = c.run(&child).await;
+        match exit {
+            crate::coordinator::Exit::Success => {
+                guard.finished = true;
+                Ok(String::new())
+            }
+            crate::coordinator::Exit::Failure(e) => {
+                guard.finished = true;
+                Err(e.to_string())
+            }
+            // The settled hook already cancelled this job, or the server is stopping: either way nothing settles here.
+            crate::coordinator::Exit::Interrupted => {
+                guard.finished = true;
+                futures::future::pending().await
+            }
+        }
+    });
+    let info = app.jobs.start_input(StartInput {
+        id: id.clone(),
+        kind: "subagent".into(),
+        title: Some(title),
+        metadata_session: None,
+        recovery: Some(recovery),
+        notification_id,
+        background: true,
+        run,
+    });
+    if let Some((generation, _)) = app.jobs.current_generation(&id) {
+        let _ = generation_of.set(generation);
+    }
+    info
 }
 
 pub fn parse_status(s: &str) -> JobStatus {
@@ -655,4 +1010,87 @@ pub fn subagent_text(message: Option<&oc_schema::Message>) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     if t.is_empty() { NO_TEXT.into() } else { t }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn recovery() -> JobRecovery {
+        JobRecovery::Subagent {
+            parent_session_id: "ses_deliver_parent".into(),
+            child_session_id: "ses_deliver_child".into(),
+            agent: "explore".into(),
+            description: "Deliver report".into(),
+        }
+    }
+
+    /// subagent-completion.test.ts "leaves the report body unchanged when no background work runs" and "formats
+    /// shell, image, and subagent items with descendant session context" (2.3.0).
+    #[test]
+    fn format_body_lists_running_work() {
+        assert_eq!(format_body("Report body", "ses_child", &[]), "Report body");
+        let items = [
+            json!({"kind": "shell", "sessionID": "ses_child", "shellID": "shell_1", "command": "bun test\n  --watch"}),
+            json!({"kind": "shell", "sessionID": "ses_grandchild", "shellID": "shell_2", "command": "  echo   hi  "}),
+            json!({"kind": "image", "sessionID": "ses_child", "path": "/tmp/chart.png", "model": "openai/gpt-image-1"}),
+            json!({"kind": "image", "sessionID": "ses_other", "path": "/tmp/other.png", "model": "acme/image"}),
+            json!({"kind": "subagent", "sessionID": "ses_child", "childSessionID": "ses_grandchild", "agent": "explore", "description": "Audit\n routes"}),
+        ];
+        assert_eq!(
+            format_body("Report body", "ses_child", &items),
+            [
+                "Report body",
+                "",
+                "Background work still running:",
+                "- shell (shell_1): bun test --watch",
+                "- shell (shell_2, in ses_grandchild): echo hi",
+                "- image (openai/gpt-image-1): /tmp/chart.png",
+                "- image (acme/image, in ses_other): /tmp/other.png",
+                "- subagent (explore, sessionID: ses_grandchild): Audit routes",
+            ]
+            .join("\n")
+        );
+    }
+
+    /// "labels a completed report with pending background work as running, only in the model text" and "preserves a
+    /// pre-formatted cancelled body so restart replay keeps running-work context".
+    #[test]
+    fn notice_state_and_body() {
+        let r = recovery();
+        let text = |status, output: Option<&str>, error: Option<&str>| {
+            subagent_notice(status, output.map(str::to_string), error.map(str::to_string), None, &r).map(|n| n.text)
+        };
+        let running = subagent_notice(
+            JobStatus::Completed,
+            Some("All green\n\nBackground work still running:\n- shell (shell_1): bun test".into()),
+            None,
+            Some("msg_n".into()),
+            &r,
+        )
+        .unwrap();
+        assert_eq!(
+            running.text,
+            "<subagent sessionID=\"ses_deliver_child\" state=\"running\" description=\"Deliver report\">\nAll green\n\nBackground work still running:\n- shell (shell_1): bun test\n</subagent>"
+        );
+        assert_eq!(running.metadata["state"], "completed");
+        assert_eq!((running.id.as_deref(), running.session_id.as_str()), (Some("msg_n"), "ses_deliver_parent"));
+        assert_eq!(text(JobStatus::Error, None, Some("boom")).unwrap(), "<subagent sessionID=\"ses_deliver_child\" state=\"error\" description=\"Deliver report\">\nboom\n</subagent>");
+        assert_eq!(
+            text(JobStatus::Cancelled, None, None).unwrap(),
+            "<subagent sessionID=\"ses_deliver_child\" state=\"cancelled\" description=\"Deliver report\">\nSubagent cancelled\n</subagent>"
+        );
+        // A running job has nothing to report.
+        assert!(text(JobStatus::Running, None, None).is_none());
+        assert_eq!(text(JobStatus::Completed, Some("All done"), None).unwrap(), "<subagent sessionID=\"ses_deliver_child\" state=\"completed\" description=\"Deliver report\">\nAll done\n</subagent>");
+        let output = "Subagent cancelled\n\nBackground work still running:\n- shell (shell_1): bun test";
+        assert_eq!(
+            text(JobStatus::Cancelled, Some(output), None).unwrap(),
+            format!("<subagent sessionID=\"ses_deliver_child\" state=\"cancelled\" description=\"Deliver report\">\n{output}\n</subagent>")
+        );
+        assert_eq!(
+            text(JobStatus::Cancelled, None, Some("Cancel failed")).unwrap(),
+            "<subagent sessionID=\"ses_deliver_child\" state=\"cancelled\" description=\"Deliver report\">\nCancel failed\n</subagent>"
+        );
+    }
 }

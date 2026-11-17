@@ -136,7 +136,7 @@ impl Engine {
 
     /// Install this engine as the app's execution driver.
     pub fn install(self: &Arc<Self>) {
-        let driver: Arc<dyn Driver> = Arc::new(ExecutionDriver { engine: self.clone() });
+        let driver: Arc<dyn Driver> = Arc::new(ExecutionDriver { engine: self.clone(), report: Default::default() });
         if self.app.coordinator.set(crate::coordinator::Coordinator::new(driver)).is_ok() {
             crate::plan::spawn(self.app.clone());
             self.goal_spawn();
@@ -1759,17 +1759,32 @@ impl oc_tools::registry::ExecuteHooks for PlanHooks {
 
 struct ExecutionDriver {
     engine: Arc<Engine>,
+    report: crate::subagent_report::SubagentReport,
 }
 
 #[async_trait]
 impl Driver for ExecutionDriver {
     async fn started(&self, key: &str) {
+        let jobs = &self.engine.app.jobs;
+        // Bind before the started commit so a cancel arriving in that window still matches this generation.
+        let before = jobs.current_generation(key);
         let r = self.engine.app.bus.commit_with(
             vec![SessionEvent::ExecutionStarted { session_id: key.into() }.into()],
             |c, _, _| Ok(crate::session::Sessions::claim(c, key)?),
         );
-        if let Err(e) = r {
-            tracing::error!(sessionID = key, error = %e, "Failed to publish Session execution lifecycle");
+        match r {
+            Ok(events) => {
+                let seq = events.first().and_then(|e| e.durable.as_ref()).map(|d| d.seq).unwrap_or(0);
+                let bound = if before.is_some_and(|b| b.1) { before } else { jobs.current_generation(key) };
+                self.report.started(
+                    key,
+                    crate::subagent_report::Period {
+                        started_seq: seq,
+                        bound_generation: bound.filter(|b| b.1).map(|b| b.0),
+                    },
+                );
+            }
+            Err(e) => tracing::error!(sessionID = key, error = %e, "Failed to publish Session execution lifecycle"),
         }
     }
 
@@ -1781,11 +1796,14 @@ impl Driver for ExecutionDriver {
         r
     }
 
+    /// One terminal observation per busy period: the terminal event, the claim release and the subagent report
+    /// commit together; the report is delivered after the commit.
     async fn settled(&self, key: &str, exit: &Exit, reason: Option<Reason>) {
-        let release = |c: &rusqlite::Connection, _: usize, _: i64| -> anyhow::Result<()> { Ok(crate::session::Sessions::release(c, key)?) };
-        let bus = &self.engine.app.bus;
-        let r = match exit {
-            Exit::Success => bus.commit_with(vec![SessionEvent::ExecutionSucceeded { session_id: key.into() }.into()], release),
+        use crate::subagent_report::Outcome;
+        let app = &self.engine.app;
+        let bus = &app.bus;
+        let (event, outcome) = match exit {
+            Exit::Success => (SessionEvent::ExecutionSucceeded { session_id: key.into() }, Outcome::Succeeded),
             Exit::Interrupted => {
                 let reason = match reason.unwrap_or(Reason::Shutdown) {
                     Reason::User => InterruptReason::User,
@@ -1794,20 +1812,37 @@ impl Driver for ExecutionDriver {
                 };
                 // Not an error, but the one trace of who stopped a run: the reason is not stored with the session.
                 tracing::info!(sessionID = key, reason = ?reason, "Session execution interrupted");
-                // `jobs.cancel(sessionID)`: the job named after the session, i.e. a subagent run of this child.
-                if reason != InterruptReason::Shutdown {
-                    self.engine.app.jobs.cancel(key);
+                if reason == InterruptReason::Shutdown {
+                    self.report.clear(key);
+                    // Shutdown keeps the claim and the running job row for restart continuity.
+                    let ev = vec![SessionEvent::ExecutionInterrupted { session_id: key.into(), reason }.into()];
+                    if let Err(e) = bus.commit(ev) {
+                        tracing::error!(sessionID = key, error = %e, "Failed to publish Session execution lifecycle");
+                    }
+                    return;
                 }
-                let ev = vec![SessionEvent::ExecutionInterrupted { session_id: key.into(), reason }.into()];
-                if reason == InterruptReason::Shutdown { bus.commit(ev) } else { bus.commit_with(ev, release) }
+                (SessionEvent::ExecutionInterrupted { session_id: key.into(), reason }, Outcome::Interrupted)
             }
             Exit::Failure(e) => {
                 let error = crate::errors::unknown(e);
-                bus.commit_with(vec![SessionEvent::ExecutionFailed { session_id: key.into(), error }.into()], release)
+                let message = error.message.clone();
+                (SessionEvent::ExecutionFailed { session_id: key.into(), error }, Outcome::Failed(message))
             }
         };
-        if let Err(e) = r {
+        let interrupted = outcome == Outcome::Interrupted;
+        // Claim the job generation before cancelling it so the settlement commit owns its outbox row.
+        let settlement = self.report.prepare(app, key, outcome);
+        if interrupted {
+            // `jobs.cancel(sessionID)`: the job named after the session, i.e. a subagent run of this child.
+            app.jobs.cancel(key);
+        }
+        if let Err(e) = bus.commit_with(vec![event.into()], |c, _, _| settlement.commit(c)) {
             tracing::error!(sessionID = key, error = %e, "Failed to publish Session execution lifecycle");
+            return;
+        }
+        // Best effort: a retained outbox row is recovered on the next restart.
+        if let Err(e) = settlement.deliver(app).await {
+            tracing::error!(sessionID = key, error = %e, "Subagent report delivery failed");
         }
     }
 }

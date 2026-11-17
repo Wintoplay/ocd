@@ -7,8 +7,10 @@
 //! sessions), permission requests, form elicitation, usage updates, history replay, additional
 //! directories, MCP registration and the JSON-RPC error mapping.
 //! File diffs on permission requests and completed edit/patch calls (`acp/permission.ts`).
-//! Child sessions still running when the root turn ends (or is cancelled) are followed in the background until they
-//! finish: their child updates and asks keep reaching the client (`turn.ts` `handoff`/`followChildren`).
+//! Child sessions still running when the root turn ends (or is cancelled) are followed in the background after the
+//! prompt's response: their child updates and asks keep reaching the client, and so do the root's own turns that
+//! their `<subagent>` reports start, until a root turn ends with no child open (`turn.ts` `handoff`/`followChildren`,
+//! 2.3.0). The next prompt takes over the follower's children.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
@@ -840,6 +842,17 @@ struct Agent {
     /// Sessions `session/new` created that were not prompted yet: clients often open a session and close it
     /// without prompting, and closing removes those instead of keeping an empty session.
     unprompted: Mutex<HashSet<String>>,
+    /// Per attached session (`backgrounds`, keyed by the attachment's scope): the children the last turn left, and
+    /// the follower still streaming them, which the next prompt takes over.
+    backgrounds: Mutex<HashMap<String, Background>>,
+    /// Set once a prompt request's response was written (`ACPConnection.Responded`), by request ID.
+    responded: Mutex<HashMap<String, watch::Sender<bool>>>,
+}
+
+struct Background {
+    scope: Arc<watch::Sender<bool>>,
+    state: Arc<Mutex<TurnState>>,
+    follower: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)>,
 }
 
 impl Agent {
@@ -1242,7 +1255,9 @@ impl Agent {
                 let id = s(&params, "sessionId").to_string();
                 self.unprompted.lock().remove(&id);
                 self.prompt_requests.lock().insert(request_id.to_string(), id.clone());
-                let r = self.clone().prompt(&id, params.get("prompt").and_then(Value::as_array).cloned().unwrap_or_default()).await;
+                let (responded_tx, responded) = watch::channel(false);
+                self.responded.lock().insert(request_id.to_string(), responded_tx);
+                let r = self.clone().prompt(&id, params.get("prompt").and_then(Value::as_array).cloned().unwrap_or_default(), responded).await;
                 self.prompt_requests.lock().remove(&request_id.to_string());
                 r
             }
@@ -1458,6 +1473,8 @@ struct Child {
     parent: String,
     depth: i64,
     title: Option<String>,
+    /// The prompt (start ID) whose turn created the child, inherited by its descendants.
+    turn_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1503,8 +1520,15 @@ fn tokens(t: &Value) -> [i64; 5] {
 struct Ctx {
     session: String,
     cwd: String,
-    start: String,
+    /// The prompt's start ID; none for a background follower, which streams every root turn.
+    start: Option<String>,
     caps: Caps,
+}
+
+/// `projectChild`: without the child capability, only children of this prompt's turn are projected as session
+/// updates.
+fn project_child(ctx: &Ctx, child: &Child) -> bool {
+    !ctx.caps.child_updates && ctx.start.is_some() && child.turn_id == ctx.start
 }
 
 fn child_meta(c: &Child) -> Value {
@@ -1552,7 +1576,7 @@ fn route(ctx: &Ctx, child: Option<&Child>, update: Value) -> Vec<Out> {
     if ctx.caps.child_updates {
         return vec![Out::Child(child_update(ctx, c, json!({"type": "update", "update": Value::Object(p)})))];
     }
-    vec![Out::Update(Value::Object(p))]
+    if project_child(ctx, c) { vec![Out::Update(Value::Object(p))] } else { vec![] }
 }
 
 fn child_status(ctx: &Ctx, c: &Child, status: &str, error: Option<&Value>) -> Vec<Out> {
@@ -1594,21 +1618,6 @@ fn event_session(event: &Value) -> Option<String> {
     None
 }
 
-/// `fromTrackedChild`: the event belongs to a child session of the turn (a new session counts by its parent).
-fn from_tracked_child(st: &TurnState, event: &Value) -> bool {
-    let sid = if s(event, "type") == "session.created" { event.pointer("/data/parentID").and_then(Value::as_str).map(String::from) } else { event_session(event) };
-    sid.is_some_and(|sid| st.children.contains_key(&sid))
-}
-
-/// One event for a background follower (`advance` with `background`): only a tracked child's events are folded, and
-/// the root session's own updates are not sent (the client sees the root's later work when it loads the session).
-fn follow(st: &mut TurnState, event: &Value, ctx: &Ctx) -> Vec<Out> {
-    if !from_tracked_child(st, event) {
-        return vec![];
-    }
-    fold(st, event, ctx).0.into_iter().filter(|o| !matches!(o, Out::Update(_))).collect()
-}
-
 /// `fold(state, event)` → outputs and an optional terminal.
 fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'static str>) {
     let ty = s(event, "type");
@@ -1622,8 +1631,12 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
         let c = Child {
             id: s(&data, "sessionID").into(),
             parent: parent.into(),
-            depth: parent_child.map(|p| p.depth + 1).unwrap_or(1),
+            depth: parent_child.as_ref().map(|p| p.depth + 1).unwrap_or(1),
             title: data.get("title").and_then(Value::as_str).map(String::from),
+            turn_id: match &parent_child {
+                Some(p) => p.turn_id.clone(),
+                None => ctx.start.clone(),
+            },
         };
         st.children.insert(c.id.clone(), c.clone());
         st.open_children.insert(c.id.clone());
@@ -1631,15 +1644,17 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
     }
     let sid = event_session(event);
     let child = sid.as_ref().and_then(|s| st.children.get(s)).cloned();
-    if ty == "permission.asked" && (sid.as_deref() == Some(ctx.session.as_str()) || child.is_some()) {
+    // Only a child that has not ended routes its asks.
+    let open_child = child.clone().filter(|c| st.open_children.contains(&c.id));
+    if ty == "permission.asked" && (sid.as_deref() == Some(ctx.session.as_str()) || open_child.is_some()) {
         st.asks.insert(s(&data, "id").into());
         let tool = data.pointer("/source/id").and_then(Value::as_str).and_then(|t| st.tools.get(&format!("{}:{t}", s(&data, "sessionID")))).cloned();
-        return (vec![Out::Permission { event: event.clone(), tool, child }], None);
+        return (vec![Out::Permission { event: event.clone(), tool, child: open_child }], None);
     }
-    if ty == "form.created" && (sid.as_deref() == Some(ctx.session.as_str()) || child.is_some()) {
+    if ty == "form.created" && (sid.as_deref() == Some(ctx.session.as_str()) || open_child.is_some()) {
         let form = data.get("form").cloned().unwrap_or(Value::Null);
         st.asks.insert(s(&form, "id").into());
-        return (vec![Out::Form { form, child }], None);
+        return (vec![Out::Form { form, child: open_child }], None);
     }
     let settled = match ty {
         "permission.replied" => data.get("requestID").and_then(Value::as_str),
@@ -1655,16 +1670,20 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
     if sid != ctx.session && child.is_none() {
         return (vec![], None);
     }
-    if ty == "session.inbox.delivered" && s(&data, "inboxID") == ctx.start {
+    // A follower (no start ID) starts streaming at any root delivery, such as a subagent report starting a turn.
+    if sid == ctx.session && ty == "session.inbox.delivered" && ctx.start.as_deref().is_none_or(|start| s(&data, "inboxID") == start) {
         st.started = true;
         return (vec![], None);
     }
-    if !st.started {
+    if child.is_none() && !st.started {
         return (vec![], None);
     }
     if let Some(c) = &child {
         return match ty {
-            "session.execution.started" => (child_status(ctx, c, "running", None), None),
+            "session.execution.started" => {
+                st.open_children.insert(c.id.clone());
+                (child_status(ctx, c, "running", None), None)
+            }
             "session.execution.succeeded" => {
                 st.open_children.remove(&c.id);
                 (child_status(ctx, c, "completed", None), None)
@@ -1697,9 +1716,17 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
             st.step_error = data.get("error").cloned();
             (vec![], None)
         }
-        "session.execution.succeeded" => (vec![], Some("succeeded")),
-        "session.execution.interrupted" => (vec![], Some("interrupted")),
+        // A follower waits for the next root delivery again.
+        "session.execution.succeeded" => {
+            st.started = ctx.start.is_some();
+            (vec![], Some("succeeded"))
+        }
+        "session.execution.interrupted" => {
+            st.started = ctx.start.is_some();
+            (vec![], Some("interrupted"))
+        }
         "session.execution.failed" => {
+            st.started = ctx.start.is_some();
             st.execution_error = data.get("error").cloned();
             (vec![], Some("failed"))
         }
@@ -1842,7 +1869,7 @@ struct AskShared {
 }
 
 impl Agent {
-    async fn prompt(self: Arc<Self>, id: &str, blocks: Vec<Value>) -> R<Value> {
+    async fn prompt(self: Arc<Self>, id: &str, blocks: Vec<Value>, responded: watch::Receiver<bool>) -> R<Value> {
         let (cwd, sel) = self.selection(id)?;
         let scope = self.sessions.lock().get(id).map(|a| a.scope.clone()).ok_or_else(|| AcpError::session_not_found(id))?;
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -1854,13 +1881,23 @@ impl Agent {
             }
             turns.insert(id.to_string(), Arc::new(TurnCtl { cancel: cancel_tx, done: done_rx }));
         }
-        let result = self.clone().run_turn(id, &cwd, &sel, &scope, blocks, cancel_rx).await;
+        let result = self.clone().run_turn(id, &cwd, &sel, &scope, blocks, cancel_rx, responded).await;
         self.turns.lock().remove(id);
         let _ = done_tx.send(true);
         result
     }
 
-    async fn run_turn(self: Arc<Self>, id: &str, cwd: &str, sel: &Selection, scope: &Arc<watch::Sender<bool>>, blocks: Vec<Value>, mut cancelled: watch::Receiver<bool>) -> R<Value> {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn(
+        self: Arc<Self>,
+        id: &str,
+        cwd: &str,
+        sel: &Selection,
+        scope: &Arc<watch::Sender<bool>>,
+        blocks: Vec<Value>,
+        mut cancelled: watch::Receiver<bool>,
+        responded: watch::Receiver<bool>,
+    ) -> R<Value> {
         let catalog = self.catalog(cwd).await?;
         let prepared = prepare(&catalog, &blocks)?;
         let caps = *self.caps.lock();
@@ -1880,11 +1917,13 @@ impl Agent {
         if *cancelled.borrow() {
             return cancelled_result();
         }
-        let ctx = Ctx { session: id.to_string(), cwd: cwd.to_string(), start: prepared.start_id.clone(), caps };
+        let ctx = Ctx { session: id.to_string(), cwd: cwd.to_string(), start: Some(prepared.start_id.clone()), caps };
+        // `open`: a follower left by the previous turn stops, and this turn inherits its children.
+        let mut st = self.take_background(id, scope).await;
         // ask worker
         let shared = Arc::new(AskShared { settled: Mutex::new(HashSet::new()), notify: tokio::sync::Notify::new() });
         let (ask_tx, ask_rx) = mpsc::unbounded_channel::<Ask>();
-        let worker = tokio::spawn(self.clone().ask_worker(id.to_string(), cwd.to_string(), ask_rx, shared.clone(), cancelled.clone(), caps, false));
+        let worker = tokio::spawn(self.clone().ask_worker(id.to_string(), cwd.to_string(), ask_rx, shared.clone(), cancelled.clone(), ctx.clone(), false));
         // submit
         let c = &self.client;
         if !prepared.synthetic.is_empty() {
@@ -1907,8 +1946,7 @@ impl Agent {
                 .await
                 .map_err(classify)?;
         }
-        let mut st = TurnState::default();
-        let emit = |outs: Vec<Out>, st_asks: &AskShared| self.emit(&ctx, outs, &ask_tx, st_asks, false);
+        let emit = |outs: Vec<Out>, st_asks: &AskShared| self.emit(&ctx, outs, &ask_tx, st_asks);
         let mut interrupted = false;
         let terminal: &str = loop {
             tokio::select! {
@@ -1947,11 +1985,9 @@ impl Agent {
         let _ = ask_tx.send(Ask::Barrier(btx));
         let _ = brx.await;
         drop(ask_tx);
-        // `handoff`: children outlive the turn (and a cancelled one), so their updates and asks still reach the
-        // client until they end.
-        if !st.open_children.is_empty() {
-            self.hand_off(id, scope, stream, st.clone(), ctx.clone());
-        }
+        // `handoff`: children outlive the turn (and a cancelled one), so their updates, asks and the turns their
+        // reports start still reach the client.
+        self.hand_off(id, scope, stream, st.clone(), ctx.clone(), responded);
         let terminal = if interrupted { "interrupted" } else { terminal };
         if terminal != "interrupted"
             && let Some(error) = st.step_error.clone().or(st.execution_error.clone())
@@ -2013,15 +2049,11 @@ impl Agent {
         Ok(response)
     }
 
-    /// `interpret`: sends a fold's outputs. A background follower sends no session updates of its own.
-    fn emit(&self, ctx: &Ctx, outs: Vec<Out>, ask_tx: &mpsc::UnboundedSender<Ask>, shared: &AskShared, background: bool) {
+    /// `interpret`: sends a fold's outputs.
+    fn emit(&self, ctx: &Ctx, outs: Vec<Out>, ask_tx: &mpsc::UnboundedSender<Ask>, shared: &AskShared) {
         for o in outs {
             match o {
-                Out::Update(u) => {
-                    if !background {
-                        self.conn.update(&ctx.session, u)
-                    }
-                }
+                Out::Update(u) => self.conn.update(&ctx.session, u),
                 Out::Child(u) => self.conn.notify(CHILD_UPDATE_METHOD, u),
                 Out::Permission { event, tool, child } => {
                     let _ = ask_tx.send(Ask::Permission { event, tool, child });
@@ -2043,41 +2075,100 @@ impl Agent {
         }
     }
 
-    /// `handoff`: forks the follower into the session's scope, unless the session was detached or attached again.
-    fn hand_off(self: &Arc<Self>, id: &str, scope: &Arc<watch::Sender<bool>>, stream: EventStream, st: TurnState, ctx: Ctx) {
+    /// `open`: take over what the previous turn of this attachment left: stop its follower and inherit its
+    /// children and open children.
+    async fn take_background(&self, id: &str, scope: &Arc<watch::Sender<bool>>) -> TurnState {
+        let previous = {
+            let mut backgrounds = self.backgrounds.lock();
+            match backgrounds.get(id) {
+                Some(b) if Arc::ptr_eq(&b.scope, scope) => backgrounds.remove(id),
+                Some(_) => {
+                    backgrounds.remove(id);
+                    None
+                }
+                None => None,
+            }
+        };
+        let Some(previous) = previous else { return TurnState::default() };
+        if let Some((stop, handle)) = previous.follower {
+            let _ = stop.send(true);
+            let _ = handle.await;
+        }
+        let inherited = previous.state.lock();
+        TurnState { children: inherited.children.clone(), open_children: inherited.open_children.clone(), ..Default::default() }
+    }
+
+    /// `handoff`: with children still open, forks the follower into the session's scope once the prompt's response
+    /// was sent; otherwise keeps the turn's children for the next prompt. Nothing is kept for a session that was
+    /// detached or attached again.
+    fn hand_off(self: &Arc<Self>, id: &str, scope: &Arc<watch::Sender<bool>>, stream: EventStream, st: TurnState, ctx: Ctx, responded: watch::Receiver<bool>) {
         let current = self.sessions.lock().get(id).is_some_and(|a| Arc::ptr_eq(&a.scope, scope));
         if !current || *scope.borrow() {
             return;
         }
-        tokio::spawn(self.clone().follow_children(stream, st, ctx, scope.subscribe()));
+        if st.open_children.is_empty() {
+            if !st.children.is_empty() {
+                self.backgrounds.lock().insert(id.into(), Background { scope: scope.clone(), state: Arc::new(Mutex::new(st)), follower: None });
+            }
+            return;
+        }
+        let state = Arc::new(Mutex::new(TurnState { started: false, ..st }));
+        let (stop_tx, stop) = watch::channel(false);
+        let ctx = Ctx { start: None, ..ctx };
+        let handle = tokio::spawn(self.clone().follow_children(stream, state.clone(), ctx, scope.subscribe(), stop, responded));
+        self.backgrounds.lock().insert(id.into(), Background { scope: scope.clone(), state, follower: Some((stop_tx, handle)) });
     }
 
-    /// `followChildren`: folds only the events of the turn's child sessions until none is open, then waits for
-    /// their asks. Stops early when the session's scope closes (close, delete, attached again) or the feed ends.
-    async fn follow_children(self: Arc<Self>, mut stream: EventStream, mut st: TurnState, ctx: Ctx, mut scope: watch::Receiver<bool>) {
+    /// `followChildren`: after the prompt's response, folds the feed (children, and root turns their reports start)
+    /// until a root turn ends with no child open, then waits for the asks. Stops early when the session's scope
+    /// closes (close, delete, attached again), the next prompt takes over, or the feed ends.
+    async fn follow_children(
+        self: Arc<Self>,
+        mut stream: EventStream,
+        state: Arc<Mutex<TurnState>>,
+        ctx: Ctx,
+        mut scope: watch::Receiver<bool>,
+        mut stop: watch::Receiver<bool>,
+        mut responded: watch::Receiver<bool>,
+    ) {
+        tokio::select! {
+            _ = responded.wait_for(|r| *r) => {}
+            _ = scope.wait_for(|closed| *closed) => return,
+            _ = stop.wait_for(|s| *s) => return,
+        }
         let shared = Arc::new(AskShared { settled: Mutex::new(HashSet::new()), notify: tokio::sync::Notify::new() });
         let (ask_tx, ask_rx) = mpsc::unbounded_channel::<Ask>();
-        let worker = tokio::spawn(self.clone().ask_worker(ctx.session.clone(), ctx.cwd.clone(), ask_rx, shared.clone(), scope.clone(), ctx.caps, true));
+        let mut closed = scope.clone();
+        let (cancel_tx, cancel) = watch::channel(false);
+        let worker = tokio::spawn(self.clone().ask_worker(ctx.session.clone(), ctx.cwd.clone(), ask_rx, shared.clone(), cancel, ctx.clone(), true));
         loop {
             let event = tokio::select! {
                 next = stream.next() => match next {
                     Some(Ok(event)) => event,
                     _ => break,
                 },
-                _ = scope.wait_for(|closed| *closed) => break,
+                _ = closed.wait_for(|closed| *closed) => break,
+                _ = stop.wait_for(|s| *s) => break,
             };
-            let outs = follow(&mut st, &event, &ctx);
-            self.emit(&ctx, outs, &ask_tx, &shared, true);
-            if st.open_children.is_empty() {
+            let (outs, terminal, open) = {
+                let mut st = state.lock();
+                let (outs, terminal) = fold(&mut st, &event, &ctx);
+                (outs, terminal, st.open_children.len())
+            };
+            self.emit(&ctx, outs, &ask_tx, &shared);
+            if terminal.is_some() && open == 0 {
                 let (btx, brx) = oneshot::channel();
                 let _ = ask_tx.send(Ask::Barrier(btx));
                 tokio::select! {
                     _ = brx => {}
-                    _ = scope.wait_for(|closed| *closed) => {}
+                    _ = closed.wait_for(|closed| *closed) => {}
+                    _ = stop.wait_for(|s| *s) => {}
                 }
                 break;
             }
         }
+        // Interrupted followers answer the ask in progress with its fallback and drop the rest.
+        let _ = cancel_tx.send(*scope.borrow() || *stop.borrow());
         drop(ask_tx);
         let _ = worker.await;
     }
@@ -2085,7 +2176,7 @@ impl Agent {
     /// Answers queued asks one at a time. `cancelled` is the turn's cancellation, or for a background follower the
     /// session's scope: closing it answers the ask in progress with its fallback and drops the rest.
     #[allow(clippy::too_many_arguments)]
-    async fn ask_worker(self: Arc<Self>, root: String, cwd: String, mut rx: mpsc::UnboundedReceiver<Ask>, shared: Arc<AskShared>, cancelled: watch::Receiver<bool>, caps: Caps, background: bool) {
+    async fn ask_worker(self: Arc<Self>, root: String, cwd: String, mut rx: mpsc::UnboundedReceiver<Ask>, shared: Arc<AskShared>, cancelled: watch::Receiver<bool>, ctx: Ctx, background: bool) {
         while let Some(ask) = rx.recv().await {
             if background && *cancelled.borrow() {
                 break;
@@ -2102,7 +2193,7 @@ impl Agent {
                     (s(&data, "id").to_string(), "reject", "session/request_permission", permission_params(&root, &cwd, &data, tool.as_ref(), child.as_ref()))
                 }
                 Ask::Form { form, child, schema } => {
-                    let tool_sent = !background && (child.is_none() || !caps.child_updates);
+                    let tool_sent = child.as_ref().is_none_or(|c| project_child(&ctx, c));
                     let mut p = json!({"mode": "form", "sessionId": root});
                     if tool_sent && let Some(t) = form.pointer("/metadata/tool/id").and_then(Value::as_str) {
                         p["toolCallId"] = json!(match child { Some(c) => format!("{}:{t}", c.id), None => t.to_string() });
@@ -2499,6 +2590,8 @@ pub async fn run(global: &Global, input: &Input) -> anyhow::Result<i32> {
         turns: Mutex::new(HashMap::new()),
         prompt_requests: Mutex::new(HashMap::new()),
         unprompted: Mutex::new(HashSet::new()),
+        backgrounds: Mutex::new(HashMap::new()),
+        responded: Mutex::new(HashMap::new()),
     });
     tokio::spawn(watch_events(agent.clone()));
 
@@ -2569,6 +2662,9 @@ pub async fn run(global: &Global, input: &Input) -> anyhow::Result<i32> {
                         let result = agent.handle(&method, params, &id).await;
                         let ok = result.is_ok();
                         agent.conn.respond(&id, result);
+                        if let Some(responded) = agent.responded.lock().remove(&id.to_string()) {
+                            let _ = responded.send(true);
+                        }
                         let after = AFTER.lock().remove(&id.to_string());
                         if ok && let Some((sid, catalog)) = after {
                             agent.after_attach(&sid, &catalog);
@@ -2780,7 +2876,7 @@ mod tests {
 
     #[test]
     fn fold_text_and_terminal() {
-        let ctx = Ctx { session: "ses_1".into(), cwd: "/w".into(), start: "msg_1".into(), caps: Caps::default() };
+        let ctx = Ctx { session: "ses_1".into(), cwd: "/w".into(), start: Some("msg_1".into()), caps: Caps::default() };
         let mut st = TurnState::default();
         let ev = |ty: &str, data: Value| json!({"id": "evt_1", "type": ty, "data": data});
         assert!(fold(&mut st, &ev("session.text.delta", json!({"sessionID": "ses_1", "assistantMessageID": "msg_2", "delta": "x"})), &ctx).0.is_empty());
@@ -2793,10 +2889,11 @@ mod tests {
         assert_eq!(t, Some("succeeded"));
     }
 
-    /// turn.test.ts "shows nested and background child work and routes its permissions": the turn folds the nested
-    /// child's work; once it ends with `ses_background` still open, the follower takes over the same feed. It sends
-    /// only that child's updates (none without the child capability) and asks, ignores the root, and stops when no
-    /// child is open, so a later ask is not routed.
+    /// turn.test.ts "shows nested and background child work and routes its permissions" (2.3.0): the turn folds the
+    /// nested child's work; once it ends with `ses_background` still open, the follower takes over the same feed after
+    /// the response. It sends that child's updates (none without the child capability) and asks; an ask after the
+    /// child ended is not routed. The root's own turn, started by the child's report, is streamed, and its end with no
+    /// child open stops the follower.
     #[test]
     fn background_follower_after_turn() {
         let ev = |ty: &str, data: Value| json!({"id": "", "type": ty, "data": data});
@@ -2823,7 +2920,7 @@ mod tests {
                 .collect()
         };
         for child_updates in [false, true] {
-            let ctx = Ctx { session: "ses_root".into(), cwd: "/workspace".into(), start: "msg_in".into(), caps: Caps { child_updates, ..Default::default() } };
+            let ctx = Ctx { session: "ses_root".into(), cwd: "/workspace".into(), start: Some("msg_in".into()), caps: Caps { child_updates, ..Default::default() } };
             let mut st = TurnState::default();
             let turn = [
                 ev("session.inbox.delivered", json!({"sessionID": "ses_root", "inboxID": "msg_in"})),
@@ -2871,9 +2968,12 @@ mod tests {
             };
             assert_eq!(during, expected, "child capability: {child_updates}");
 
-            // The handoff: the follower works on a copy of the state, on the events after the terminal.
-            let mut st = st.clone();
+            // The handoff: the follower works on a copy of the state, without a start ID, on the events after the
+            // terminal.
+            let mut st = TurnState { started: false, ..st.clone() };
+            let follower = Ctx { start: None, ..ctx.clone() };
             let mut after = vec![];
+            let mut stopped = false;
             let later = [
                 started("ses_background"),
                 ev("session.text.delta", json!({"sessionID": "ses_root", "assistantMessageID": "msg_root", "ordinal": 0, "delta": "root"})),
@@ -2882,13 +2982,17 @@ mod tests {
                 ev("session.text.delta", json!({"sessionID": "ses_background", "assistantMessageID": "msg_background", "ordinal": 0, "delta": "late"})),
                 succeeded("ses_background"),
                 asked("ses_background", "perm_after_end", json!({})),
+                ev("session.inbox.delivered", json!({"sessionID": "ses_root", "inboxID": "msg_report"})),
+                ev("session.text.delta", json!({"sessionID": "ses_root", "assistantMessageID": "msg_reaction", "ordinal": 0, "delta": "reaction"})),
+                succeeded("ses_root"),
             ];
             for e in &later {
-                if st.open_children.is_empty() {
-                    break;
-                }
-                after.extend(describe(follow(&mut st, e, &ctx)));
+                assert!(!stopped, "the follower stops at the root's terminal");
+                let (outs, terminal) = fold(&mut st, e, &follower);
+                after.extend(describe(outs));
+                stopped = terminal.is_some() && st.open_children.is_empty();
             }
+            assert!(stopped);
             let expected: Vec<&str> = if child_updates {
                 vec![
                     "child ses_background running",
@@ -2896,19 +3000,22 @@ mod tests {
                     "settled perm_background",
                     "child ses_background agent_message_chunk",
                     "child ses_background completed",
+                    "update agent_message_chunk ",
                 ]
             } else {
-                vec!["ask perm_background ses_background", "settled perm_background"]
+                vec!["ask perm_background ses_background", "settled perm_background", "update agent_message_chunk "]
             };
             assert_eq!(after, expected, "child capability: {child_updates}");
-            // A child of a followed child is followed too; the root's own events are not.
-            let mut st = TurnState { children: HashMap::from([("ses_a".into(), Child { id: "ses_a".into(), parent: "ses_root".into(), depth: 1, title: None })]), ..Default::default() };
-            st.started = true;
-            assert!(from_tracked_child(&st, &created("ses_b", "ses_a", "Nested")));
-            assert!(!from_tracked_child(&st, &created("ses_c", "ses_root", "Sibling")));
-            assert!(!from_tracked_child(&st, &succeeded("ses_root")));
-            follow(&mut st, &created("ses_b", "ses_a", "Nested"), &ctx);
+            assert!(!st.started);
+            // A child of a followed child is followed too, but its updates are not projected for the follower.
+            let child = |id: &str, turn: Option<&str>| Child { id: id.into(), parent: "ses_root".into(), depth: 1, title: None, turn_id: turn.map(String::from) };
+            let mut st = TurnState { children: HashMap::from([("ses_a".into(), child("ses_a", Some("msg_in")))]), ..Default::default() };
+            fold(&mut st, &created("ses_b", "ses_a", "Nested"), &follower);
             assert!(st.open_children.contains("ses_b"));
+            assert_eq!(st.children["ses_b"].turn_id.as_deref(), Some("msg_in"));
+            assert!(!project_child(&follower, &st.children["ses_b"]));
+            assert_eq!(project_child(&ctx, &st.children["ses_b"]), !child_updates);
+            assert!(!project_child(&ctx, &child("ses_old", Some("msg_older"))));
         }
     }
 

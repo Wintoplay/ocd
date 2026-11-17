@@ -992,14 +992,6 @@ impl Runtime {
                 self.footer.apply_selection(Some(self.variants.clone()), Some(self.variant.clone()), Some(label), Some(status));
             }
             FooterAction::Interrupt => self.interrupt(),
-            FooterAction::Background => {
-                if !self.session_id.is_empty() {
-                    let (client, sid) = (self.client.clone(), self.session_id.clone());
-                    tokio::spawn(async move {
-                        let _ = client.background(&sid).await;
-                    });
-                }
-            }
             FooterAction::QueuedAction(action, inbox) => {
                 if self.session_id.is_empty() {
                     return;

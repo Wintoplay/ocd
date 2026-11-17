@@ -465,14 +465,10 @@ pub trait ToolHost: Send + Sync {
         Ok(())
     }
 
-    /// `SubagentJob.background(recovery)`.
-    async fn subagent_job_background(&self, _recovery: JobRecovery) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// `SubagentJob.notify(recovery, startedAt)`.
-    async fn subagent_job_notify(&self, _recovery: JobRecovery, _started_at: u64) -> Result<(), String> {
-        Ok(())
+    /// Whether the child session is draining in this process or its subagent job is still running
+    /// (`sessions.active.has(id) || jobs.get(id)?.status === "running"`).
+    async fn subagent_running(&self, _session_id: &str) -> bool {
+        false
     }
 
     // ---------------------------------------------------------------- shell

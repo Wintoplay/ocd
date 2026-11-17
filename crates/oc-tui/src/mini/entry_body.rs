@@ -312,6 +312,17 @@ mod tests {
         assert_eq!(entry_body(&c, BodyOptions::default()), EntryBody::None);
     }
 
+    /// entry.body.test.ts "renders a task card for a completed background subagent launch" (2.3.0).
+    #[test]
+    fn completed_background_launch_is_a_task_card() {
+        let launch = tool_commit(tc(
+            "subagent",
+            json!({"status": "completed", "input": {"description": "Inspect reducer", "agent": "explore"}, "metadata": {"sessionID": "ses-child-1", "status": "running"}, "content": [{"type": "text", "text": "The subagent is working in the background (sessionID: ses-child-1)."}]}),
+        ));
+        assert_eq!(structured(&launch), ToolSnapshot::Task { title: "# Explore Subagent".into(), rows: vec!["Inspect reducer".into()], tail: String::new() });
+    }
+
+    /// "promotes legacy subagent results to markdown and falls back to structured summaries".
     #[test]
     fn subagent_results() {
         let result = tool_commit(tc(

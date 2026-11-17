@@ -1,12 +1,12 @@
 //! Per-session busy-period coordinator (`core/src/session/run-coordinator.ts`).
 //! Effect fiber interruption is modelled with a `CancellationToken` passed to `drain`.
 
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::FutureExt;
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -65,16 +65,30 @@ pub struct Coordinator {
 
 struct Inner {
     driver: Arc<dyn Driver>,
-    executions: Mutex<HashMap<String, Exec>>,
+    executions: Mutex<IndexMap<String, Exec>>,
 }
 
 impl Coordinator {
     pub fn new(driver: Arc<dyn Driver>) -> Self {
-        Coordinator { inner: Arc::new(Inner { driver, executions: Mutex::new(HashMap::new()) }) }
+        Coordinator { inner: Arc::new(Inner { driver, executions: Mutex::new(IndexMap::new()) }) }
     }
 
     pub fn active(&self) -> Vec<String> {
         self.inner.executions.lock().keys().cloned().collect()
+    }
+
+    /// Keys genuinely draining: owned and not stopping. Settlement windows are excluded.
+    pub fn draining(&self) -> Vec<String> {
+        self.inner
+            .executions
+            .lock()
+            .iter()
+            .filter(|(_, e)| {
+                let e = e.lock();
+                e.owner_alive && !e.stopping
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     pub fn is_active(&self, key: &str) -> bool {
@@ -164,7 +178,7 @@ impl Coordinator {
         {
             let mut map = self.inner.executions.lock();
             if map.get(key).is_some_and(|x| Arc::ptr_eq(x, exec)) {
-                map.remove(key);
+                map.shift_remove(key);
             }
         }
         if let Some(scope) = pending {

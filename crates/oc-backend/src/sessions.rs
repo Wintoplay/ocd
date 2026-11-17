@@ -185,8 +185,9 @@ impl Engine {
         self.session_api(&session)
     }
 
-    /// `Session.remove`: interrupt, wait idle, cancel the session's jobs, remove children, clear environment,
-    /// delete.
+    /// `Session.remove`: interrupt, wait idle, cancel the session's jobs, clear environment, delete, then remove the
+    /// children. The parent goes first: an interrupted child settles through the report path, and a report admitted
+    /// just before the parent's deletion would wake an execution whose lifecycle write then fails.
     pub fn remove_session<'a>(&'a self, id: &'a str) -> futures::future::BoxFuture<'a, Result<(), ApiError>> {
         Box::pin(async move {
             self.session(id)?;
@@ -196,12 +197,13 @@ impl Engine {
             }
             self.app.jobs.cancel_session(id);
             self.app.model_transport.close(id);
-            for child in store::children(&self.app.db, id).map_err(defect)? {
-                self.remove_session(&child).await?;
-            }
+            let children = store::children(&self.app.db, id).map_err(defect)?;
             self.app.environments.lock().remove(id);
             self.app.bus.commit_one(SessionEvent::Deleted { session_id: id.into() }).map_err(|e| defect(format!("{e:#}")))?;
             store::remove_aggregate(&self.app.db, id).map_err(defect)?;
+            for child in children {
+                self.remove_session(&child).await?;
+            }
             Ok(())
         })
     }
@@ -1143,10 +1145,7 @@ impl Engine {
             agent: selected.id.clone(),
             description,
         };
-        use oc_tools::host::ToolHost;
-        let host = oc_core::host::CoreHost { app: self.app.clone(), skills: Arc::new(vec![]), mcp: None, location: None, engine: None };
-        host.subagent_job_start(recovery.clone()).await.map_err(ApiError::defect)?;
-        host.subagent_job_background(recovery).await.map_err(ApiError::defect)?;
+        oc_core::job::start_subagent(&self.app, recovery, None);
         Ok(())
     }
 

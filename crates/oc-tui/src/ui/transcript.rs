@@ -1057,13 +1057,8 @@ fn render_tool(ctx: &RCtx, msg: &Message, t: &ToolPart) -> Vec<SLine> {
             let head = if continuation { "Continue subagent".to_string() } else { format!("{agent} Subagent") };
             let label = format!("{head} — {}{}", description.unwrap_or("Subagent"), model.map(|m| format!(" · {m}")).unwrap_or_default());
             let icon = if running { "│" } else if continuation { "↳" } else if status == "completed" { "✓" } else { "│" };
-            let badge = if status == "completed" && str_of(&meta, "status") == Some("running") {
-                Some(Seg::new(" Background ", Style::default().bg(th.dec(th.background.base).tui()).fg(th.text.muted.tui())))
-            } else {
-                None
-            };
             let click = session.map(Click::Navigate);
-            inline_tool(ctx, t, icon, "Delegating…", description.is_some(), running, vec![s(label, th.text.muted)], None, click, badge)
+            inline_tool(ctx, t, icon, "Delegating…", description.is_some(), running, vec![s(label, th.text.muted)], None, click, None)
         }
         "execute" => {
             let loading = status == "streaming" || status == "running";

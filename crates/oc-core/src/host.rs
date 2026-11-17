@@ -295,42 +295,16 @@ impl ToolHost for CoreHost {
     }
 
     async fn subagent_job_start(&self, recovery: JobRecovery) -> Result<(), String> {
-        let JobRecovery::Subagent { child_session_id, description, .. } = &recovery else { return Err("not a subagent".into()) };
-        let app = self.app.clone();
-        let child = child_session_id.clone();
-        let run = Box::pin(async move {
-            if let Some(c) = app.coordinator.get() {
-                if let crate::coordinator::Exit::Failure(e) = c.run(&child).await {
-                    return Err(e.to_string());
-                }
-            }
-            let msgs = app.db.session_messages(&child).map_err(|e| e.to_string())?;
-            let last = msgs.iter().rev().take(20).map(|(_, m)| m).find(|m| {
-                matches!(m, oc_schema::Message::Assistant(a) if a.time.completed.is_some() && a.error.is_none())
-            });
-            Ok(crate::job::subagent_text(last))
-        });
-        self.app.jobs.start(child_session_id.clone(), "subagent".into(), Some(description.clone()), Some(recovery.clone()), run);
-        Ok(())
-    }
-
-    async fn subagent_job_background(&self, recovery: JobRecovery) -> Result<(), String> {
-        let JobRecovery::Subagent { child_session_id, .. } = &recovery else { return Ok(()) };
-        if let Some(info) = self.app.jobs.background(child_session_id) {
-            self.subagent_job_notify(recovery.clone(), info.started_at).await?;
+        if !matches!(recovery, JobRecovery::Subagent { .. }) {
+            return Err("not a subagent".into());
         }
+        crate::job::start_subagent(&self.app, recovery, None);
         Ok(())
     }
 
-    async fn subagent_job_notify(&self, recovery: JobRecovery, _started_at: u64) -> Result<(), String> {
-        let JobRecovery::Subagent { child_session_id, .. } = &recovery else { return Ok(()) };
-        let app = self.app.clone();
-        let child = child_session_id.clone();
-        tokio::spawn(async move {
-            let Some(info) = app.jobs.wait(&child).await else { return };
-            crate::job::deliver_subagent(&app, info.status, info.output, info.error, info.notification_id, &recovery, true).await;
-        });
-        Ok(())
+    async fn subagent_running(&self, session_id: &str) -> bool {
+        self.app.coordinator.get().is_some_and(|c| c.is_active(session_id))
+            || self.app.jobs.get(session_id).is_some_and(|j| j.status == JobStatus::Running)
     }
 
     async fn session_environment(&self, session_id: &str) -> Option<std::collections::HashMap<String, String>> {

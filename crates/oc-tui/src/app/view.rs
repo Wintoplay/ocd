@@ -842,7 +842,7 @@ impl App {
         // Background tool hint.
         if let Some(m) = visible.iter().rev().find(|m| m.kind == "assistant" && m.time.completed.is_none()) {
             let long = m.content.iter().any(|c| matches!(c, Content::Tool(tp) if tp.state.status == "running"
-                && matches!(transcript::canonical_tool(&tp.name), "shell" | "subagent")
+                && transcript::canonical_tool(&tp.name) == "shell"
                 && tp.time.ran.is_some_and(|r| self.now() - r >= 3000)));
             if long {
                 out.push(SLine::blank());

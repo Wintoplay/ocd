@@ -60,7 +60,6 @@ pub enum FooterAction {
     ModelSelect(ModelSel),
     VariantSelect(Option<String>),
     Interrupt,
-    Background,
     QueuedAction(QueuedPromptAction, String),
     EditorOpen(String),
     SubagentSelect(Option<String>),
@@ -1026,10 +1025,6 @@ impl Footer {
             if active > 0 && !s.is_empty() {
                 work.push((GroupId::Subagents, Action { key: s, label: format!("{active} sub"), expanded: Some(format!("{active} subagent{}", if active == 1 { "" } else { "s" })) }));
             }
-            let b = self.shortcut("session.background");
-            if self.active_tabs().iter().any(|t| !t.background) && !b.is_empty() {
-                work.push((GroupId::Background, Action { key: b, label: "bg".into(), expanded: Some("background".into()) }));
-            }
         }
         let command = self.shortcut("command.palette.show");
         let menu = if !prompt || self.takeover() || shell || command.is_empty() { None } else { Some(Action { key: command, label: "menu".into(), expanded: None }) };
@@ -1238,9 +1233,6 @@ impl Footer {
         if self.inspecting() && self.selected_tab().is_some_and(|t| t.status == SubagentStatus::Running) {
             v.push("composer.subagent.interrupt");
         }
-        if composer_route && self.active_tabs().iter().any(|t| !t.background) {
-            v.push("session.background");
-        }
         if prompt && (!visible || self.composer.mode == super::prompt::MenuMode::Slash) {
             v.push("prompt.queue");
         }
@@ -1296,10 +1288,6 @@ impl Footer {
             }
             "variant.cycle" => {
                 self.actions.push(FooterAction::CycleVariant);
-                true
-            }
-            "session.background" => {
-                self.actions.push(FooterAction::Background);
                 true
             }
             "session.child.first" => {
