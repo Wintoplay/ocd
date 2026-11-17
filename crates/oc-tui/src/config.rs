@@ -250,7 +250,7 @@ impl Config {
         self.str("session.grouping").unwrap_or("auto")
     }
     pub fn verbosity(&self) -> &str {
-        self.str("session.verbosity").unwrap_or("medium")
+        self.str("session.verbosity").unwrap_or("low")
     }
     pub fn tps(&self) -> bool {
         self.bool("session.tps").unwrap_or(true)
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(c.tabs_mode(), "off");
         assert!(!c.tabs_enabled());
         assert_eq!(c.thinking(), "hide");
-        assert_eq!(c.verbosity(), "medium");
+        assert_eq!(c.verbosity(), "low");
         assert!(c.tps());
         assert_eq!(c.volume(), 0.4);
     }

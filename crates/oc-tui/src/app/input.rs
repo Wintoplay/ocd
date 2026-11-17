@@ -8,7 +8,7 @@ use crate::ui::dialog::{self, Body, DialogHit, Outcome};
 use crate::ui::form as F;
 use crate::ui::prompt::ChipKind;
 use crate::ui::text::Click;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -344,6 +344,22 @@ impl App {
         // Sequence miss: clear and fall through (typed into the focused input).
         self.pending_keys.clear();
         self.pending_deadline = None;
+        // The textarea's own bindings (`defaultTextareaKeyBindings`): Home and End move to the buffer's ends. In a
+        // session they belong to `session.first`/`session.last`.
+        if self.dialogs.is_empty()
+            && self.session_id().is_none()
+            && self.prompt_active()
+            && matches!(s.name.as_str(), "home" | "end")
+            && !(s.ctrl || s.shift || s.meta || s.super_ || s.hyper)
+        {
+            if s.name == "home" {
+                self.editor.buffer_home();
+            } else {
+                self.editor.buffer_end();
+            }
+            self.dirty = true;
+            return;
+        }
         if let Some(c) = s.is_char() {
             if !self.dialogs.is_empty() {
                 return;
@@ -422,7 +438,8 @@ impl App {
                     return true;
                 }
                 let text = self.editor.text.clone();
-                match self.history.step(if up { -1 } else { 1 }, &text) {
+                let editor = &self.editor;
+                match self.history.step(if up { -1 } else { 1 }, &text, || editor.info()) {
                     Some(p) => {
                         self.editor.set(&p);
                         if up {
@@ -1136,6 +1153,7 @@ impl App {
                     self.toast(Toast::new("warning", "This prompt cannot be queued"));
                     return;
                 }
+                self.history.reset();
                 self.editor.clear();
                 self.run_command(&c.id, Some(args.unwrap_or_default()));
                 return;
@@ -1612,6 +1630,7 @@ impl App {
                 if let Ok(i) = v.parse::<usize>()
                     && let Some(e) = self.stash.remove(i)
                 {
+                    self.history.reset();
                     self.editor.set(&e.prompt);
                 }
             }
@@ -2222,9 +2241,16 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 let (x, y) = (m.column, m.row);
                 let inside = |r: &ratatui::layout::Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+                // `plainClick`: modified clicks are left to the terminal.
+                let plain = m.modifiers.intersection(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT).is_empty();
                 if !self.dialogs.is_empty() {
                     let hit = self.dialog_hits.iter().find(|(r, _)| inside(r)).map(|(_, h)| h.clone());
                     match hit {
+                        Some(DialogHit::SessionLink(id)) => {
+                            if plain {
+                                self.open_session_link(&id);
+                            }
+                        }
                         // The header's `esc` while typing a choice goes back to the answers.
                         Some(DialogHit::Close) if matches!(self.dialogs.last().map(|d| &d.body), Some(Body::Choice(c)) if c.editing) => {
                             self.dialog_outcome(Outcome::Close);
@@ -2271,8 +2297,10 @@ impl App {
                     return;
                 }
                 let hit = self.hits.iter().find(|(r, _)| inside(r)).map(|(_, c)| c.clone());
-                if let Some(c) = hit {
-                    self.on_click(c);
+                match hit {
+                    Some(Click::SessionLink(_)) if !plain => {}
+                    Some(c) => self.on_click(c),
+                    None => {}
                 }
             }
             _ => {}
@@ -2327,7 +2355,50 @@ impl App {
         false
     }
 
+    /// The `/btw` answer follows its session links' labels (and loads the sessions it mentions).
+    pub(super) fn refresh_btw_links(&mut self) {
+        let mut wanted: Vec<String> = Vec::new();
+        for i in 0..self.dialogs.len() {
+            let d = &self.dialogs[i];
+            if d.purpose != "btw-answer" {
+                continue;
+            }
+            let used: Vec<(String, Option<String>)> = serde_json::from_value(d.data["links"].clone()).unwrap_or_default();
+            wanted.extend(used.iter().filter(|(_, l)| l.is_none()).map(|(id, _)| id.clone()));
+            if used.iter().all(|(id, label)| self.session_link_label(id) == *label) {
+                continue;
+            }
+            let field = |k: &str| d.data.get(k).and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let (question, answer) = (field("question"), field("answer"));
+            let copied = d.data.get("copied").and_then(|c| c.as_bool()).unwrap_or(false);
+            let scroll = match &d.body {
+                Body::Text(td) => td.scroll,
+                _ => 0,
+            };
+            let mut nd = super::commands::btw_answer(self, &question, &answer, copied);
+            if let Some(td) = nd.text_body() {
+                td.scroll = scroll;
+            }
+            self.dialogs[i] = nd;
+            self.dirty = true;
+        }
+        self.lookup_session_links(&wanted);
+    }
+
+    /// A session link was clicked: close any dialogs and open the session.
+    pub fn open_session_link(&mut self, id: &str) {
+        while !self.dialogs.is_empty() {
+            self.close_dialog();
+        }
+        self.navigate(Route::Session(id.to_string()));
+    }
+
     pub fn on_click(&mut self, c: Click) {
+        if let Click::SessionLink(id) = &c {
+            let id = id.clone();
+            self.open_session_link(&id);
+            return;
+        }
         if matches!(&c, Click::Custom(x) if x == super::view::TOAST_CLICK) {
             let action = self.toast.take().and_then(|t| t.action);
             if !self.toast_queue.is_empty() {
@@ -2358,6 +2429,20 @@ impl App {
         {
             let what = what.to_string();
             self.onboarding_click(&what);
+            return;
+        }
+        if let Click::Custom(x) = &c
+            && let Some(tab) = x.strip_prefix(super::view::LIVE_CLICK)
+        {
+            let tab = tab.to_string();
+            self.run_command("session.child.first", Some(tab));
+            return;
+        }
+        if let Click::Custom(x) = &c
+            && let Some(tab) = x.strip_prefix(super::composer::TAB_CLICK)
+        {
+            let tab = tab.to_string();
+            self.composer_tab_click(&tab);
             return;
         }
         if matches!(&c, Click::Custom(x) if x == super::goal::CLICK) {
@@ -2416,7 +2501,7 @@ impl App {
             Click::QueuedDialog => {
                 self.run_command("session.queued_prompts", None);
             }
-            Click::ShellOutput(_) => {}
+            Click::ShellOutput(_) | Click::SessionLink(_) => {}
             Click::Custom(x) => {
                 self.run_command(&x, None);
             }

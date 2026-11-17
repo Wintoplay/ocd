@@ -29,12 +29,15 @@ fn s(text: impl Into<String>, c: Rgba) -> Seg {
 
 /// Click target of the visible toast.
 pub const TOAST_CLICK: &str = "toast.activate";
+/// The prompt footer's `N subagents · M shells`, followed by the composer tab it opens.
+pub const LIVE_CLICK: &str = "session.child.first:";
 
 impl App {
     /// Render the whole UI.
     pub fn draw(&mut self, f: &mut Frame) {
         // Integration dialogs that left the stack cancel their sign-in attempts.
         self.integration_reconcile();
+        self.refresh_btw_links();
         let area = f.area();
         if self.dirty || (area.width, area.height) != self.size {
             self.render_rev += 1;
@@ -486,18 +489,20 @@ impl App {
             };
             if goal.is_some() || live || !status.is_empty() {
                 if live {
+                    // A click opens the composer on the subagents tab, or the shell tab when only shells run (2.3.0).
+                    let click = Click::Custom(format!("{LIVE_CLICK}{}", if subagents > 0 { "subagents" } else { "shell" }));
                     let key = kb.shortcut("session.child.first");
                     if !key.is_empty() {
-                        right.push(s(format!("{key} "), t.text.base));
+                        right.push(s(format!("{key} "), t.text.base).on_click(click.clone()));
                     }
                     if subagents > 0 {
-                        right.push(s(format!("{subagents} subagent{}", if subagents == 1 { "" } else { "s" }), t.text.muted));
+                        right.push(s(format!("{subagents} subagent{}", if subagents == 1 { "" } else { "s" }), t.text.muted).on_click(click.clone()));
                     }
                     if subagents > 0 && shells > 0 {
-                        right.push(s(" · ", t.text.muted));
+                        right.push(s(" · ", t.text.muted).on_click(click.clone()));
                     }
                     if shells > 0 {
-                        right.push(s(format!("{shells} shell{}", if shells == 1 { "" } else { "s" }), t.text.muted));
+                        right.push(s(format!("{shells} shell{}", if shells == 1 { "" } else { "s" }), t.text.muted).on_click(click));
                     }
                 }
                 if let Some(g) = goal.clone() {
@@ -553,7 +558,9 @@ impl App {
             }
             let mut ln = l.clone();
             ln.bg = None;
-            draw_lines(buf, row, &[ln], 0, "");
+            // The footer's live work count opens the composer.
+            let hits = draw_lines(buf, row, &[ln], 0, "");
+            self.hits.extend(hits);
         }
         // The footer's `◎ goal` item opens the goal dialog.
         if let Some(last) = lines.last()
@@ -798,7 +805,10 @@ impl App {
             .unwrap_or_default();
         let rows = transcript::build_rows(&visible, &inputs, &compactions, self.config.turn_tokens().is_some(), self.config.verbosity(), &blocked);
         let env = self.transcript_env(sid);
-        let ctx = self.transcript_ctx(&env, &visible, width, None, None);
+        let label = |id: &str| self.session_link_label(id);
+        let links = crate::ui::markdown::SessionLinks::new(&label);
+        let mut ctx = self.transcript_ctx(&env, &visible, width, None, None);
+        ctx.links = Some(&links);
         let light = self.themes.effective_mode() == crate::theme::Mode::Light;
         let mut out = Vec::new();
         let mut marks: Vec<(usize, String, bool)> = Vec::new();

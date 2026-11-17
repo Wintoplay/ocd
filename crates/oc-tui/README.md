@@ -209,6 +209,27 @@ The modules below cover the main session and home screens and all dialogs. They 
   light/dark switch of the terminal (`?2031`), an older gap; output streamed below while scrolled up (or after a
   `keep` send) still moves ocd's view, where upstream keeps its scroll position; ocd lets every base binding through
   in a subagent session's composer mode where upstream enables only `session.first`/`session.last`.
+- **2.3.0 changes** (`app/catchup230_tests.rs`): transcript verbosity defaults to `low` (one activity summary per
+  run of tools and thoughts; the settings dialog shows low as the default) (#63207); the prompt footer's
+  `N subagents · M shells` is a click target that opens the composer on the Subagents tab, or on Shell when only
+  shells run (it never closes it; `session.child.first` takes the tab as its argument), and the composer's tab
+  labels switch tabs on click (#60168); the paste chip's text is the page colour (dark in dark mode, light in light
+  mode), or the selected-row text on a transparent page, in the full TUI and mini (#62930); the session list opens at
+  the top, not on the current session; prompt history keeps the live draft: Up from the prompt always works and saves its text, mode
+  and chips, Down past the newest entry brings them back, and replacing or clearing the prompt (submit, stash, restore,
+  navigation, Ctrl+C) leaves the history (#63262); Home and End move to the prompt's start and end (the textarea's own
+  bindings); undo brings a paste chip back with its text (#63265); copying a selection that lies in the prompt's text
+  copies the text itself with the pastes wholly inside it expanded by position, so two identical
+  `[Pasted ~N lines]` labels keep their own texts (#63275); mini keeps the draft's caret when the command palette (or
+  another view) closes (#63260). **Session links** (#63224, #63247; `ui/markdown.rs` `SessionLinks`,
+  `util/session_mention.rs`): in assistant text, compaction summaries and the `/btw` answer, a session ID
+  (`ses_` + 26 letters or digits, optionally `@session:ses_…`) of a loaded, unarchived session other than the current
+  one shows as `@<title>` (fallback titles collapse to "New session"/"Child session"; source markdown keeps the ID)
+  in the `markup.link.url` style, underlined, and a plain click opens it (closing any dialogs; modified clicks and
+  drags are left to selection). IDs inside URLs, markdown links, tables, fenced code and code spans that are not
+  exactly one ID stay plain. An unknown ID is looked up once with `session.get`; a miss marks it missing. Segments
+  carry their own click target through wrapping (`Seg::link`), so each wrapped row of a title opens it. ocd's
+  editor deletes a chip whole, so upstream's half-deleted chip fragment (Ctrl+W inside a chip) cannot occur.
 - **Full-screen views:** the diff viewer route (`diff.open`: tree, unified or split, base
   picker) and the stats route.
 - **Embedded terminal pane:** uses the server PTY WebSocket (input protocol 1) and renders
@@ -332,7 +353,9 @@ Long sessions must not slow the TUI down: the cost of a frame and of an event do
   subagent sessions, and the retry countdown second) or its *content key* (the same with the part's content instead
   of the message revision) is unchanged, so a text delta re-renders only the streaming part. Width, terminal width,
   theme, config, models, agent colours and the session agent drop all rows; the revert boundary, permission blocking
-  and pending inputs rebuild the row list (rows are still reused). The background-work hint and the revert banner
+  and pending inputs rebuild the row list (rows are still reused). Each rendered row remembers the session links it
+  showed and their labels; when a session's label changes (a rename, a lookup, archiving), only the rows that
+  mention it render again (#63247). The background-work hint and the revert banner
   are recomputed each frame. Spinners stay out of cached lines (a placeholder glyph replaced at draw time).
 - **Lazy rows:** rows are rendered bottom-up, only as far as the window reaches, and the rest within 8 ms per frame
   afterwards. Opening, resizing or re-theming a long session shows the visible part at once; until every row is

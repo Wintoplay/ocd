@@ -119,6 +119,7 @@ impl App {
             if app.session_id() != Some(sid.as_str()) || !prompt_empty(&app.editor.info()) || app.editor.shell {
                 return;
             }
+            app.history.reset();
             app.editor.set(&restored);
             app.editor.buffer_end();
             app.free_limit_offer(&sid, go_limit, retry, created);

@@ -36,14 +36,21 @@ pub fn bold(s: Style) -> Style {
 pub struct Seg {
     pub text: String,
     pub style: Style,
+    /// Click target of just this run (e.g. a session link), kept through wrapping. It takes
+    /// precedence over the line's own click.
+    pub link: Option<Box<Click>>,
 }
 
 impl Seg {
     pub fn new(text: impl Into<String>, style: Style) -> Seg {
-        Seg { text: text.into(), style }
+        Seg { text: text.into(), style, link: None }
     }
     pub fn width(&self) -> usize {
         width(&self.text)
+    }
+    pub fn on_click(mut self, c: Click) -> Seg {
+        self.link = Some(Box::new(c));
+        self
     }
 }
 
@@ -66,6 +73,8 @@ pub enum Click {
     QueuedDialog,
     ToggleThinking(String),
     ShellOutput(String),
+    /// A session ID shown as a link (`ui/session-link.ts`): a plain click opens the session.
+    SessionLink(String),
     Custom(String),
 }
 
@@ -114,33 +123,41 @@ pub enum Wrap {
     None,
 }
 
-/// A styled grapheme.
+/// A styled grapheme. `link` is the index of the segment whose link it carries.
 #[derive(Clone, Debug)]
 struct Cell {
     g: String,
     style: Style,
     w: usize,
+    link: Option<usize>,
 }
 
 fn cells(segs: &[Seg]) -> Vec<Cell> {
     let mut out = Vec::new();
-    for s in segs {
+    for (i, s) in segs.iter().enumerate() {
+        let link = s.link.as_ref().map(|_| i);
         for g in graphemes(&s.text) {
-            out.push(Cell { g: g.to_string(), style: s.style, w: width(g) });
+            out.push(Cell { g: g.to_string(), style: s.style, w: width(g), link });
         }
     }
     out
 }
 
-fn to_segs(cells: &[Cell]) -> Vec<Seg> {
-    let mut out: Vec<Seg> = Vec::new();
+fn to_segs(cells: &[Cell], src: &[Seg]) -> Vec<Seg> {
+    let link = |i: Option<usize>| i.and_then(|i| src[i].link.as_deref());
+    let mut out: Vec<(Seg, Option<usize>)> = Vec::new();
     for c in cells {
         match out.last_mut() {
-            Some(last) if last.style == c.style => last.text.push_str(&c.g),
-            _ => out.push(Seg::new(c.g.clone(), c.style)),
+            Some((last, l)) if last.style == c.style && link(*l) == link(c.link) => last.text.push_str(&c.g),
+            _ => out.push((Seg::new(c.g.clone(), c.style), c.link)),
         }
     }
-    out
+    out.into_iter()
+        .map(|(mut s, l)| {
+            s.link = l.and_then(|i| src[i].link.clone());
+            s
+        })
+        .collect()
 }
 
 /// Wrap styled segments into lines of at most `w` cells. `\n` forces a break.
@@ -154,7 +171,7 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
             paragraphs.push(Vec::new());
         } else if c.g == "\t" {
             for _ in 0..2 {
-                paragraphs.last_mut().unwrap().push(Cell { g: " ".into(), style: c.style, w: 1 });
+                paragraphs.last_mut().unwrap().push(Cell { g: " ".into(), style: c.style, w: 1, link: c.link });
             }
         } else {
             paragraphs.last_mut().unwrap().push(c);
@@ -173,21 +190,21 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
                     used += c.w;
                     line.push(c);
                 }
-                out.push(to_segs(&line));
+                out.push(to_segs(&line, segs));
             }
             Wrap::Char => {
                 let mut line: Vec<Cell> = Vec::new();
                 let mut used = 0;
                 for c in p {
                     if used + c.w > w && !line.is_empty() {
-                        out.push(to_segs(&line));
+                        out.push(to_segs(&line, segs));
                         line.clear();
                         used = 0;
                     }
                     used += c.w;
                     line.push(c);
                 }
-                out.push(to_segs(&line));
+                out.push(to_segs(&line, segs));
             }
             Wrap::Word => {
                 // Tokenize into words (non-space runs) and spaces.
@@ -209,7 +226,7 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
                             line.extend(tok);
                         } else {
                             // Break at the space; drop it.
-                            out.push(to_segs(&line));
+                            out.push(to_segs(&line, segs));
                             line.clear();
                             used = 0;
                         }
@@ -226,7 +243,7 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
                             line.pop();
                         }
                         if !line.is_empty() {
-                            out.push(to_segs(&line));
+                            out.push(to_segs(&line, segs));
                         }
                         line = tok;
                         used = tw;
@@ -235,7 +252,7 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
                     // Word longer than the width: break by grapheme.
                     for c in tok {
                         if used + c.w > w && !line.is_empty() {
-                            out.push(to_segs(&line));
+                            out.push(to_segs(&line, segs));
                             line.clear();
                             used = 0;
                         }
@@ -243,7 +260,7 @@ pub fn wrap(segs: &[Seg], w: usize, mode: Wrap) -> Vec<Vec<Seg>> {
                         line.push(c);
                     }
                 }
-                out.push(to_segs(&line));
+                out.push(to_segs(&line, segs));
             }
         }
     }
@@ -363,7 +380,13 @@ pub fn draw_line_iter<'a>(buf: &mut Buffer, area: Rect, lines: impl Iterator<Ite
             {
                 style = style.bg(bg);
             }
-            x += put(buf, x, y, &text, style, max) as u16;
+            let written = put(buf, x, y, &text, style, max) as u16;
+            if let Some(link) = &s.link
+                && written > 0
+            {
+                hits.push((Rect::new(x, y, written, 1), (**link).clone()));
+            }
+            x += written;
         }
         if let Some(c) = &line.click {
             hits.push((Rect::new(area.x, y, area.width, 1), c.clone()));
@@ -422,6 +445,22 @@ mod tests {
         assert_eq!(texts(wrap(&s, 4, Wrap::Word)), vec!["a", "b"]);
         assert_eq!(texts(wrap(&[Seg::new("abcdef", Style::default())], 3, Wrap::Char)), vec!["abc", "def"]);
         assert_eq!(texts(wrap(&[Seg::new("abcdef", Style::default())], 3, Wrap::None)), vec!["abc"]);
+    }
+
+    #[test]
+    fn links_survive_wrapping_and_hit_their_cells() {
+        let link = Click::SessionLink("ses_x".into());
+        let s = vec![Seg::new("see ", Style::default()), Seg::new("@Fix the tests", Style::default()).on_click(link.clone()), Seg::new(" now", Style::default())];
+        let out = wrap(&s, 10, Wrap::Word);
+        let texts: Vec<Vec<(String, bool)>> = out.iter().map(|l| l.iter().map(|s| (s.text.clone(), s.link.is_some())).collect()).collect();
+        assert_eq!(texts, vec![vec![("see ".into(), false), ("@Fix".into(), true)], vec![("the tests".into(), true)], vec![("now".into(), false)]]);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 3));
+        let lines: Vec<SLine> = out.into_iter().map(|l| SLine::new(l).on_click(Some(Click::JumpBottom))).collect();
+        let hits = draw_lines(&mut buf, Rect::new(0, 0, 12, 3), &lines, 0, "");
+        // The link's cells come before the line's own target, which still covers the rest.
+        assert_eq!(hits[0], (Rect::new(4, 0, 4, 1), link.clone()));
+        assert_eq!(hits[1], (Rect::new(0, 0, 12, 1), Click::JumpBottom));
+        assert_eq!(hits[2], (Rect::new(0, 1, 9, 1), link));
     }
 
     #[test]

@@ -62,6 +62,9 @@ pub fn session_family(sessions: &[(String, Option<String>)], session: &str) -> V
     out
 }
 
+/// A composer tab label, followed by the tab id.
+pub const TAB_CLICK: &str = "composer.tab:";
+
 impl App {
     pub fn composer_open(&self) -> bool {
         self.composer.is_some() || (self.session().is_some_and(|s| s.parent_id.is_some()) && self.active_form().is_none())
@@ -133,6 +136,30 @@ impl App {
             .collect();
         v.push(("new".into(), "+ New terminal".into()));
         v
+    }
+
+    /// `session.child.first` with a tab: open the composer on that tab (never closes it).
+    pub fn open_composer_tab(&mut self, tab: &str) {
+        if self.composer.as_ref().is_some_and(|c| c.tab == tab) {
+            return;
+        }
+        let selected = if tab == "subagents" { self.subagent_entries().iter().position(|e| e.current).unwrap_or(0) } else { 0 };
+        self.composer = Some(Composer { tab: tab.into(), selected });
+        self.dirty = true;
+    }
+
+    /// A click on a composer tab label.
+    pub fn composer_tab_click(&mut self, tab: &str) {
+        if !self.composer_open() || !self.composer_tabs().iter().any(|(id, _)| *id == tab) {
+            return;
+        }
+        let mut st = self.composer_state();
+        if st.tab != tab {
+            st.tab = tab.into();
+            st.selected = 0;
+        }
+        self.composer = Some(st);
+        self.dirty = true;
     }
 
     pub fn toggle_composer(&mut self) {
@@ -320,10 +347,12 @@ impl App {
                 if i > 0 {
                     head.push(seg("  ", fg(t.text.base)));
                 }
+                // A tab label switches to its tab on click (2.3.0).
+                let click = Click::Custom(format!("{TAB_CLICK}{id}"));
                 if *id == st.tab {
-                    head.push(Seg::new(*label, bold(fg(t.text.base))));
+                    head.push(Seg::new(*label, bold(fg(t.text.base))).on_click(click));
                 } else {
-                    head.push(seg(*label, fg(t.text.muted)));
+                    head.push(seg(*label, fg(t.text.muted)).on_click(click));
                 }
             }
         } else {

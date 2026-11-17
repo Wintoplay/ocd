@@ -83,6 +83,8 @@ impl App {
         let mut sel = Select::new("Sessions", vec![]);
         sel.current = self.session_id().map(|s| s.to_string());
         sel.skip_filter = true;
+        // 2.3.0 (`focusCurrent={false}`): the list opens at the top, not on the current session.
+        sel.focus_current = false;
         let tabs = self.config.tabs_enabled();
         sel.actions = vec![
             Action::new("session.pin.toggle", "pin/unpin").hidden(tabs),

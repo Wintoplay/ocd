@@ -77,7 +77,7 @@ impl MiniSyntax {
         rule(&["extmark.agent"], c(t.categorical(0, 200)), true, false, false, None);
         let skill = if t.categorical.len() > 1 { t.categorical(1, 200) } else { t.categorical(0, 200) };
         rule(&["extmark.skill"], c(skill), true, false, false, None);
-        rule(&["extmark.paste"], c(t.text.action.primary.focused), true, false, false, Some(c(fb.warning.base)));
+        rule(&["extmark.paste"], c(crate::theme::paste_fg(t)), true, false, false, Some(c(fb.warning.base)));
         rule(&["comment", "comment.documentation"], c(s.comment), false, true, false, None);
         rule(&["string", "symbol", "character.special", "character"], c(s.string), false, false, false, None);
         rule(&["number", "boolean", "constant", "float"], c(s.number), false, false, false, None);

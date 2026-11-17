@@ -282,3 +282,30 @@ fn configured_agent_color_paints_the_footer() {
     assert_eq!(rgba_from_hex("ff79c680"), Color::rgba(255, 121, 198, 128));
     assert_eq!(rgba_from_hex("#+f79c6"), Color::rgb(255, 0, 255));
 }
+
+/// 2.3.0 (#63260): closing the command palette keeps the draft's caret where it was, not at the end.
+#[test]
+fn the_draft_keeps_its_caret_after_the_command_palette() {
+    let left = serde_json::json!({ "key": "ARROW_LEFT" });
+    let mut steps = vec![serde_json::json!({ "text": "hello world" })];
+    steps.extend(std::iter::repeat_n(left, 5));
+    steps.extend([
+        serde_json::json!({ "snap": "before" }),
+        serde_json::json!({ "key": "p", "ctrl": true }),
+        serde_json::json!({ "snap": "palette" }),
+        serde_json::json!({ "key": "ESCAPE" }),
+        serde_json::json!({ "snap": "after" }),
+    ]);
+    let frames = run(&serde_json::json!({
+        "name": "caret",
+        "agents": [{ "id": "build", "name": "Build", "mode": "primary", "hidden": false }],
+        "model": { "providerID": "mock", "modelID": "m1" },
+        "steps": steps,
+    }));
+    let rows = |i: usize| frames[i]["rows"].as_array().unwrap().iter().map(|r| r.as_str().unwrap().to_string()).collect::<Vec<_>>().join("\n");
+    assert!(rows(0).contains("hello world"), "{}", rows(0));
+    assert!(!rows(1).contains("hello world"), "the palette replaces the prompt: {}", rows(1));
+    assert!(rows(2).contains("hello world"), "{}", rows(2));
+    assert!(frames[0]["cursor"].is_array());
+    assert_eq!(frames[2]["cursor"], frames[0]["cursor"]);
+}

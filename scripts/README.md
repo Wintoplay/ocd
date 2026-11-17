@@ -18,7 +18,9 @@
   `--standalone`, mock provider from the turn script) in its own pty and prints the screen at each `--snap` time. With
   `--ready`, times count from when that text first appears, so a slow startup does not eat the keystrokes. Prefer it to
   `script` for timed captures: under `script` with piped input, the TUI's output sometimes stalled until the next input
-  byte.
+  byte. `--seed-session ID:TITLE` creates that session first (through a `serve` of the same binary and state), for
+  screens that refer to an existing session. The harness answers cursor position queries (`ESC[6n`) like a terminal;
+  mouse clicks are SGR sequences in `--key` (`--key '8:<ESC>[<0;27;7M<ESC>[<0;27;7m'`, 1-based column;row).
 - `tui_latency.py --bin target/release/ocd --work DIR [--turns 4] [--lines 500] [--pace 0.005]`: TUI responsiveness
   late in a long session, isolated like `tui_capture.py`. The mock streams long markdown answers (one chunk per line,
   `pace` seconds apart), then asks a multiple-choice question; the script reports when each answer's end shows up,

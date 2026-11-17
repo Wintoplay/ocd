@@ -155,6 +155,8 @@ fn sidebar_hides_cleared_and_reverted_lists() {
 #[test]
 fn transcript_renders_todowrite() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     with_messages(
         &mut a,
         vec![assistant(
@@ -189,6 +191,8 @@ fn transcript_renders_todowrite() {
 #[test]
 fn transcript_shows_a_pending_todowrite_inline() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     with_messages(&mut a, vec![assistant("msg_1", vec![todo_call("t1", "running", three())])]);
     let lines = render(&mut a, 100, 40);
     assert!(contains(&lines, "Updating todos…"), "{}", lines.join("\n"));

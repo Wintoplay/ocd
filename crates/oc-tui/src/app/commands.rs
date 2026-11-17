@@ -63,7 +63,7 @@ pub fn settings() -> Vec<(&'static str, &'static str, &'static str, Vec<Value>, 
     v.push(("Session", "Thinking", "session.thinking", vec![json!("hide"), json!("show")], vec![], json!("hide")));
     v.push(("Session", "Markdown", "session.markdown", vec![json!("source"), json!("rendered")], vec![], json!("rendered")));
     v.push(("Session", "Tool grouping", "session.grouping", vec![json!("none"), json!("auto")], vec![], json!("auto")));
-    v.push(("Session", "Verbosity", "session.verbosity", vec![json!("low"), json!("medium"), json!("high")], vec![], json!("medium")));
+    v.push(("Session", "Verbosity", "session.verbosity", vec![json!("low"), json!("medium"), json!("high")], vec![], json!("low")));
     let (a, b) = onoff();
     v.push(("Session", "Transcript images", "session.image_preview", a, b, json!(false)));
     let (a, b) = onoff();
@@ -615,7 +615,10 @@ impl App {
                 if sid.is_none() {
                     return false;
                 }
-                self.toggle_composer();
+                match args.as_deref() {
+                    Some(tab @ ("shell" | "subagents")) => self.open_composer_tab(tab),
+                    _ => self.toggle_composer(),
+                }
             }
             "session.queued_prompts" => self.open_queued(),
             "session.parent" => {
@@ -768,10 +771,14 @@ impl App {
                     return false;
                 }
                 self.stash.push(self.editor.info());
+                self.history.reset();
                 self.editor.clear();
             }
             "prompt.stash.pop" => match self.stash.pop() {
-                Some(p) => self.editor.set(&p),
+                Some(p) => {
+                    self.history.reset();
+                    self.editor.set(&p);
+                }
                 None => return false,
             },
             "prompt.stash.list" => self.open_stash(),
@@ -784,6 +791,7 @@ impl App {
                 if info.text.trim().chars().count() >= 20 || !info.pasted.is_empty() || !info.files.is_empty() || !info.agents.is_empty() {
                     self.history.append(info);
                 }
+                self.history.reset();
                 self.editor.clear();
                 self.autocomplete = None;
             }
@@ -1293,6 +1301,7 @@ impl App {
             app.store.remember(info);
             app.navigate(Route::Session(id));
             if let Some(p) = prompt {
+                app.history.reset();
                 app.editor.set(&p);
             }
             app.dialogs.clear();
@@ -1449,8 +1458,11 @@ pub fn btw_answer(app: &App, question: &str, answer: &str, copied: bool) -> Dial
     let t = base.dialog().clone();
     let width = (Size::Large.width() as usize).min(app.size.0.saturating_sub(2) as usize).saturating_sub(DIALOG_INSET * 2).max(1);
     let st = crate::theme::SyntaxStyle::from_theme(&base);
-    let o = crate::ui::markdown::MdOpts { theme: &base, syntax: &st, conceal: true, fg: base.markdown.text, mono: false };
+    let label = |id: &str| app.session_link_label(id);
+    let links = crate::ui::markdown::SessionLinks::new(&label);
+    let o = crate::ui::markdown::MdOpts { theme: &base, syntax: &st, conceal: true, fg: base.markdown.text, mono: false, links: Some(&links) };
     let lines = crate::ui::markdown::render(answer, width, &o);
+    let links = links.take();
     let question_line = question.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut td = TextDialog::new("/btw", lines);
     td.title_extra = Some((question_line, true));
@@ -1464,7 +1476,8 @@ pub fn btw_answer(app: &App, question: &str, answer: &str, copied: bool) -> Dial
     let mut d = Dialog::text("btw-answer", td);
     d.size = Size::Large;
     d.centered = true;
-    d.data = json!({ "question": question, "answer": answer });
+    // The labels its session links showed, so a change renders the answer again.
+    d.data = json!({ "question": question, "answer": answer, "copied": copied, "links": links });
     d
 }
 

@@ -140,6 +140,17 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
+    /// `displayLabel` (`session-title-fallback.ts`): a compact label, collapsing historical timestamped fallback
+    /// titles to "New session" / "Child session".
+    pub fn display_label(&self) -> String {
+        static FALLBACK: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"^(New session|Child session) - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$").unwrap());
+        match self.title.as_deref() {
+            None | Some("") => (if self.parent_id.is_some() { "Child session" } else { "New session" }).to_string(),
+            Some(t) => FALLBACK.captures(t).map(|c| c[1].to_string()).unwrap_or_else(|| t.to_string()),
+        }
+    }
+
     /// `withTimestampedFallback`.
     pub fn display_title(&self) -> String {
         match &self.title {

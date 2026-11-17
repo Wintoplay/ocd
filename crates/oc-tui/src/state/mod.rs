@@ -100,12 +100,15 @@ fn append_line<T: Serialize>(path: &Path, item: &T) {
     }
 }
 
-/// Prompt history (`prompt-history.jsonl`).
+/// Prompt history (`prompt-history.jsonl`) and this prompt's place in it. 2.3.0 (#63262): browsing keeps the
+/// live draft, so Down past the newest entry brings it back.
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub path: Option<PathBuf>,
     pub entries: Vec<PromptInfo>,
     pub index: isize,
+    /// The prompt as it was when browsing started (text, mode, pastes, files).
+    pub draft: Option<PromptInfo>,
 }
 
 impl History {
@@ -117,41 +120,50 @@ impl History {
         if !entries.is_empty() {
             write_lines(&path, &entries);
         }
-        History { path: Some(path), entries, index: 0 }
+        History { path: Some(path), entries, index: 0, draft: None }
     }
 
-    /// `move(direction, input)`; `None` when navigation is refused.
-    pub fn step(&mut self, direction: isize, input: &str) -> Option<PromptInfo> {
-        if self.entries.is_empty() {
-            return None;
-        }
+    /// Leave the history: the prompt was replaced or cleared.
+    pub fn reset(&mut self) {
+        self.index = 0;
+        self.draft = None;
+    }
+
+    /// `move(direction, input)`; `None` when navigation is refused. `current` is the live prompt, saved as the
+    /// draft when browsing starts.
+    pub fn step(&mut self, direction: isize, input: &str, current: impl FnOnce() -> PromptInfo) -> Option<PromptInfo> {
         let len = self.entries.len() as isize;
         let at = |i: isize| -> Option<&PromptInfo> {
             let idx = if i >= 0 { i } else { len + i };
             if idx < 0 || idx >= len { None } else { self.entries.get(idx as usize) }
         };
-        let current = at(self.index)?;
-        if current.text != input && !input.is_empty() {
+        let next = self.index + direction;
+        if next < -len || next > 0 {
             return None;
         }
-        let next = self.index + direction;
-        if next.abs() > len || next > 0 {
+        // An edited entry stays put.
+        if self.index < 0 && !input.is_empty() && at(self.index).map(|e| e.text.as_str()) != Some(input) {
             return None;
+        }
+        if self.index == 0 {
+            self.draft = Some(PromptInfo { text: input.to_string(), ..current() });
         }
         self.index = next;
-        if next == 0 {
-            return Some(PromptInfo::empty());
+        if next != 0 {
+            let mut entry = at(next).cloned()?;
+            // `{ ...emptyPrompt(), ...entry }`.
+            entry.skills.get_or_insert_default();
+            return Some(entry);
         }
-        at(next).cloned()
+        self.draft.take()
     }
 
     pub fn append(&mut self, entry: PromptInfo) {
+        self.reset();
         if self.entries.last() == Some(&entry) {
-            self.index = 0;
             return;
         }
         self.entries.push(entry.clone());
-        self.index = 0;
         if self.entries.len() > MAX_HISTORY {
             self.entries = self.entries.split_off(self.entries.len() - MAX_HISTORY);
             if let Some(p) = &self.path {
@@ -440,19 +452,62 @@ mod tests {
     fn history_navigation() {
         let path = tmp("prompt-history.jsonl");
         let mut h = History::load(path.clone());
+        let none = PromptInfo::empty;
         h.append(p("one"));
         h.append(p("two"));
         h.append(p("two"));
         assert_eq!(h.entries.len(), 2);
-        // At index 0 the current entry is the *oldest* ("one"): non-empty different input blocks.
-        assert!(h.step(-1, "typed").is_none());
-        assert_eq!(h.step(-1, "").unwrap().text, "two");
-        assert_eq!(h.step(-1, "two").unwrap().text, "one");
-        assert!(h.step(-1, "one").is_none());
-        assert_eq!(h.step(1, "one").unwrap().text, "two");
-        assert_eq!(h.step(1, "two").unwrap().text, "");
+        // 2.3.0: Up from the live prompt always works and keeps it as the draft.
+        assert_eq!(h.step(-1, "typed", none).unwrap().text, "two");
+        assert_eq!(h.step(-1, "two", none).unwrap().text, "one");
+        assert!(h.step(-1, "one", none).is_none());
+        // An edited entry does not move.
+        assert!(h.step(1, "one edited", none).is_none());
+        assert_eq!(h.step(1, "one", none).unwrap().text, "two");
+        assert_eq!(h.step(1, "two", none).unwrap().text, "typed");
+        assert!(h.step(1, "typed", none).is_none());
         let reloaded = History::load(path);
         assert_eq!(reloaded.entries.len(), 2);
+    }
+
+    /// `history-provider.test.tsx`.
+    #[test]
+    fn history_provider_cases() {
+        let none = PromptInfo::empty;
+        // "down rejects at the newest history item with an empty prompt"
+        let mut h = History::default();
+        h.append(p("previous"));
+        assert!(h.step(1, "", none).is_none());
+        assert_eq!(h.step(-1, "", none).unwrap().text, "previous");
+        assert_eq!(h.step(1, "previous", none).unwrap().text, "");
+        // "shares prompt history across sessions and the home composer"
+        let mut h = History::default();
+        for t in ["a-one", "b-one", "a-two"] {
+            h.append(p(t));
+        }
+        assert_eq!(h.step(-1, "", none).unwrap().text, "a-two");
+        assert_eq!(h.step(-1, "a-two", none).unwrap().text, "b-one");
+        assert_eq!(h.step(-1, "b-one", none).unwrap().text, "a-one");
+        // "reset clears browsing position and live draft, and move returns a deep copy"
+        let mut h = History::default();
+        let pasted = PastedText { text: "a\nb\nc".into(), source: PastedSource { start: 0.0, end: 17.0, text: "[Pasted ~3 lines]".into() } };
+        h.append(PromptInfo { text: "[Pasted ~3 lines] ".into(), pasted: vec![pasted.clone()], ..PromptInfo::default() });
+        let mut recalled = h.step(-1, "unsent draft", none).unwrap();
+        assert_eq!(recalled.text, "[Pasted ~3 lines] ");
+        recalled.pasted[0].source.start = 99.0;
+        recalled.pasted.push(PastedText { text: "extra".into(), source: PastedSource { start: 0.0, end: 5.0, text: "extra".into() } });
+        h.reset();
+        assert!(h.step(1, "", none).is_none());
+        let again = h.step(-1, "fresh draft", none).unwrap();
+        assert_eq!(again.pasted, vec![pasted]);
+        assert_eq!(h.step(1, "[Pasted ~3 lines] ", none).unwrap().text, "fresh draft");
+        // The draft keeps the prompt's mode and pastes, with the text as typed.
+        let mut h = History::default();
+        h.append(p("previous"));
+        let live = || PromptInfo { text: "stale".into(), mode: Some("shell".into()), ..PromptInfo::empty() };
+        h.step(-1, "echo pen", live).unwrap();
+        let back = h.step(1, "previous", none).unwrap();
+        assert_eq!((back.text.as_str(), back.mode.as_deref()), ("echo pen", Some("shell")));
     }
 
     #[test]

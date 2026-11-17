@@ -89,6 +89,8 @@ pub struct Composer {
     pub shell: bool,
     history: PromptHistory,
     draft: RunPrompt,
+    /// The draft's caret while the prompt is not shown (`draftCursor`, 2.3.0 #63260).
+    draft_cursor: usize,
     stash: RunPrompt,
     parts: Vec<PromptPart>,
     marks: Vec<(u32, usize)>,
@@ -179,6 +181,7 @@ impl Composer {
             status_rows: 1,
             width: 1,
             prev_view: "prompt".into(),
+            draft_cursor: 0,
             editing: None,
             placeholder: String::new(),
         }
@@ -427,6 +430,7 @@ impl Composer {
     /// `restore(value, cursor)`.
     pub fn restore(&mut self, value: &RunPrompt, cursor: Option<usize>) {
         self.draft = prompt_copy(value);
+        self.draft_cursor = cursor.unwrap_or(usize::MAX);
         self.shell = value.shell;
         self.hide();
         self.area.set_text(&value.text);
@@ -441,6 +445,7 @@ impl Composer {
         self.clear_parts();
         self.hide();
         self.draft = empty_prompt(self.shell);
+        self.draft_cursor = 0;
         self.sync_rows();
     }
 
@@ -671,6 +676,11 @@ impl Composer {
 
     /// `submitPrompt(next, delivery)`.
     pub fn submit_prompt(&mut self, host: &mut dyn Host, term_width: usize, next: RunPrompt, delivery: Delivery) {
+        // Submitted while the prompt is not shown (from another view).
+        if self.prev_view != "prompt" {
+            self.draft = prompt_copy(&next);
+            self.draft_cursor = usize::MAX;
+        }
         if self.visible() {
             let options = self.options(host, term_width);
             if self.mode != MenuMode::Slash || !options.is_empty() {
@@ -861,12 +871,14 @@ impl Composer {
         }
         if self.prev_view == "prompt" {
             self.sync_draft();
+            self.draft_cursor = self.area.cursor_offset();
         }
         self.hide();
         self.prev_view = kind.to_string();
+        // Back on the prompt, the draft keeps its caret.
         if kind == "prompt" {
             let draft = self.draft.clone();
-            self.restore(&draft, None);
+            self.restore(&draft, Some(self.draft_cursor));
         }
     }
 

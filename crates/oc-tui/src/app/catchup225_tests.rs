@@ -104,6 +104,8 @@ fn event(kind: &str, data: Value) -> Event {
 #[test]
 fn edit_diffs_leave_the_block_background_at_both_edges() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     session(&mut a);
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
     term.draw(|f| a.draw(f)).unwrap();

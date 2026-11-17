@@ -3,6 +3,7 @@
 usage:
   tui_capture.py --bin target/debug/ocd --work DIR --script turns.json [--cols 100] [--rows 30]
                  [--key 2:hello] [--key 3:<CR>] [--snap 5] [--snap 9.5] [--duration 30] [--mini] [--config JSON]
+                 [--seed-session ses_…:TITLE]
 
 Everything runs isolated: DIR/project holds `opencode.json` (provider `mock` → the mock on a free port),
 DIR/state holds XDG_* / HOME / OPENCODE_TEST_HOME (the background service is disabled), and the TUI runs with
@@ -59,6 +60,8 @@ def main():
     ap.add_argument("--mini", action="store_true")
     ap.add_argument("--ready", default=None, help="key and snap times count from when the screen first shows this text")
     ap.add_argument("--config", default=None, help="cli.json (TUI config) as JSON")
+    ap.add_argument("--seed-session", action="append", default=[], metavar="ID:TITLE",
+                    help="create this session (through a `serve` of the same binary and state) before the TUI starts")
     a = ap.parse_args()
 
     work = os.path.abspath(a.work)
@@ -84,6 +87,17 @@ def main():
         os.makedirs(tui, exist_ok=True)
         with open(os.path.join(tui, "cli.json"), "w") as f:
             f.write(a.config)
+    if a.seed_session:
+        from parity.harness import Server  # noqa: E402
+        server = Server(os.path.abspath(a.bin), project, env, "seed")
+        try:
+            for spec in a.seed_session:
+                sid, title = spec.split(":", 1)
+                status, _, body = server.request("POST", "/api/session", {"id": sid, "title": title, "location": {"directory": project}})
+                if status != 200:
+                    raise RuntimeError(f"seeding {sid}: {status} {body}")
+        finally:
+            server.close()
     args = [os.path.abspath(a.bin)] + (["mini"] if a.mini else []) + ["--standalone"]
     # Our own pty (not `script`): every byte is timestamped as it is read.
     master, slave = os.openpty()
@@ -107,6 +121,9 @@ def main():
             if not data:
                 break
             chunks.append((time.time() - t0, data))
+            # Answer cursor position reports (DSR) like a terminal would; nothing else here replies.
+            for _ in range(data.count(b"\x1b[6n")):
+                os.write(master, b"\x1b[1;1R")
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()

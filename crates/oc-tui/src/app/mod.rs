@@ -348,6 +348,8 @@ pub struct App {
     pub subagents_active: bool,
     /// Incremental transcript render cache (see `tcache`).
     pub tcache: tcache::TranscriptCache,
+    /// Sessions looked up because a message links them (each once).
+    pub link_lookups: HashSet<String>,
     /// Bumped whenever the syntax styles are rebuilt (render caches key on it).
     pub style_epoch: u64,
     /// Fixed clock for tests (`now()` returns it when set).
@@ -507,6 +509,7 @@ impl App {
             composer: None,
             subagents_active: true,
             tcache: tcache::TranscriptCache::default(),
+            link_lookups: HashSet::new(),
             style_epoch: 0,
             clock: None,
             diff_cache: Default::default(),
@@ -783,6 +786,7 @@ impl App {
             self.drafts.insert(key, self.editor.info());
         }
         self.editor = Editor::new();
+        self.history.reset();
         self.autocomplete = None;
         self.permission_ui = None;
         self.form_ui = None;
@@ -1552,6 +1556,8 @@ mod usage_tests;
 mod catchup225_tests;
 #[cfg(test)]
 mod catchup227_tests;
+#[cfg(test)]
+mod catchup230_tests;
 #[cfg(test)]
 mod perf;
 #[cfg(test)]

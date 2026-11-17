@@ -31,6 +31,7 @@
 use super::App;
 use crate::api::types::*;
 use crate::ui::text::*;
+use crate::ui::markdown::SessionLinks;
 use crate::ui::transcript::{self, Entry, Node, RCtx, Row};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -121,6 +122,8 @@ struct RowInfo {
 struct CRow {
     row: Row,
     info: RowInfo,
+    /// Session IDs the rendered lines mention, with the label each showed (`None`: plain).
+    links: Vec<(String, Option<String>)>,
     fp: u64,
     key: u64,
     deps: u64,
@@ -179,6 +182,9 @@ pub struct TranscriptCache {
     complete: bool,
     sid: String,
     width: usize,
+    /// Labels of every session ID a rendered row mentions, as of the last sync (`used` in
+    /// `ui/session-link.ts`): a change re-renders only the rows that mention that ID (#63247).
+    links: HashMap<String, Option<String>>,
     /// Background render budget per budgeted sync (default [`RENDER_BUDGET`]; tests set it).
     pub budget: Option<std::time::Duration>,
     pub stats: Stats,
@@ -257,6 +263,28 @@ pub(super) struct Env<'a> {
 static NO_EXPANDED: std::sync::LazyLock<HashMap<String, bool>> = std::sync::LazyLock::new(HashMap::new);
 
 impl App {
+    /// `labelOf` in `ui/session-link.ts`: the label a session ID links with, or `None` to keep it a
+    /// plain ID (the current session, archived sessions, and sessions not loaded).
+    pub fn session_link_label(&self, id: &str) -> Option<String> {
+        if self.session_id() == Some(id) {
+            return None;
+        }
+        self.store.session(id).filter(|s| s.time.archived.is_none()).map(|s| s.display_label())
+    }
+
+    /// Load the sessions that mentioned IDs refer to, once each; a miss marks the session missing.
+    pub(super) fn lookup_session_links<'a>(&mut self, ids: impl IntoIterator<Item = &'a String>) {
+        let wanted: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.store.session(id).is_none() && !self.store.is_missing(id) && !self.store.loaded.contains(&format!("session:{id}")) && !self.link_lookups.contains(*id))
+            .cloned()
+            .collect();
+        for id in wanted {
+            self.link_lookups.insert(id.clone());
+            self.fetch_session(&id);
+        }
+    }
+
     /// Models of the current location, borrowed.
     pub fn models_ref(&self) -> &[ModelInfo] {
         self.loc().and_then(|l| l.models.as_deref()).unwrap_or(&[])
@@ -323,6 +351,7 @@ impl App {
             providers: self.loc().and_then(|l| l.providers.as_deref()).unwrap_or(&[]),
             usage: self.usage_info(),
             models_key: self.models_key(),
+            links: None,
         }
     }
 
@@ -373,7 +402,9 @@ impl App {
         }
         let mut cache = std::mem::take(&mut self.tcache);
         cache.sync(self, sid, width, need);
+        let unlabeled: Vec<String> = cache.links.iter().filter(|(_, l)| l.is_none()).map(|(id, _)| id.clone()).collect();
         self.tcache = cache;
+        self.lookup_session_links(&unlabeled);
     }
 
     /// Finish rendering the current session's transcript (line count and marks become valid).
@@ -528,6 +559,15 @@ impl TranscriptCache {
             let (stats, budget) = (self.stats, self.budget);
             *self = TranscriptCache { style: Some(style), stats, budget, sid: sid.to_string(), width, ..Default::default() };
         }
+        // Session links whose label changed since the last sync.
+        let mut relabeled: HashSet<String> = HashSet::new();
+        for (id, label) in self.links.iter_mut() {
+            let now = app.session_link_label(id);
+            if *label != now {
+                *label = now;
+                relabeled.insert(id.clone());
+            }
+        }
         let all = app.store.messages(sid);
         let pending = app.store.pending.get(sid).map(|p| p.as_slice()).unwrap_or(&[]);
         let queued: HashSet<&str> = pending.iter().filter(|i| i.kind == "user" && i.delivery == "queue").map(|i| i.id.as_str()).collect();
@@ -646,6 +686,15 @@ impl TranscriptCache {
                     first_dirty = first_dirty.min(i);
                 }
             }
+            // Rendered rows showing a session whose label changed (rows rendered in this sync
+            // already show the current one).
+            if !relabeled.is_empty() {
+                for (i, c) in self.rows.iter_mut().enumerate() {
+                    if c.lines.is_some() && c.links.iter().any(|(id, label)| relabeled.contains(id) && cx.label(id) != *label) && cx.relink(c) {
+                        first_dirty = first_dirty.min(i);
+                    }
+                }
+            }
         }
         if first_dirty < self.rows.len() || from.is_some() {
             self.layout_from = Some(self.layout_from.map_or(first_dirty, |l| l.min(first_dirty)));
@@ -691,7 +740,9 @@ impl TranscriptCache {
                     i -= 1;
                     if self.rows[i].lines.is_none() {
                         let row = self.rows[i].row.clone();
-                        self.rows[i].lines = Some(cx.render(&row));
+                        let (lines, links) = cx.render(&row);
+                        self.rows[i].lines = Some(lines);
+                        self.rows[i].links = links;
                         lowest = lowest.min(i);
                     }
                     covered += self.rows[i].span();
@@ -703,13 +754,20 @@ impl TranscriptCache {
                         break;
                     }
                     let row = self.rows[i].row.clone();
-                    self.rows[i].lines = Some(cx.render(&row));
+                    let (lines, links) = cx.render(&row);
+                    self.rows[i].lines = Some(lines);
+                    self.rows[i].links = links;
                     lowest = lowest.min(i);
                 }
                 self.pending.pop();
             }
             if lowest != usize::MAX {
                 self.layout_from = Some(self.layout_from.map_or(lowest, |l| l.min(lowest)));
+            }
+        }
+        for c in &self.rows {
+            for (id, label) in &c.links {
+                self.links.entry(id.clone()).or_insert_with(|| label.clone());
             }
         }
         self.index = index;
@@ -988,11 +1046,32 @@ impl Cx<'_, '_> {
         if user || self.pos(&id).is_some_and(|i| self.vis[i].kind == "assistant" && has_text(&self.vis[i])) { Some((id, user)) } else { None }
     }
 
-    fn render(&mut self, row: &Row) -> Vec<SLine> {
+    fn render(&mut self, row: &Row) -> (Vec<SLine>, Vec<(String, Option<String>)>) {
         self.stats.rendered += 1;
-        let env = self.env.get_or_init(|| self.app.transcript_env(self.sid));
-        let ctx = self.app.transcript_ctx(env, self.vis, self.width, Some(self.index), Some(self.legacy));
-        transcript::render_row(&ctx, row, self.light)
+        let app = self.app;
+        let env = self.env.get_or_init(|| app.transcript_env(self.sid));
+        let label = |id: &str| app.session_link_label(id);
+        let links = SessionLinks::new(&label);
+        let mut ctx = app.transcript_ctx(env, self.vis, self.width, Some(self.index), Some(self.legacy));
+        ctx.links = Some(&links);
+        let lines = transcript::render_row(&ctx, row, self.light);
+        (lines, links.take())
+    }
+
+    fn label(&self, id: &str) -> Option<String> {
+        self.app.session_link_label(id)
+    }
+
+    /// A kept row that shows a session whose label changed: render it again. Returns whether its
+    /// lines changed.
+    fn relink(&mut self, c: &mut CRow) -> bool {
+        let (lines, links) = self.render(&c.row);
+        c.links = links;
+        if c.lines.as_ref() == Some(&lines) {
+            return false;
+        }
+        c.lines = Some(lines);
+        true
     }
 
     /// A row of a rebuilt part of the list: reuse an old row by fingerprint or content key.
@@ -1007,9 +1086,9 @@ impl Cx<'_, '_> {
         }
         let key = self.content_key(&row, &info, deps, time);
         // Rendering is deferred (see `sync`); identical content keeps its lines.
-        let lines = pool.by_key(key).and_then(|c| c.lines);
+        let (lines, links) = pool.by_key(key).map(|c| (c.lines, c.links)).unwrap_or_default();
         let cand = self.candidate(&row);
-        CRow { row, info, fp, key, deps, time, lines, cand, start: 0 }
+        CRow { row, info, links, fp, key, deps, time, lines, cand, start: 0 }
     }
 
     /// A kept row: re-render it when its per-row state or countdown changed. Returns whether its
@@ -1024,13 +1103,10 @@ impl Cx<'_, '_> {
         c.time = time;
         c.fp = self.fingerprint(&c.row, &c.info, deps, time);
         c.key = self.content_key(&c.row, &c.info, deps, time);
-        let Some(old) = &c.lines else { return false };
-        let lines = self.render(&c.row);
-        if lines == *old {
+        if c.lines.is_none() {
             return false;
         }
-        c.lines = Some(lines);
-        true
+        self.relink(c)
     }
 }
 

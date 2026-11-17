@@ -12,20 +12,20 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifi
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
-type Handler = Arc<dyn Fn(&str, &str) -> (u16, Value) + Send + Sync>;
+pub(super) type Handler = Arc<dyn Fn(&str, &str) -> (u16, Value) + Send + Sync>;
 
 #[derive(Clone, Default)]
-struct Log(Arc<Mutex<Vec<(String, String)>>>);
+pub(super) struct Log(Arc<Mutex<Vec<(String, String)>>>);
 
 impl Log {
     /// `METHOD path?query` of every request.
-    fn calls(&self) -> Vec<String> {
+    pub(super) fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().iter().map(|(m, t)| format!("{m} {t}")).collect()
     }
 }
 
 /// A one-request-per-connection HTTP server answering with `route(method, path)`.
-async fn serve(route: Handler, log: Log) -> String {
+pub(super) async fn serve(route: Handler, log: Log) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -63,7 +63,7 @@ async fn serve(route: Handler, log: Log) -> String {
     url
 }
 
-async fn flow(route: Handler) -> (App, tokio::sync::mpsc::UnboundedReceiver<AppMsg>, Log) {
+pub(super) async fn flow(route: Handler) -> (App, tokio::sync::mpsc::UnboundedReceiver<AppMsg>, Log) {
     let log = Log::default();
     let url = serve(route, log.clone()).await;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -73,7 +73,7 @@ async fn flow(route: Handler) -> (App, tokio::sync::mpsc::UnboundedReceiver<AppM
     (a, rx, log)
 }
 
-async fn drive_until(a: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppMsg>, ms: u64, done: impl Fn(&App) -> bool) {
+pub(super) async fn drive_until(a: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppMsg>, ms: u64, done: impl Fn(&App) -> bool) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
     while !done(a) {
         match tokio::time::timeout_at(deadline, rx.recv()).await {

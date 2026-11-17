@@ -930,6 +930,8 @@ pub enum DialogHit {
     Confirm(bool),
     /// A `DialogButtons` button, by index.
     Button(usize),
+    /// A session link in the dialog's text.
+    SessionLink(String),
 }
 
 /// Render the dialog host (backdrop + panel). Returns panel rect, hits and cursor position.
@@ -1118,6 +1120,7 @@ pub fn render(buf: &mut Buffer, area: Rect, d: &mut Dialog, base: &Theme, kb: &K
             Click::Custom(c) if c == "esc" => DialogHit::Close,
             Click::Custom(c) if c.starts_with("opt:") => DialogHit::Option(c[4..].parse().unwrap_or(0)),
             Click::Custom(c) if c.starts_with("act:") => DialogHit::Action(c[4..].to_string()),
+            Click::SessionLink(id) => DialogHit::SessionLink(id),
             _ => continue,
         };
         hits.push((rect, hit));

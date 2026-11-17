@@ -67,10 +67,14 @@ impl App {
     }
 
     /// `copy()`: write the selection to the clipboard; never clears it. A selection over the focused
-    /// prompt copies its pasted texts instead of their `[Pasted ~N lines]` placeholders (`getClipboardText`).
+    /// prompt copies its pasted texts instead of their `[Pasted ~N lines]` placeholders (`getClipboardText`):
+    /// within the prompt's text, by position, the pastes that lie wholly inside it (2.3.0, #63275); a selection
+    /// that also covers something else, by label.
     pub fn copy_selection(&mut self) -> bool {
         let Some(mut text) = self.selection_text() else { return false };
-        if self.selection_in_prompt() {
+        if let Some((a, b)) = self.selection_prompt_range() {
+            text = self.editor.expand_tracked(a, b);
+        } else if self.selection_in_prompt() {
             text = crate::state::expand_pasted_text_placeholders(&text, &self.editor.info().pasted);
         }
         if crate::clipboard::write(&text) {
@@ -79,6 +83,55 @@ impl App {
             self.toast(super::Toast::new("error", "Failed to copy to clipboard"));
         }
         true
+    }
+
+    /// The prompt's text area while it shows text: (left column, top row, wrap width, first layout row shown,
+    /// rows shown), as `prompt_lines` lays it out.
+    fn prompt_text_area(&self) -> Option<(u16, u16, usize, usize, usize)> {
+        let r = self.prompt_rect;
+        if r.width == 0 || r.height == 0 || self.editor.is_empty() {
+            return None;
+        }
+        let padx = if self.size.0 < 44 { 1 } else { 2 };
+        let inner = (r.width as usize).saturating_sub(1 + padx * 2).max(1);
+        let max_h = 6.max(self.size.1 as usize / 3);
+        let rows = self.editor.layout(inner).len();
+        let (crow, _) = self.editor.cursor_pos(inner);
+        let start = (crow + 1).saturating_sub(max_h).min(rows.saturating_sub(1));
+        let shown = rows.saturating_sub(start).min(max_h).min((r.height as usize).saturating_sub(1));
+        Some((r.x + 1 + padx as u16, r.y + 1, inner, start, shown))
+    }
+
+    /// The selection as a byte range of the prompt's text, when it lies wholly within the prompt's text area
+    /// (the textarea's own selection).
+    fn selection_prompt_range(&self) -> Option<(usize, usize)> {
+        let s = self.selection.as_ref().filter(|s| s.dragged)?;
+        if !self.dialogs.is_empty() || self.right_focus {
+            return None;
+        }
+        let (x0, y0, inner, start, shown) = self.prompt_text_area()?;
+        let ((sx, sy), (ex, ey)) = s.range();
+        let inside = |x: u16, y: u16| x >= x0 && (x as usize) < x0 as usize + inner && y >= y0 && ((y - y0) as usize) < shown;
+        if !inside(sx, sy) || !inside(ex, ey) {
+            return None;
+        }
+        let layout = self.editor.layout(inner);
+        // Byte offset of a cell: the start of the grapheme it shows, or past it for the selection's inclusive end.
+        let offset = |x: u16, y: u16, end: bool| -> usize {
+            let (ls, le) = layout[start + (y - y0) as usize];
+            let col = (x - x0) as usize;
+            let mut at = 0;
+            for (i, g) in unicode_segmentation::UnicodeSegmentation::grapheme_indices(&self.editor.text[ls..le], true) {
+                let w = crate::util::locale::width(g);
+                if col < at + w.max(1) {
+                    return ls + if end { i + g.len() } else { i };
+                }
+                at += w;
+            }
+            le
+        };
+        let (a, b) = (offset(sx, sy, false), offset(ex, ey, true));
+        (a < b).then_some((a, b))
     }
 
     /// The selection covers the prompt, and the prompt has the focus.

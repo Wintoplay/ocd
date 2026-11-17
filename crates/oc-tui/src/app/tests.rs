@@ -169,6 +169,8 @@ fn home_tiny_go_logo() {
 #[test]
 fn session_transcript_narrow() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     session(&mut a);
     let lines = render(&mut a, 80, 60);
     let joined = lines.join("\n");
@@ -194,6 +196,8 @@ fn session_transcript_narrow() {
 #[test]
 fn session_wide_with_sidebar_and_split_diff() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     session(&mut a);
     let lines = render(&mut a, 170, 70);
     let joined = lines.join("\n");
@@ -210,6 +214,8 @@ fn session_wide_with_sidebar_and_split_diff() {
 #[test]
 fn thinking_show_mode_and_verbosity_low() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     session(&mut a);
     a.config.set("session.thinking", Some(json!("show")));
     let lines = render(&mut a, 80, 60);
@@ -970,6 +976,8 @@ fn busy_status_line_wide_and_narrow() {
 #[test]
 fn busy_status_replaces_the_live_thinking_row() {
     let mut a = app();
+    // These rows show at medium verbosity (the default is low since 2.3.0).
+    a.config.set("session.verbosity", Some(json!("medium")));
     let sid = busy_fixture(&mut a);
     a.on_event(busy_ev("session.step.started", json!({"sessionID": sid, "assistantMessageID": "msg_9", "agent": "build", "model": {"id":"claude-sonnet","providerID":"anthropic"}, "started": 80000})));
     a.on_event(busy_ev("session.reasoning.started", json!({"sessionID": sid, "assistantMessageID": "msg_9", "ordinal": 0})));

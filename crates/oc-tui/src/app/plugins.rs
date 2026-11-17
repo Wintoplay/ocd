@@ -443,6 +443,7 @@ impl App {
                 self.navigate(Route::Home);
                 let mut p = crate::state::PromptInfo::empty();
                 p.text = prompt;
+                self.history.reset();
                 self.editor.set(&p);
                 self.dirty = true;
             }

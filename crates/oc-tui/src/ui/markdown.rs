@@ -2,10 +2,12 @@
 //! `conceal` hides inline markers (`**`, backticks, `#`) as in `session.markdown = "rendered"`.
 
 use super::highlight::{highlight, token_style};
-use super::text::{SLine, Seg, Wrap, wrap};
+use super::text::{Click, SLine, Seg, Wrap, wrap};
 use crate::theme::{SyntaxStyle, Theme};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use crate::util::session_mention::{parse_session_mention, session_mentions};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
 use ratatui::style::{Modifier, Style};
+use std::cell::RefCell;
 
 pub struct MdOpts<'a> {
     pub theme: &'a Theme,
@@ -15,6 +17,38 @@ pub struct MdOpts<'a> {
     pub fg: crate::theme::Rgba,
     /// Force every style's fg to `fg` (thinking blocks).
     pub mono: bool,
+    /// Show session IDs as links (`useSessionLinks`).
+    pub links: Option<&'a SessionLinks<'a>>,
+}
+
+/// `useSessionLinks` (`ui/session-link.ts`): session IDs in prose show as links titled after their
+/// sessions (`@<label>` when markers are concealed, the ID itself otherwise) and open them on click.
+/// `label` answers `None` for IDs that stay plain (the current session, archived sessions and ones
+/// that are not loaded). Every ID a render mentions is recorded with the label it got, so a cache
+/// can re-render only what mentions a session whose label changed.
+pub struct SessionLinks<'a> {
+    label: &'a dyn Fn(&str) -> Option<String>,
+    used: RefCell<Vec<(String, Option<String>)>>,
+}
+
+impl<'a> SessionLinks<'a> {
+    pub fn new(label: &'a dyn Fn(&str) -> Option<String>) -> Self {
+        SessionLinks { label, used: RefCell::new(Vec::new()) }
+    }
+
+    pub fn label(&self, id: &str) -> Option<String> {
+        let label = (self.label)(id);
+        let mut used = self.used.borrow_mut();
+        if !used.iter().any(|(u, _)| u == id) {
+            used.push((id.to_string(), label.clone()));
+        }
+        label
+    }
+
+    /// The IDs mentioned so far, each with the label it showed (`None`: plain), in first-seen order.
+    pub fn take(&self) -> Vec<(String, Option<String>)> {
+        std::mem::take(&mut *self.used.borrow_mut())
+    }
 }
 
 struct Ctx<'a> {
@@ -53,6 +87,40 @@ impl<'a> Ctx<'a> {
             return;
         }
         self.inline.push(Seg::new(text.to_string(), style));
+    }
+    /// Prose text: session IDs become links (`linkChunks`). Tables are not prose blocks.
+    fn push_prose(&mut self, text: &str, style: Style) {
+        let Some(links) = self.o.links.filter(|_| self.table.is_none()) else {
+            return self.push_text(text, style);
+        };
+        let mut at = 0;
+        for m in session_mentions(text) {
+            if m.start > at {
+                self.push_text(&text[at..m.start], style);
+            }
+            let raw = &text[m.start..m.end];
+            match links.label(&m.id) {
+                Some(label) => {
+                    let shown = if self.o.conceal { format!("@{label}") } else { raw.to_string() };
+                    let link = self.link_style(style);
+                    self.inline.push(Seg::new(shown, link).on_click(Click::SessionLink(m.id)));
+                }
+                None => self.push_text(raw, style),
+            }
+            at = m.end;
+        }
+        if at < text.len() {
+            self.push_text(&text[at..], style);
+        }
+    }
+    /// The chunk restyled as `markup.link.url`: its foreground and attributes, underlined.
+    fn link_style(&self, style: Style) -> Style {
+        let url = token_style(self.o.syntax.get("markup.link.url"));
+        let mut s = style;
+        s.fg = url.fg.or(style.fg);
+        s.add_modifier = url.add_modifier | Modifier::UNDERLINED;
+        s.sub_modifier = Modifier::empty();
+        s
     }
     fn flush(&mut self) {
         if self.inline.is_empty() && self.pending_item.is_none() {
@@ -126,7 +194,8 @@ pub fn render(text: &str, width: usize, o: &MdOpts) -> Vec<SLine> {
         pending_item: None,
     };
     let md = &o.theme.markdown;
-    let parser = Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS);
+    // Adjacent text events are one run, as OpenTUI's chunks are: a session ID or URL is not split at `_`.
+    let parser = TextMergeStream::new(Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS));
     for ev in parser {
         match ev {
             Event::Start(tag) => match tag {
@@ -359,13 +428,13 @@ pub fn render(text: &str, width: usize, o: &MdOpts) -> Vec<SLine> {
                         let mut at = 0;
                         for (a, b) in bare_urls(&t) {
                             if a > at {
-                                c.push_text(&t[at..a], s);
+                                c.push_prose(&t[at..a], s);
                             }
                             c.push_text(&t[a..b], bare);
                             at = b;
                         }
                         if at < t.len() {
-                            c.push_text(&t[at..], s);
+                            c.push_prose(&t[at..], s);
                         }
                     }
                 }
@@ -375,7 +444,13 @@ pub fn render(text: &str, width: usize, o: &MdOpts) -> Vec<SLine> {
                 if !o.conceal {
                     c.push_text("`", style);
                 }
-                c.push_text(&t, style);
+                // A code span links only when it is exactly a session ID, so a command such as
+                // `opencode --session ses_…` stays copyable.
+                if c.link.is_none() && parse_session_mention(&t).is_some() {
+                    c.push_prose(&t, style);
+                } else {
+                    c.push_text(&t, style);
+                }
                 if !o.conceal {
                     c.push_text("`", style);
                 }
@@ -483,8 +558,68 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(OPENCODE_V2).unwrap();
         let t = resolve::resolve_document(&doc, Mode::Dark).unwrap();
         let st = SyntaxStyle::from_theme(&t);
-        let o = MdOpts { theme: &t, syntax: &st, conceal, fg: t.markdown.text, mono: false };
+        let o = MdOpts { theme: &t, syntax: &st, conceal, fg: t.markdown.text, mono: false, links: None };
         render(text, 40, &o).into_iter().map(|l| l.text()).collect()
+    }
+
+    const KNOWN: &str = "ses_knownknownknownknownknownk";
+    const OTHER: &str = "ses_otherotherotherotherothero";
+
+    type Linked = (Vec<String>, Vec<(String, Click)>, Vec<(String, Option<String>)>);
+
+    /// Renders with links for `KNOWN` (titled) only: (rows, linked texts with their targets, mentioned IDs).
+    fn linked(text: &str, conceal: bool, width: usize) -> Linked {
+        let doc: serde_json::Value = serde_json::from_str(OPENCODE_V2).unwrap();
+        let t = resolve::resolve_document(&doc, Mode::Dark).unwrap();
+        let st = SyntaxStyle::from_theme(&t);
+        let label = |id: &str| (id == KNOWN).then(|| "Fix the flaky reconnect test on Windows".to_string());
+        let links = SessionLinks::new(&label);
+        let o = MdOpts { theme: &t, syntax: &st, conceal, fg: t.markdown.text, mono: false, links: Some(&links) };
+        let out = render(text, width, &o);
+        let found = out.iter().flat_map(|l| l.segs.iter()).filter_map(|s| s.link.as_ref().map(|c| (s.text.clone(), (**c).clone()))).collect();
+        for s in out.iter().flat_map(|l| l.segs.iter()).filter(|s| s.link.is_some()) {
+            assert!(s.style.add_modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(s.style.fg, Some(t.markdown.link.tui()));
+        }
+        (out.iter().map(|l| l.text()).collect(), found, links.take())
+    }
+
+    /// `session-link.test.tsx` "session links in … markdown": only loaded sessions link; a long
+    /// title wraps and both rows open it; fenced code stays plain.
+    #[test]
+    fn session_ids_link_in_prose() {
+        let text = format!("**中文** see {KNOWN} now\n\n- other {OTHER}\n\n```\n{KNOWN}\n```");
+        let (rows, found, used) = linked(&text, true, 30);
+        let link = Click::SessionLink(KNOWN.into());
+        assert_eq!(found, vec![("@Fix the flaky".to_string(), link.clone()), ("reconnect test on Windows".to_string(), link)]);
+        assert_eq!(rows[0], "中文 see @Fix the flaky");
+        assert_eq!(rows[1], "reconnect test on Windows now");
+        assert!(rows.iter().any(|r| r.starts_with("- other ses_other")), "{rows:?}");
+        assert_eq!(rows.last().unwrap(), KNOWN);
+        assert_eq!(used, vec![(KNOWN.to_string(), Some("Fix the flaky reconnect test on Windows".to_string())), (OTHER.to_string(), None)]);
+        // Source mode keeps the ID text, still a link; `@session:` mentions link too.
+        let (rows, found, _) = linked(&format!("see @session:{KNOWN} now"), false, 80);
+        assert_eq!(rows, [format!("see @session:{KNOWN} now")]);
+        assert_eq!(found, vec![(format!("@session:{KNOWN}"), Click::SessionLink(KNOWN.into()))]);
+    }
+
+    /// "code spans link only when they are exactly an ID".
+    #[test]
+    fn code_spans_link_only_when_exactly_an_id() {
+        let text = format!("Run `opencode --session {KNOWN}` or open `{KNOWN}`.");
+        let (rows, found, _) = linked(&text, true, 200);
+        assert_eq!(found.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["@Fix the flaky reconnect test on Windows"]);
+        assert!(rows[0].contains(&format!("opencode --session {KNOWN}")));
+        let (rows, found, _) = linked(&text, false, 200);
+        assert_eq!(found.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), [KNOWN]);
+        assert!(rows[0].contains(&format!("`opencode --session {KNOWN}`")));
+    }
+
+    #[test]
+    fn urls_and_markdown_links_keep_their_ids() {
+        let text = format!("https://host/{KNOWN} and [x](https://h/{KNOWN}) and [{KNOWN}](https://h)");
+        let (_, found, used) = linked(&text, true, 200);
+        assert!(found.is_empty() && used.is_empty(), "{found:?}");
     }
 
     #[test]

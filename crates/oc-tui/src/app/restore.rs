@@ -77,6 +77,7 @@ impl App {
     pub fn append_to_session_prompt(&mut self, sid: &str, prompt: &PromptInfo) -> bool {
         if self.session_id() == Some(sid) {
             let next = append_prompt(&self.editor.info(), prompt);
+            self.history.reset();
             self.editor.set(&next);
             self.editor.shell = false;
             self.dirty = true;

@@ -94,3 +94,19 @@ fn typing_filters_locally_while_the_search_waits() {
     assert!(joined.contains("Another here") && !joined.contains("│  Here"), "{joined}");
     assert!(!joined.lines().any(|l| l.trim() == "Here"), "{joined}");
 }
+
+/// 2.3.0 (`focusCurrent={false}`): the list opens at the top, not on the current session.
+#[test]
+fn the_list_opens_at_the_top() {
+    let mut a = setup();
+    add(&mut a, "ses_c", "Newest", "prj_1", "/work/proj", 5000);
+    add(&mut a, "ses_d", "Oldest", "prj_1", "/work/proj", 1000);
+    a.route = Route::Session("ses_d".into());
+    a.open_session_list();
+    a.session_search.loading = false;
+    a.refresh_session_list();
+    let sel = a.dialogs.last_mut().and_then(|d| d.sel()).unwrap();
+    let first = sel.visible()[0];
+    assert_eq!(sel.options[first].value, "ses_c", "{:?}", sel.options.iter().map(|o| &o.title).collect::<Vec<_>>());
+    assert_eq!(sel.selected_value().as_deref(), Some("ses_c"));
+}

@@ -412,6 +412,12 @@ pub struct TokenStyle {
     pub underline: bool,
 }
 
+/// The paste chip's text (2.3.0): the page color, dark in dark mode and light in light mode. A transparent page
+/// (the system theme) falls back to the selected-row text.
+pub fn paste_fg(t: &Theme) -> Rgba {
+    if t.background.base.a == 255 { t.background.base } else { t.text.action.primary.focused }
+}
+
 /// `generateSyntax` (`theme/src/tui/syntax.ts`).
 pub struct SyntaxStyle {
     rules: HashMap<String, TokenStyle>,
@@ -435,7 +441,7 @@ impl SyntaxStyle {
         rule(&["extmark.agent"], t.categorical(0, 200), true, false, false, None);
         let skill = if t.categorical.len() > 1 { t.categorical(1, 200) } else { t.categorical(0, 200) };
         rule(&["extmark.skill"], skill, true, false, false, None);
-        rule(&["extmark.paste"], t.text.action.primary.focused, true, false, false, Some(fb.warning.base));
+        rule(&["extmark.paste"], paste_fg(t), true, false, false, Some(fb.warning.base));
         rule(&["comment", "comment.documentation"], s.comment, false, true, false, None);
         rule(&["string", "symbol", "character.special", "character"], s.string, false, false, false, None);
         rule(&["number", "boolean", "constant", "float"], s.number, false, false, false, None);
@@ -637,6 +643,28 @@ mod tests {
         m.set_system_palette(Some(colors));
         assert_eq!(m.current.background.base.a, 0);
         assert_eq!(m.current.text.base.hex(), "#dddddd");
+    }
+
+    /// `resolve.test.ts` "draws paste chip text dark in dark mode and light in light mode".
+    #[test]
+    fn paste_chip_text_follows_the_mode() {
+        let luminance = |c: Rgba| 0.299 * c.r as f64 + 0.587 * c.g as f64 + 0.114 * c.b as f64;
+        let mut m = ThemeManager::new(None, Mode::Dark, None);
+        for name in ["opencode", "tokyonight", "github"] {
+            for mode in m.modes_of(name) {
+                let doc = m.document(name).unwrap();
+                let t = resolve::resolve_document(&doc, mode).unwrap();
+                let style = SyntaxStyle::from_theme(&t).get("extmark.paste");
+                assert_eq!(style.bg, Some(t.text.feedback.warning.base), "{name} {mode:?}");
+                assert!(style.bold);
+                let (fg, bg) = (luminance(style.fg.unwrap()), luminance(style.bg.unwrap()));
+                if mode == Mode::Dark { assert!(fg < bg, "{name} dark") } else { assert!(fg > bg, "{name} light") }
+            }
+        }
+        // A transparent page keeps the selected-row text.
+        let mut t = opencode(Mode::Dark);
+        t.background.base.a = 0;
+        assert_eq!(SyntaxStyle::from_theme(&t).get("extmark.paste").fg, Some(t.text.action.primary.focused));
     }
 
     #[test]

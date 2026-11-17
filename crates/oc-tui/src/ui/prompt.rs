@@ -474,6 +474,20 @@ impl Editor {
             .collect()
     }
 
+    /// `expandTrackedPastedText` over the text in `a..b` (bytes): each pasted chip lying wholly inside
+    /// the range shows its pasted text, found by position, so identical placeholders keep their own.
+    pub fn expand_tracked(&self, a: usize, b: usize) -> String {
+        let mut out = self.text[a..b].to_string();
+        let mut chips: Vec<&Chip> = self.chips.iter().filter(|c| c.kind == ChipKind::Paste && c.start >= a && c.end <= b).collect();
+        chips.sort_by_key(|c| std::cmp::Reverse(c.start));
+        for c in chips {
+            if let Some(t) = c.data.get("text").and_then(|t| t.as_str()) {
+                out.replace_range(c.start - a..c.end - a, t);
+            }
+        }
+        out
+    }
+
     /// Text with pasted chips expanded (`inputText`).
     pub fn input_text(&self) -> String {
         let mut out = self.text.clone();

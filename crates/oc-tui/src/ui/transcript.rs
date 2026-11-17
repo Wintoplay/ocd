@@ -390,6 +390,8 @@ pub struct RCtx<'a> {
     pub usage: Option<&'a crate::util::usage_limits::Info>,
     /// First shortcut of `model.list`, or `/models` (the usage-limit notices' key).
     pub models_key: String,
+    /// Session links in assistant text and compaction summaries.
+    pub links: Option<&'a crate::ui::markdown::SessionLinks<'a>>,
 }
 
 impl RCtx<'_> {
@@ -1215,6 +1217,8 @@ fn md_lines(ctx: &RCtx, text: &str, width: usize, mono: bool) -> Vec<SLine> {
         conceal: ctx.conceal(),
         fg: if mono { ctx.t().text.muted } else { ctx.t().markdown.text },
         mono,
+        // Assistant text and compaction summaries (`useSessionLinks`); thinking stays plain.
+        links: if mono { None } else { ctx.links },
     };
     markdown::render(text, width, &o)
 }
