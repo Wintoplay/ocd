@@ -7,6 +7,9 @@ description = "ocd — the opencode-compatible command line interface (port of p
 
 [dependencies]
 oc-util = { path = "../oc-util" }
+# The global allocator: faster than the system one here and keeps less memory (with the default set in
+# .cargo/config.toml).
+mimalloc = { version = "0.1", default-features = false }
 oc-schema = { path = "../oc-schema" }
 oc-storage = { path = "../oc-storage" }
 oc-ai = { path = "../oc-ai" }

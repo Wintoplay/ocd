@@ -22,6 +22,9 @@ mod web_ui;
 
 use cli::Outcome;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The ocd build, e.g. `1.2.0+abc1234` (release tag and commit): `OCD_BUILD_VERSION`, set by the release
 /// workflow or worked out from `git describe` by build.rs. Only `--version` and the log show it; everything
 /// opencode-compatible (user agent, plugins, service registration) keeps `oc_util::version::VERSION`.

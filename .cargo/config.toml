@@ -1,0 +1,5 @@
+[env]
+# mimalloc (crates/ocd's global allocator) commits arena memory on demand instead of eagerly, so pages freed
+# after a burst go back to the system: lower peak and idle memory, and faster runs (measured in README's setup).
+# It only adds a define to C code built with the cc crate; a CFLAGS already set in the environment wins.
+CFLAGS = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0"
