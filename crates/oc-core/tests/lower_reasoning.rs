@@ -1,5 +1,5 @@
-//! session-runner-message.test.ts (opencode 2.2.5, #60498): errored or interrupted reasoning is dropped rather
-//! than lowered to text, and readable reasoning after a model switch stays reasoning.
+//! session-runner-message.test.ts (opencode 2.2.5, #60498; cut rules from 2.3.0 #60674): errored or interrupted
+//! reasoning is dropped rather than lowered to text, and readable reasoning after a model switch stays reasoning.
 
 use oc_ai::types::{ContentPart, Role};
 use oc_core::lower::to_llm_messages;
@@ -26,6 +26,13 @@ fn assistant(content: Value, error: Option<Value>) -> SessionMessage {
     serde_json::from_value(m).expect("assistant")
 }
 
+/// A finished (`finish: "stop"`) assistant message, which is not cut on replay.
+fn finished(content: Value) -> SessionMessage {
+    let SessionMessage::Assistant(mut a) = assistant(content, None) else { unreachable!() };
+    a.finish = Some(oc_schema::types::FinishReason::Stop);
+    SessionMessage::Assistant(a)
+}
+
 fn reasoning(text: &str, completed: bool) -> Value {
     let mut r = json!({"type": "reasoning", "text": text, "native": {"signature": "sig"}, "time": {"created": 1}});
     if completed {
@@ -34,15 +41,15 @@ fn reasoning(text: &str, completed: bool) -> Value {
     r
 }
 
+// 2.3.0 (#60674): a failed stream is replayed only up to its last local call that ran, so one without such a call
+// replays nothing (it used to replay its text without the reasoning). See tests/replay_cut.rs.
 #[test]
-fn drops_failed_assistant_reasoning() {
+fn drops_a_failed_assistant_message_without_a_call_that_ran() {
     let msg = assistant(
         json!([reasoning("Partial thought", true), {"type": "text", "text": "Answer"}]),
         Some(json!({"type": "unknown", "message": "boom"})),
     );
-    let out = to_llm_messages(&[msg], &model("anthropic", "claude"), Some("anthropic"));
-    assert_eq!(out.len(), 1);
-    assert!(matches!(&out[0].content[..], [ContentPart::Text(t)] if t.text == "Answer"), "{:?}", out[0].content);
+    assert!(to_llm_messages(&[msg], &model("anthropic", "claude"), Some("anthropic")).is_empty());
 }
 
 #[test]
@@ -53,7 +60,7 @@ fn omits_unfinished_reasoning_from_an_interrupted_assistant_message() {
 
 #[test]
 fn keeps_readable_reasoning_after_a_model_switch_without_metadata() {
-    let msg = assistant(json!([reasoning("Thought", true), {"type": "text", "text": "Answer"}]), None);
+    let msg = finished(json!([reasoning("Thought", true), {"type": "text", "text": "Answer"}]));
     let out = to_llm_messages(&[msg], &model("openai", "gpt-5"), Some("openai"));
     assert_eq!(out[0].role, Role::Assistant);
     match &out[0].content[0] {
@@ -64,7 +71,7 @@ fn keeps_readable_reasoning_after_a_model_switch_without_metadata() {
         other => panic!("{other:?}"),
     }
     // The same model replays it with its provider metadata.
-    let msg = assistant(json!([reasoning("Thought", true)]), None);
+    let msg = finished(json!([reasoning("Thought", true)]));
     let out = to_llm_messages(&[msg], &model("anthropic", "claude"), Some("anthropic"));
     match &out[0].content[0] {
         ContentPart::Reasoning(r) => assert!(r.provider_metadata.is_some()),

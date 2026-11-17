@@ -161,6 +161,88 @@ impl ToolConfig {
 
 pub type ProgressFn = Arc<dyn Fn(Metadata) + Send + Sync>;
 
+/// A tool call's cooperative stop (`Tool.Context.cancel`, 2.3.0): completes when the user asks the call to stop.
+///
+/// A tool that listens for it ([`Stop::listen`]) can stop its work and fail with what it has; the step then lets it
+/// settle its own call. A tool that is not listening when the user stops the step is interrupted instead (its
+/// [`ToolContext::cancel`] token), as is every tool on any other interruption. `Stop::none()` (`cancel` undefined)
+/// never fires: nested Code Mode calls and calls outside a session step get it.
+#[derive(Clone, Default)]
+pub struct Stop(Option<Arc<StopInner>>);
+
+#[derive(Default)]
+struct StopInner {
+    /// Listeners and whether the stop was triggered, changed together so a trigger sees every listener.
+    state: parking_lot::Mutex<(usize, bool)>,
+    gate: CancellationToken,
+}
+
+impl Stop {
+    /// A stop the step can trigger.
+    pub fn new() -> Self {
+        Stop(Some(Arc::new(StopInner::default())))
+    }
+
+    /// No stop (`cancel: undefined`).
+    pub fn none() -> Self {
+        Stop(None)
+    }
+
+    /// Whether the call has a stop to listen for (`context.cancel !== undefined`).
+    pub fn is_available(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Starts listening (awaiting `cancel`): until the listener is dropped, a trigger lets this tool stop on its own.
+    pub fn listen(&self) -> Option<StopListener> {
+        let inner = self.0.as_ref()?;
+        let mut state = inner.state.lock();
+        // Awaiting an already completed `cancel` returns at once without counting as a listener.
+        let counted = !state.1;
+        if counted {
+            state.0 += 1;
+        }
+        Some(StopListener { inner: inner.clone(), counted })
+    }
+
+    /// Completes `cancel`, and reports whether a tool was awaiting it, so would stop on its own; a tool that was not
+    /// is interrupted instead.
+    pub fn trigger(&self) -> bool {
+        let Some(inner) = &self.0 else { return false };
+        let mut state = inner.state.lock();
+        state.1 = true;
+        if state.0 == 0 {
+            return false;
+        }
+        inner.gate.cancel();
+        true
+    }
+}
+
+/// A tool awaiting its call's [`Stop`].
+pub struct StopListener {
+    inner: Arc<StopInner>,
+    counted: bool,
+}
+
+impl StopListener {
+    /// Resolves once the user asked the call to stop.
+    pub async fn stopped(&self) {
+        if !self.counted {
+            return;
+        }
+        self.inner.gate.cancelled().await
+    }
+}
+
+impl Drop for StopListener {
+    fn drop(&mut self) {
+        if self.counted {
+            self.inner.state.lock().0 -= 1;
+        }
+    }
+}
+
 /// Per-call execution context.
 #[derive(Clone)]
 pub struct ToolContext {
@@ -177,7 +259,10 @@ pub struct ToolContext {
     /// Location workspace id (shell env: none when a workspace is set).
     pub workspace_id: Option<String>,
     pub global: Arc<oc_util::Global>,
+    /// Interrupts the call (a fiber interrupt upstream): the tool drops its work.
     pub cancel: CancellationToken,
+    /// The user's cooperative stop (`Tool.Context.cancel`); see [`Stop`].
+    pub stop: Stop,
     /// Publishes `session.tool.progress` metadata.
     pub progress: ProgressFn,
     pub config: Arc<ToolConfig>,

@@ -72,6 +72,9 @@ pub struct CompletedTime {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct AssistantTime {
     pub created: u64,
+    /// When the provider streamed the first output token (2.3.0).
+    #[serde(rename = "firstToken", skip_serializing_if = "Option::is_none")]
+    pub first_token: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub streamed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

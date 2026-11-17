@@ -179,7 +179,8 @@ def loop_stream_cut(ctx):
 @scenario("loop", hold_for_title=0)
 def loop_error_after_text(ctx):
     """text, then a failing finish reason (`network_error`) read in the same chunk: the text is kept, the step fails and
-    the run continues with the "interrupted, continue" notice; then an unknown finish reason the same way."""
+    the run retries into a fresh message (2.3.0: no "interrupted, continue" notice; the failed message is replayed
+    cut at its last local call that ran, so here not at all); then an unknown finish reason the same way."""
     ctx.set_script([
         {"text": ["Partial ", "answer"], "finish": "network_error", "coalesce": True},
         {"text": "Recovered."},

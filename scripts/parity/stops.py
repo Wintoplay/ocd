@@ -187,3 +187,60 @@ def stop_background_shell(ctx):
     ctx.rec("llm.request.count", len(ctx.mock.main_requests()))
     time.sleep(1)
     _close(ctx, sid)
+
+
+def _interrupt_running_shell(ctx, sid, reason_wait=1.0):
+    """Starts `command` through the shell tool, waits until its call reports the shell, then stops the session."""
+    mark = len(ctx.server.events)
+    ctx.prompt(sid, "run it", wait=False)
+    ctx.wait_for("session.tool.progress", timeout=30, start=mark,
+                 pred=lambda e: (e.get("data", {}).get("metadata") or {}).get("shellID") is not None)
+    time.sleep(reason_wait)  # let the command print
+    ctx.call("interrupt", "POST", f"/api/session/{sid}/interrupt")
+    ctx.wait_idle(sid, start=mark)
+
+
+@scenario("stop", hold_for_title=0, timeout=300)
+def stop_shell_keeps_output(ctx):
+    """2.3.0 (#62977): stopping a running shell call keeps the command's output. The call fails with the output so far,
+    the output file and the shell ID; the command stays listed as killed with its file; the next request replays the
+    failed call with that text. A command that wrote nothing says so once."""
+    sid = _open(ctx, [
+        {"tools": [{"name": "shell", "args": {"command": "printf 'first\\nsecond\\n'; sleep 60"}, "id": "call_kept"}]},
+        {"text": "Stopped."},
+        {"tools": [{"name": "shell", "args": {"command": "sleep 60"}, "id": "call_silent"}]},
+        {"text": "Stopped again."},
+    ])
+    _interrupt_running_shell(ctx, sid)
+    ctx.prompt(sid, "what happened?")
+    _interrupt_running_shell(ctx, sid)
+    ctx.prompt(sid, "and now?")
+    # The stopped commands stay observable with their status and file until retention evicts them.
+    _, messages = ctx.call("messages.raw", "GET", f"/api/session/{sid}/message", record=False)
+    ids = []
+    for message in (messages or {}).get("data") or []:
+        for item in message.get("content") or []:
+            shell = ((item.get("state") or {}).get("metadata") or {}).get("shellID")
+            if item.get("type") == "tool" and shell:
+                ids.append(shell)
+    for n, shell in enumerate(sorted(ids)):
+        ctx.call(f"shell.{n}", "GET", f"/api/shell/{shell}")
+    ctx.call("shell.list", "GET", "/api/shell")
+    _close(ctx, sid)
+
+
+@scenario("stop", hold_for_title=0, timeout=300)
+def stop_first_token(ctx):
+    """2.3.0 (#63321): `session.step.first-token` is recorded once per step when the provider streams the first output
+    token (text, reasoning or a tool call), sets `time.firstToken`, and a retried step clears and records it again."""
+    sid = _open(ctx, [
+        {"reasoning": ["Thinking ", "it over"], "text": "Answer.", "delay": 0.3},
+        {"tools": [{"name": "read", "args": {"path": "$PROJECT/README.md"}}]},
+        {"text": "Read it."},
+        {"status": 429, "body": {"error": {"message": "slow down", "type": "rate_limit"}}, "headers": {"retry-after": "1"}},
+        {"text": "After the retry."},
+    ], files={"README.md": "hello\n"})
+    ctx.prompt(sid, "think first")
+    ctx.prompt(sid, "read the readme")
+    ctx.prompt(sid, "try again", timeout=60)
+    _close(ctx, sid)

@@ -104,6 +104,29 @@ pub(super) fn session(app: &mut App) -> String {
     id
 }
 
+// app-lifecycle.test.tsx (2.3.0, #63321): the footer measures tokens/s from the first streamed token and shows the
+// time to first token after it.
+#[test]
+fn footer_shows_time_to_first_token() {
+    let mut a = app();
+    let id = session(&mut a);
+    let msgs: Vec<Message> = serde_json::from_value(json!([
+        {"id":"msg_0002","type":"user","text":"Current input","time":{"created":1000}},
+        {"id":"msg_0003","type":"assistant","agent":"build","model":{"id":"claude-sonnet","providerID":"anthropic"},
+         "time":{"created":2000,"firstToken":2500,"streamed":3000,"completed":5000},"finish":"stop",
+         "tokens":{"input":0,"output":20,"reasoning":0,"cache":{"read":0,"write":0}},
+         "content":[{"type":"text","text":"Original answer"}]}
+    ]))
+    .unwrap();
+    a.store.messages.insert(id, msgs);
+    let lines = render(&mut a, 100, 30);
+    let joined = lines.join("\n");
+    assert!(contains(&lines, "4.0s · 40.0 tok/s · 500ms ttft"), "{joined}");
+    // Below 36 columns the time to first token is left out, like the duration.
+    let lines = render(&mut a, 35, 30);
+    assert!(!lines.join("\n").contains("ttft"));
+}
+
 #[test]
 fn home_wide_logo_and_prompt() {
     let mut a = app();

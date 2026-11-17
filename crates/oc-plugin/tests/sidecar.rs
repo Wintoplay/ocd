@@ -279,6 +279,75 @@ async fn promise_plugin_tool_command_and_hook() {
     s.host.shutdown().await;
 }
 
+// promise-tool-cancel.test.ts (2.3.0, #63127): a Promise tool that reads its `signal` tells the core it listens for
+// the user's stop (`tool.listen`), and `tool.stop` aborts the signal; whatever it then returns or throws is the call's
+// result. A tool that never reads it never listens, so the core interrupts it instead.
+#[tokio::test]
+async fn promise_tools_stop_through_their_signal() {
+    require_bun!();
+    let s = setup();
+    s.host.load(request(&s, vec![add(fixture("stoppable-plugin"), json!({}))])).await;
+    let tools = s.host.transform(&s.location, "tool", json!({ "tools": [], "namespaces": [] })).await.unwrap();
+    let handle = |name: &str| {
+        let tool = tools["tools"].as_array().unwrap().iter().find(|t| t["id"] == name).unwrap();
+        oc_plugin::protocol::function_handle(&tool["execute"]).unwrap().to_string()
+    };
+    let run = |name: &str, call: &'static str, stop: bool| {
+        let (host, location, handle) = (s.host.clone(), s.location.clone(), handle(name));
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let sink = seen.clone();
+        let listen: oc_plugin::ListenFn = Arc::new(move |on| sink.lock().push(on));
+        let task = tokio::spawn(async move {
+            host.execute_tool_with(&location, &handle, json!({}), context(call), None, stop.then_some(listen)).await
+        });
+        (task, seen)
+    };
+    let until_listening = |seen: &Arc<Mutex<Vec<bool>>>| {
+        let seen = seen.clone();
+        async move {
+            for _ in 0..500 {
+                if seen.lock().first() == Some(&true) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the tool never listened");
+        }
+    };
+
+    // Rejects once stopped: the call fails with its own error.
+    let (task, seen) = run("listens", "call-listens", true);
+    until_listening(&seen).await;
+    s.host.stop_tool(&s.location, "call-listens");
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(error.message, "stopped with partial work");
+    // Listening ends once the stop arrived (`tool.unlisten`) and again when the call ends.
+    assert_eq!(seen.lock()[..2], [true, false]);
+    assert_eq!(seen.lock().last(), Some(&false));
+
+    // Resolves with what it had: the call keeps its result.
+    let (task, seen) = run("resolves", "call-resolves", true);
+    until_listening(&seen).await;
+    s.host.stop_tool(&s.location, "call-resolves");
+    let result = task.await.unwrap().unwrap();
+    assert_eq!(result["content"], json!([{ "type": "text", "text": "partial result" }]));
+
+    // Never reads its signal: it never listens.
+    let (task, seen) = run("deaf", "call-deaf", true);
+    assert_eq!(task.await.unwrap().unwrap()["content"], json!([{ "type": "text", "text": "done" }]));
+    assert_eq!(*seen.lock(), vec![false]);
+
+    // A call that cannot be stopped (a nested Code Mode call) gets no `cancel`: reading its signal listens to nothing.
+    let (task, seen) = run("resolves", "call-nested", false);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    s.host.stop_tool(&s.location, "call-nested");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!task.is_finished(), "a call without a stop ignores tool.stop");
+    task.abort();
+    assert!(seen.lock().is_empty());
+    s.host.shutdown().await;
+}
+
 #[tokio::test]
 async fn effect_plugin_transforms_and_hooks() {
     require_bun!();

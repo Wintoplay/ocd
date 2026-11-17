@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use oc_ai::error::{AIError, ErrorKind, FailureClassification, HttpContext, TransportOperation};
 use oc_ai::retry::{
-    self, CONTINUE_TEXT, Decision, MAX_RETRIES, RetryOutcome, RetryPolicy, base_delay_ms, delay_ms, eligible,
+    self, Decision, MAX_RETRIES, RetryOutcome, RetryPolicy, base_delay_ms, delay_ms, eligible,
     normalize_hook_delay, session_error, session_error_type,
 };
 use serde_json::json;
@@ -111,11 +111,7 @@ fn hook_delay_normalization_and_outcomes() {
     assert_eq!(normalize_hook_delay(0.2, 2000), 1);
     assert_eq!(normalize_hook_delay(0.0, 2000), 0);
     assert_eq!(retry::outcome(false), RetryOutcome::Retry);
-    assert_eq!(retry::outcome(true), RetryOutcome::Continue);
-    assert_eq!(
-        CONTINUE_TEXT,
-        "The previous response was interrupted. Continue from where you left off without repeating completed content."
-    );
+    assert_eq!(retry::outcome(true), RetryOutcome::RetryFresh);
 }
 
 #[test]

@@ -10,7 +10,7 @@ import { Location } from "@opencode/schema/location"
 import { EventManifest } from "@opencode/schema/event-manifest"
 import { Tool } from "@opencode/schema/tool"
 import { OpenCodeEvent } from "@opencode/protocol/groups/event"
-import { Cause, Effect, Exit, Logger, PubSub, Schema, Scope, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Logger, PubSub, Schema, Scope, Stream } from "effect"
 import { execute as executeTool } from "@upstream-core/tool/runtime"
 import { fromWire, Handles, toWire, type Remote } from "./codec.js"
 import { makeContext } from "./context.js"
@@ -399,10 +399,31 @@ export class LocationRuntime {
     await Effect.runPromise(Scope.close(scope, Exit.void))
   }
 
+  /** Stop gates of running tool calls that can be stopped, by call id (`context.stop`). */
+  private readonly stops = new Map<string, Deferred.Deferred<void>>()
+
+  /** Completes a call's `cancel`: the user asked it to stop (`tool.stop` from Rust). */
+  stopTool(id: string) {
+    const gate = this.stops.get(id)
+    if (gate) Deferred.doneUnsafe(gate, Exit.void)
+  }
+
   async executeTool(handle: string, input: unknown, context: any, signal?: AbortSignal) {
     const entry = this.handles.get(handle)
     if (!entry || entry.kind !== "tool") throw new Error(`Unknown plugin tool handle: ${handle}`)
     const tool = entry.value as Tool.Info
+    // `Tool.Context.cancel` (2.3.0) for a call the user can stop: awaiting it tells Rust the tool stops on its own
+    // (`tool.listen` .. `tool.unlisten`), and it completes on `tool.stop`. Nested Code Mode calls get none.
+    const gate = context.stop === true ? Deferred.makeUnsafe<void>() : undefined
+    if (gate) this.stops.set(context.id, gate)
+    const cancel = gate
+      ? Effect.suspend(() => {
+          this.io.notify("tool.listen", { location: this.key, id: context.id })
+          return Deferred.await(gate).pipe(
+            Effect.ensuring(Effect.sync(() => this.io.notify("tool.unlisten", { location: this.key, id: context.id }))),
+          )
+        })
+      : undefined
     const toolContext = {
       sessionID: context.sessionID,
       agent: context.agent,
@@ -412,11 +433,16 @@ export class LocationRuntime {
         Effect.sync(() =>
           this.io.notify("tool.progress", { location: this.key, id: context.id, metadata: toWire(update, undefined) }),
         ),
+      ...(cancel ? { cancel } : {}),
     }
-    const exit = await Effect.runPromiseExit(executeTool(tool, input, toolContext as Tool.Context), { signal })
-    if (Exit.isSuccess(exit)) return toWire(exit.value, undefined)
-    const error = Cause.squash(exit.cause)
-    throw toolError(error)
+    try {
+      const exit = await Effect.runPromiseExit(executeTool(tool, input, toolContext as Tool.Context), { signal })
+      if (Exit.isSuccess(exit)) return toWire(exit.value, undefined)
+      const error = Cause.squash(exit.cause)
+      throw toolError(error)
+    } finally {
+      if (gate && this.stops.get(context.id) === gate) this.stops.delete(context.id)
+    }
   }
 
   // -------------------------------------------------------------------------------------------

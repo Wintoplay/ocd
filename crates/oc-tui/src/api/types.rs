@@ -156,6 +156,9 @@ impl SessionInfo {
 pub struct MessageTime {
     #[serde(default)]
     pub created: i64,
+    /// When the provider streamed the step's first output token (2.3.0).
+    #[serde(default, rename = "firstToken", skip_serializing_if = "Option::is_none")]
+    pub first_token: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streamed: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

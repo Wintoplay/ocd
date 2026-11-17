@@ -18,7 +18,10 @@ What is out of scope:
 Upstream references used throughout: `packages/plugin/src/*` (public API, adapter, host, runtime)
 and `packages/core/src/plugin/{host,hooks,module,supervisor}.ts`, `packages/core/src/plugin.ts`,
 `packages/core/src/rpc.ts` and `packages/util/src/npm.ts` at commit `4617210822bd`. The bundled
-plugin-facing packages (`@opencode/plugin`, schema, protocol, `effect`) are upstream's v2.2.7, so
+plugin-facing packages (`@opencode/plugin`, schema, protocol, `effect`) are upstream's v2.3.0 (the 2.2.7 API below,
+plus 2.3.0's cooperative stop: a Promise tool that reads `context.signal` is stopped through it when the user stops
+the call, and an Effect tool through `context.cancel`; `freeform` copied onto Promise tools; only a function returned
+by `setup` is a cleanup; `Tool` exported from `@opencode/plugin/effect`), so
 Promise plugins get 2.2's adapter: `ctx.permission.assert`, `ctx.credential.activate`,
 `ctx.session.list`, thrown tool errors and rejected `tool.execute.before` hooks failing only that
 call, and (2.2) `ctx.session.instructions.entry.{list,put,remove}`, `ctx.experimental.generate.{text,
@@ -119,7 +122,8 @@ The protocol is newline-delimited JSON-RPC 2.0 (`src/protocol.rs`, `host/src/pee
 | `location.close` / `location.list` | `{location}` | `null` / inventory |
 | `hook.trigger` | `{location, key, event}` | `{event}`; or an error with `type` `tool.error` (+`metadata`), `declined` (`data.kind` `permission` or `question`) or `defect` |
 | `transform` | `{location, domain, value}` | `{value}` |
-| `tool.execute` | `{location, handle, input, context}` | `{output?, content, metadata?}`; or an error with `type` `tool.error`, `declined` or `defect` |
+| `tool.execute` | `{location, handle, input, context}` (`context.stop: true` for a call the user can stop: the tool gets a `cancel`) | `{output?, content, metadata?}`; or an error with `type` `tool.error`, `declined` or `defect` |
+| `tool.stop` (notification) | `{location, id}` | completes the running call's `cancel` (the Promise tool's `signal` aborts) |
 | `invoke` | `{location, handle, args, scope?}` | JSON result (returned functions become new `js:` handles) |
 | `scope.close` | `{location, scope}` | `null` |
 | `rpc.call` | `{location, rpcID, method, input}` | `{output}`; or an error with `type` = RPC failure type, plus `data` |
@@ -142,6 +146,7 @@ The protocol is newline-delimited JSON-RPC 2.0 (`src/protocol.rs`, `host/src/pee
 | `plugins.changed` | `{location, inventory}` | mirror for `packages`, emits `PluginsChanged` (`activation` as for `DomainsChanged`; `load` itself emits one with `activation: true` when it returns) |
 | `events.interest` | `{location, count}` | `publish_event` is a no-op while every count is 0 |
 | `tool.progress` | `{location, id, metadata}` | the `progress` callback passed to `execute_tool` |
+| `tool.listen` / `tool.unlisten` | `{location, id}` | the `listen` callback passed to `execute_tool_with`: the tool started or stopped awaiting its `cancel`, so the core's `Stop` counts it as listening and forwards a user's stop as `tool.stop` |
 | `watch` | `{file}` | emits `HostEvent::Watch` |
 | `aisdk.part` (notification) | `{stream, part}` | the stream of [`PluginHost::aisdk_stream`] |
 | `aisdk.http.request` / `aisdk.http.response` (requests) | `{stream, request[, response]}` | the stream's `AisdkHttp` (`session.http.*` hooks) |
@@ -549,7 +554,7 @@ Without an override, Bun 1.4.4 is downloaded from the release for this platform:
 BUN=/path/to/bun-1.4.4 scripts/build-plugin-host.sh /path/to/opencode-checkout
 ```
 
-The checkout must be at upstream's `v2.2.7` tag, with `bun install` run at its root (the committed
+The checkout must be at upstream's `v2.3.0` tag, with `bun install` run at its root (the committed
 bundle was built that way with Bun 1.4.4, the version the sidecar runs on).
 `host/build.ts` bundles `host/src/main.ts` with `Bun.build` into `host/dist/host.js` (about 2.8 MiB):
 

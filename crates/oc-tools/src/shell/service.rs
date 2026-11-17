@@ -54,6 +54,8 @@ struct Active {
     line_starts: Mutex<[u64; 2]>,
     done: watch::Sender<Done>,
     deadline: watch::Sender<Option<tokio::time::Instant>>,
+    /// A recorded stop (`Shell.stop`): the status the command ends with once it exits.
+    stop: watch::Sender<Option<ShellStatus>>,
     pid: Option<u32>,
 }
 
@@ -174,6 +176,26 @@ impl ShellService {
         Ok(info)
     }
 
+    /// Stops a running command gracefully (SIGTERM, then SIGKILL after 3 s) without forgetting it: it ends with the
+    /// given status (`Killed`, or `Timeout`) and stays observable, file included, until retention evicts it. Returns
+    /// at once; [`ShellService::wait`] observes the exit. Ignored once the command has ended or is already stopping
+    /// (`Shell.stop`, 2.3.0).
+    pub fn stop(&self, id: &str, reason: ShellStatus) -> Result<ShellInfo, NotFound> {
+        let command = self.require(id)?;
+        let info = command.info.lock().clone();
+        if info.status != ShellStatus::Running {
+            return Ok(info);
+        }
+        command.stop.send_if_modified(|stop| {
+            if stop.is_some() {
+                return false;
+            }
+            *stop = Some(reason);
+            true
+        });
+        Ok(info)
+    }
+
     /// Output page by byte cursor.
     pub fn output(&self, id: &str, cursor: Option<u64>, limit: Option<u64>) -> Result<ShellOutput, NotFound> {
         let command = self.require(id)?;
@@ -195,7 +217,21 @@ impl ShellService {
 
     /// Terminal state and bounded tail.
     pub async fn result(&self, started: &ShellInfo, max_lines: usize, max_bytes: usize) -> ShellResult {
-        let info = match self.wait(&started.id).await {
+        self.result_within(started, None, max_lines, max_bytes).await
+    }
+
+    /// [`ShellService::result`]; with `wait`, stops waiting for the exit after that long and returns the output so
+    /// far, still running.
+    pub async fn result_within(&self, started: &ShellInfo, wait: Option<Duration>, max_lines: usize, max_bytes: usize) -> ShellResult {
+        let ended = match wait {
+            None => Some(self.wait(&started.id).await),
+            Some(limit) => tokio::time::timeout(limit, self.wait(&started.id)).await.ok(),
+        };
+        let ended = match ended {
+            Some(ended) => ended,
+            None => self.get(&started.id),
+        };
+        let info = match ended {
             Ok(info) => info,
             Err(_) => {
                 let mut info = started.clone();
@@ -260,6 +296,7 @@ impl ShellService {
         };
         let (done, _) = watch::channel(None);
         let (deadline, mut deadline_rx) = watch::channel(None);
+        let (stop, mut stop_rx) = watch::channel(None);
         let active = Arc::new(Active {
             info: Mutex::new(info.clone()),
             file: file.clone(),
@@ -268,6 +305,7 @@ impl ShellService {
             line_starts: Mutex::new([0, 0]),
             done,
             deadline,
+            stop,
             pid,
         });
         self.commands.lock().insert(id.clone(), active.clone());
@@ -309,9 +347,10 @@ impl ShellService {
         let manager_active = active.clone();
         tokio::spawn(async move {
             let active = manager_active;
-            // The process exit and the timeout race to record how the command ended; the first wins. The
-            // terminal status is applied only once captured output is complete (3bdab634e).
-            let mut timed_out: Option<u64> = None;
+            // The process exit, the timeout and a stop race to record how the command ended; the first wins. A stop
+            // (a timeout is one) keeps its status but still records how the killed process exited. The terminal
+            // status is applied only once captured output is complete (3bdab634e).
+            let mut stopped: Option<(ShellStatus, u64)> = None;
             let status = loop {
                 let deadline = *deadline_rx.borrow();
                 tokio::select! {
@@ -323,11 +362,20 @@ impl ShellService {
                         }
                     } => {
                         // Timeout: record it, kill the process group, keep waiting for exit.
-                        timed_out = Some(crate::util::now_ms());
+                        stopped = Some((ShellStatus::Timeout, crate::util::now_ms()));
                         kill_tree(active.pid);
                         let _ = active.deadline.send(None);
                         let status = child.wait().await.ok();
                         break status;
+                    }
+                    changed = stop_rx.changed() => {
+                        let reason = *stop_rx.borrow();
+                        if let (Ok(()), Some(reason)) = (changed, reason) {
+                            stopped = Some((reason, crate::util::now_ms()));
+                            kill_tree(active.pid);
+                            let _ = active.deadline.send(None);
+                            break child.wait().await.ok();
+                        }
                     }
                     changed = deadline_rx.changed() => {
                         if changed.is_err() {
@@ -342,8 +390,8 @@ impl ShellService {
                 let mut info = active.info.lock();
                 if info.status == ShellStatus::Running {
                     // A timeout keeps its status and time but still records how the killed process exited.
-                    (info.status, info.time.completed) = match timed_out {
-                        Some(completed) => (ShellStatus::Timeout, Some(completed)),
+                    (info.status, info.time.completed) = match stopped {
+                        Some((status, completed)) => (status, Some(completed)),
                         None => (ShellStatus::Exited, Some(exited_at)),
                     };
                     if let Some(status) = status {

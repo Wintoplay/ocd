@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use oc_schema::ToolContent;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,6 +18,9 @@ use crate::shell::{parse, select};
 use crate::tool::{DefinitionContext, ErrorCause, Tool, ToolContext, ToolDefinition, ToolError, ToolOptions, ToolResult, decode, meta};
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 2 * 60 * 1_000;
+/// How long a call the user interrupted waits for its stopped command to exit before settling with the output so
+/// far (`INTERRUPT_WAIT`).
+pub const INTERRUPT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub const BACKGROUND_INSTRUCTION: &str = "You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes.";
 
@@ -100,6 +104,22 @@ fn background_result(shell_id: &str, file: &str) -> ShellOutput {
     }
 }
 
+/// Stops the command when the job's run is dropped before it settled: cancelling the job (or interrupting the call
+/// that waits for it) stops the command but keeps it, output file included (`onInterrupt` → `shell.stop`, 2.3.0).
+struct StopOnDrop {
+    service: Arc<ShellService>,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.service.stop(&self.id, oc_schema::message::ShellStatus::Killed);
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Input {
     command: String,
@@ -120,6 +140,24 @@ impl ShellTool {
     /// Compatible shell for this context (`ShellSelect.resolve({priority:"compat"})`).
     pub fn compatible_shell(ctx: &ToolContext) -> String {
         select::resolve(select::Priority::Compat, ctx.config.shell.as_deref(), Some(&ctx.global.bin))
+    }
+
+    /// Stops the command of a call the user asked to stop, and fails the call with the output so far. The command
+    /// stays observable, output file included (`cancelled`, 2.3.0).
+    async fn cancelled(&self, ctx: &ToolContext, info: &oc_schema::message::ShellInfo, job_id: &str) -> ToolError {
+        let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
+        // The stop escalates to SIGKILL on its own; the session does not wait for that to settle the call.
+        let result = self.service.result_within(info, Some(INTERRUPT_WAIT), ctx.config.max_lines(), ctx.config.max_bytes()).await;
+        // The stopped job settles from the same exit; this only releases it.
+        let _ = ctx.host.job_cancel(job_id).await;
+        let stopped = shell_result::interrupted(&result);
+        // The notice ends the message; renderers show what precedes it as the output, like a finished call's.
+        ToolError::new(stopped.message).with_metadata(meta(vec![
+            ("interrupted", json!(true)),
+            ("truncated", json!(result.capture.as_ref().is_some_and(|c| c.truncated))),
+            ("shellID", json!(info.id)),
+            ("notice", json!(stopped.notice)),
+        ]))
     }
 
     async fn prepare(&self, invocation: &mut ShellInvocation, ctx: &ToolContext, leaf: &str) -> Result<u64, ToolError> {
@@ -222,6 +260,18 @@ impl Tool for ShellTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolResult, ToolError> {
         let input: Input = decode(input)?;
+        // Listens for the user's stop for the whole call, starting before the command does, so a stop always reaches
+        // this tool instead of interrupting it, even while the command starts.
+        let listener = ctx.stop.listen();
+        let stopped = || {
+            let listener = listener.as_ref();
+            async move {
+                match listener {
+                    Some(listener) => listener.stopped().await,
+                    None => std::future::pending().await,
+                }
+            }
+        };
         let leaf = format!("Unable to execute command: {}", input.command);
         let background = input.background == Some(true);
         let timeout = if background { input.timeout.unwrap_or(0) } else { input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS) };
@@ -250,7 +300,12 @@ impl Tool for ShellTool {
             invocation.env.insert("AI_AGENT".into(), "opencode".into());
         }
         invocation.env.insert("OPENCODE_SESSION_ID".into(), ctx.session_id.clone());
-        let final_timeout = self.prepare(&mut invocation, &ctx, &leaf).await?;
+        // Asking for permission can take a while; a stop then ends the call before any command starts.
+        let final_timeout = tokio::select! {
+            biased;
+            _ = stopped() => return Err(ToolError::new("Command interrupted by the user before it started.")),
+            prepared = self.prepare(&mut invocation, &ctx, &leaf) => prepared?,
+        };
 
         let info = self
             .service
@@ -268,8 +323,12 @@ impl Tool for ShellTool {
         // so the notices say how long it waited.
         let final_timeout = Arc::new(AtomicU64::new(final_timeout));
         let job_timeout = final_timeout.clone();
+        let guard = StopOnDrop { service: service.clone(), id: info.id.clone(), armed: true };
         let run = async move {
+            // The whole guard moves into the run, so dropping the run drops it.
+            let mut guard = guard;
             let result = service.result(&started, max_lines, max_bytes).await;
+            guard.armed = false;
             if result.capture.is_none() {
                 return Err("Command failed".to_string());
             }
@@ -290,6 +349,10 @@ impl Tool for ShellTool {
             })
             .await
             .map_err(|m| ToolError::with_cause(leaf.clone(), ErrorCause::Error(m)))?;
+        // Stopped while the command was starting: stop it now.
+        if listener.as_ref().is_some_and(|l| l.stopped().now_or_never().is_some()) {
+            return Err(self.cancelled(&ctx, &info, &job.id).await);
+        }
 
         if background {
             let _ = ctx.host.job_background(&job.id).await;
@@ -297,11 +360,14 @@ impl Tool for ShellTool {
             return Ok(tool_result(background_result(&info.id, &info.file), None));
         }
 
+        // A user's stop arrives through `stop`; an interrupt (a server shutdown) cancels the job, which stops the
+        // command and keeps it, output file included.
         let blocked = tokio::select! {
             result = ctx.host.job_block(&job.id, &ctx.session_id) => result,
+            _ = stopped() => return Err(self.cancelled(&ctx, &info, &job.id).await),
             _ = ctx.cancel.cancelled() => {
                 let _ = ctx.host.job_cancel(&job.id).await;
-                let _ = self.service.remove(&info.id);
+                let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
                 return Err(ToolError::interrupted());
             }
         };
@@ -331,9 +397,11 @@ impl Tool for ShellTool {
                         return Err(ToolError::with_cause(leaf, ErrorCause::Error("Command failed".into())));
                     }
                 }
+                // A host without a job registry returns from `job_block` at once; the stop still reaches the call.
+                _ = stopped() => return Err(self.cancelled(&ctx, &info, &job.id).await),
                 _ = ctx.cancel.cancelled() => {
                     let _ = ctx.host.job_cancel(&job.id).await;
-                    let _ = self.service.remove(&info.id);
+                    let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
                     return Err(ToolError::interrupted());
                 }
             }

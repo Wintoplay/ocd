@@ -69,6 +69,9 @@ pub enum HostEvent {
 pub type BlockedFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// Receives `context.progress(metadata)` calls of a plugin tool.
 pub type ProgressFn = Arc<dyn Fn(Value) + Send + Sync>;
+/// Told whether a plugin tool call is awaiting its stop (`Tool.Context.cancel`, 2.3.0): `true` on `tool.listen`,
+/// `false` on `tool.unlisten`.
+pub type ListenFn = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Inputs of [`PluginHost::load`].
 #[derive(Clone)]
@@ -236,6 +239,7 @@ struct Inner {
     sidecar: Mutex<Option<Arc<Sidecar>>>,
     locations: Mutex<HashMap<String, LocationState>>,
     progress: Mutex<HashMap<(String, String), ProgressFn>>,
+    listen: Mutex<HashMap<(String, String), ListenFn>>,
     events: broadcast::Sender<HostEvent>,
     stopping: AtomicBool,
     attempts: Mutex<u32>,
@@ -265,6 +269,7 @@ impl PluginHost {
                 sidecar: Mutex::new(None),
                 locations: Mutex::new(HashMap::new()),
                 progress: Mutex::new(HashMap::new()),
+                listen: Mutex::new(HashMap::new()),
                 events,
                 stopping: AtomicBool::new(false),
                 attempts: Mutex::new(0),
@@ -448,6 +453,10 @@ impl PluginHost {
     /// content normalized. `context` is `{sessionID, agent, messageID, id}`; `progress` receives
     /// each `context.progress(metadata)` call. Hooks are not run here (the core runs
     /// `tool.execute.before/after` around it).
+    ///
+    /// With `listen`, the call can be stopped (2.3.0): the sidecar gives the tool a `cancel` (a Promise tool's
+    /// `signal` once read) and reports through `listen` whether the tool is awaiting it; [`PluginHost::stop_tool`]
+    /// completes it.
     pub async fn execute_tool(
         &self,
         location: &LocationRef,
@@ -455,6 +464,18 @@ impl PluginHost {
         input: Value,
         context: Value,
         progress: Option<ProgressFn>,
+    ) -> Result<Value, ToolError> {
+        self.execute_tool_with(location, handle, input, context, progress, None).await
+    }
+
+    pub async fn execute_tool_with(
+        &self,
+        location: &LocationRef,
+        handle: &str,
+        input: Value,
+        mut context: Value,
+        progress: Option<ProgressFn>,
+        listen: Option<ListenFn>,
     ) -> Result<Value, ToolError> {
         let sidecar = self.inner.current().ok_or_else(|| ToolError {
             message: "Plugin host is not running".into(),
@@ -468,10 +489,17 @@ impl PluginHost {
         if let Some(progress) = progress {
             self.inner.progress.lock().insert(key.clone(), progress);
         }
+        if let Some(listen) = listen {
+            context["stop"] = Value::Bool(true);
+            self.inner.listen.lock().insert(key.clone(), listen);
+        }
         let result = sidecar
             .request("tool.execute", json!({ "location": location.key(), "handle": handle, "input": input, "context": context }))
             .await;
         self.inner.progress.lock().remove(&key);
+        if let Some(listen) = self.inner.listen.lock().remove(&key) {
+            listen(false);
+        }
         result.map_err(|error| match error {
             CallError::Remote(e) => ToolError {
                 tool_error: e.kind.as_deref() == Some("tool.error"),
@@ -482,6 +510,13 @@ impl PluginHost {
             },
             other => ToolError { message: other.to_string(), metadata: None, tool_error: false, declined: None, cause: None },
         })
+    }
+
+    /// Asks a running plugin tool call that awaits its stop to stop (`tool.stop`).
+    pub fn stop_tool(&self, location: &LocationRef, call: &str) {
+        if let Some(sidecar) = self.inner.current() {
+            sidecar.notify("tool.stop", json!({ "location": location.key(), "id": call }));
+        }
     }
 
     /// Calls a plugin function handle (`js:...`) found in a transform value: command `execute`,
@@ -868,6 +903,14 @@ impl Incoming for Handler {
             return;
         }
         let key = params.get("location").and_then(Value::as_str).unwrap_or_default().to_string();
+        if method == "tool.listen" || method == "tool.unlisten" {
+            let call = params.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            let callback = inner.listen.lock().get(&(key, call)).cloned();
+            if let Some(callback) = callback {
+                callback(method == "tool.listen");
+            }
+            return;
+        }
         if method == "tool.progress" {
             let call = params.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
             let callback = inner.progress.lock().get(&(key, call)).cloned();

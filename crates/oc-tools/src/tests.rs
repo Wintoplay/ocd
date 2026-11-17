@@ -89,6 +89,7 @@ fn context(dir: &Path, host: Arc<MockHost>) -> ToolContext {
         workspace_id: None,
         global: Arc::new(global),
         cancel: tokio_util::sync::CancellationToken::new(),
+        stop: Default::default(),
         progress: Arc::new(|_| {}),
         config: Arc::new(ToolConfig::default()),
         host,
@@ -604,6 +605,55 @@ async fn todo_flow() {
     let err = run(&tools::todo::TodoTool, json!({ "todos": [] }), ctx.clone()).await.unwrap_err();
     assert_eq!(err.message, "Unable to update todos");
     assert_eq!(err.model_message(), "not now");
+}
+
+// tool-shell.test.ts "ShellTool stopped" (2.3.0, #62977): a call the user stops keeps the command's output.
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_tool_stopped_by_the_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(MockHost::default());
+    let mut ctx = context(dir.path(), host.clone());
+    ctx.config = Arc::new(ToolConfig { shell: Some("/bin/sh".into()), ..ToolConfig::default() });
+    let service = crate::shell::service::ShellService::new(dir.path().join(".data"), None);
+    let tool = tools::shell::ShellTool::new(service.clone());
+
+    // Stopped once the command printed.
+    let stop = crate::Stop::new();
+    ctx.stop = stop.clone();
+    let call = tokio::spawn({
+        let ctx = ctx.clone();
+        let tool = tools::shell::ShellTool::new(service.clone());
+        async move { run(&tool, json!({"command": "printf 'first\\nsecond\\n'; sleep 60"}), ctx).await }
+    });
+    let info = loop {
+        if let Some(info) = service.list().into_iter().next().filter(|i| service.output(&i.id, None, None).unwrap().size > 0) {
+            break info;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(stop.trigger(), "the shell tool listens for its stop");
+    let error = call.await.unwrap().unwrap_err();
+    let notice = format!("[full output saved to {}]\n\nCommand interrupted by the user (shell ID: {}).", info.file, info.id);
+    assert_eq!(error.to_session_error().kind, "tool.execution");
+    assert_eq!(error.model_message(), format!("first\nsecond\n\n{notice}"));
+    assert_eq!(
+        serde_json::Value::Object(error.metadata.clone().unwrap()),
+        json!({"interrupted": true, "truncated": false, "shellID": info.id, "notice": notice})
+    );
+    assert_eq!(service.wait(&info.id).await.unwrap().status, oc_schema::message::ShellStatus::Killed);
+    assert_eq!(std::fs::read_to_string(&info.file).unwrap(), "first\nsecond\n");
+
+    // Already stopped before the command started: it never starts.
+    let stop = crate::Stop::new();
+    let early = stop.listen().unwrap();
+    stop.trigger();
+    drop(early);
+    ctx.stop = stop;
+    let error = run(&tool, json!({"command": "printf started > started"}), ctx.clone()).await.unwrap_err();
+    assert_eq!(error.model_message(), "Command interrupted by the user before it started.");
+    assert!(!dir.path().join("started").exists());
+    assert!(service.list().is_empty());
 }
 
 #[cfg(unix)]

@@ -40,7 +40,9 @@ pub type RetryHook = Arc<dyn Fn(SessionError, u32, serde_json::Value) -> futures
 
 #[async_trait]
 pub trait ToolRunner: Send + Sync {
-    async fn run(&self, call: ToolCall, progress: Progress, cancel: CancellationToken) -> ToolRun;
+    /// Runs one local call. `cancel` interrupts it (the tool drops its work); `stop` is the user's cooperative stop
+    /// (`Tool.Context.cancel`), which a tool may listen for to settle its own call with what it has.
+    async fn run(&self, call: ToolCall, progress: Progress, cancel: CancellationToken, stop: oc_tools::Stop) -> ToolRun;
 }
 
 #[async_trait]
@@ -51,8 +53,9 @@ pub trait Snapshotter: Send + Sync {
 
 pub enum Outcome {
     Completed { needs_continuation: bool },
-    Retry { error: SessionError, decision: Decision },
-    Continue { error: SessionError, decision: Decision },
+    /// Retry the step after the decision's delay. `fresh_assistant`: output had started, so that message stays as is
+    /// (history replays it cut at its last local call that ran) and the retry streams into a new one.
+    Retry { error: SessionError, decision: Decision, fresh_assistant: bool },
     RecoverFull,
     Compacted,
     /// The step finished with `length`.
@@ -86,6 +89,8 @@ pub struct Input<'a> {
     pub retry: &'a mut Policy,
     pub cancel: CancellationToken,
     pub location_closed: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Why the execution is being interrupted, once it is (`input.interruption`): `User` when someone stopped it.
+    pub interruption: Option<Arc<dyn Fn() -> Option<crate::coordinator::Reason> + Send + Sync>>,
     /// `session.retry` plugin hook: `(error, attempt, decision)` → decision.
     pub retry_hook: Option<RetryHook>,
     /// `session.http.request` / `session.http.response` middleware.
@@ -128,7 +133,33 @@ struct Run {
     task: Option<futures::future::BoxFuture<'static, ToolRun>>,
     handle: Option<tokio::task::JoinHandle<ToolRun>>,
     id: String,
+    /// Interrupts the execution.
     cancel: CancellationToken,
+    /// The call's cooperative stop (`makeCancel`).
+    stop: oc_tools::Stop,
+}
+
+/// How long a user's stop waits for the tools it asked to stop before interrupting them (`COOPERATIVE_STOP`).
+pub const COOPERATIVE_STOP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `stopTools`: a user's stop asks each tool awaiting its stop to settle its own call and interrupts every other
+/// tool; any other interruption interrupts them all. Executions not started yet never run. Returns whether every
+/// call was interrupted at once (nothing to wait for cooperatively).
+fn stop_tools(runs: &mut [Run], user: bool) -> bool {
+    let mut cooperative = false;
+    for r in runs.iter_mut() {
+        if r.task.take().is_some() {
+            // Not started: an interrupted fiber that has not started never runs.
+            r.cancel.cancel();
+            continue;
+        }
+        if user && r.stop.trigger() {
+            cooperative = true;
+        } else {
+            r.cancel.cancel();
+        }
+    }
+    !cooperative
 }
 
 /// Starts the tool executions forked so far, in call order.
@@ -212,7 +243,9 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
                 if *provider_executed == Some(true) {
                     continue;
                 }
-                let cancel = input.cancel.child_token();
+                // Interrupting the step does not interrupt its tools by itself: `stop_tools` decides, per call.
+                let cancel = CancellationToken::new();
+                let stop = oc_tools::Stop::new();
                 let call = ToolCall { id: id.clone(), name: name.clone(), input: args.clone() };
                 let p = publisher.clone();
                 let call_id = id.clone();
@@ -221,6 +254,7 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
                 });
                 let tools = input.tools.clone();
                 let c = cancel.clone();
+                let st = stop.clone();
                 let none = input.tool_choice_none;
                 let p = publisher.clone();
                 // Each tool publishes its terminal event as soon as it settles, concurrently with the stream.
@@ -231,7 +265,7 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
                             metadata: None,
                         }
                     } else {
-                        tools.run(ToolCall { id: call.id.clone(), name: call.name.clone(), input: call.input }, progress, c).await
+                        tools.run(ToolCall { id: call.id.clone(), name: call.name.clone(), input: call.input }, progress, c, st).await
                     };
                     match run {
                         ToolRun::Ok { content, metadata } => match p.tool_execution(&call.id, &call.name, content, metadata) {
@@ -246,7 +280,7 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
                     }
                 }
                 .boxed();
-                runs.push(Run { task: Some(task), handle: None, id: id.clone(), cancel });
+                runs.push(Run { task: Some(task), handle: None, id: id.clone(), cancel, stop });
             }
         }
         Ok(())
@@ -262,31 +296,76 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
     if overflow.is_none() && publisher.has_started() {
         publisher.streamed().await?;
     }
+    let user_stop = || input.interruption.as_ref().and_then(|f| f()) == Some(crate::coordinator::Reason::User);
     if stream_interrupted {
-        // Interrupting a fiber that has not started yet means it never runs (`interruptTools`).
-        for r in &mut runs {
-            r.task = None;
-            r.cancel.cancel();
-        }
+        stop_tools(&mut runs, user_stop());
     }
     // The attempt now awaits the tools, which lets the executions still pending start.
     start_tools(&mut runs);
 
     // ---- join tools ----
-    let mut declines: Vec<(String, Option<String>)> = Vec::new();
-    let mut tools_interrupted = false;
-    let mut tool_defect: Option<String> = None;
-    for r in runs.drain(..) {
-        // A tool that panics is a defect of that call (upstream: a tool fiber that dies), not an interruption of
-        // the step: the call fails with the panic message and the run continues.
-        let result = match r.handle {
-            None => ToolRun::Interrupted,
-            Some(handle) => match handle.await {
-                Ok(run) => run,
-                Err(e) if e.is_panic() => ToolRun::Defect(panic_message(e.into_panic())),
-                Err(_) => ToolRun::Interrupted,
-            },
+    // Await every call. Interrupted while waiting, the step stops its tools (`stopTools`) and still reads each exit
+    // once all have ended, so what they raised while stopping (a decline, a defect) counts; a user's stop waits up to
+    // `COOPERATIVE_STOP` for the calls it asked to stop before interrupting them.
+    let mut interrupted_while_waiting = false;
+    let results: Vec<ToolRun> = {
+        let tokens: Vec<CancellationToken> = runs.iter().map(|r| r.cancel.clone()).collect();
+        let interrupt_all = || tokens.iter().for_each(CancellationToken::cancel);
+        let handles: Vec<_> = runs
+            .iter_mut()
+            .map(|r| {
+                let handle = r.handle.take();
+                async move {
+                    // A tool that panics is a defect of that call (upstream: a tool fiber that dies), not an
+                    // interruption of the step: the call fails with the panic message and the run continues.
+                    match handle {
+                        None => ToolRun::Interrupted,
+                        Some(handle) => match handle.await {
+                            Ok(run) => run,
+                            Err(e) if e.is_panic() => ToolRun::Defect(panic_message(e.into_panic())),
+                            Err(_) => ToolRun::Interrupted,
+                        },
+                    }
+                }
+            })
+            .collect();
+        let mut all = std::pin::pin!(futures::future::join_all(handles));
+        let mut cooperative = stream_interrupted && !runs.iter().all(|r| r.cancel.is_cancelled());
+        let joined = if stream_interrupted {
+            None
+        } else {
+            tokio::select! {
+                results = &mut all => Some(results),
+                _ = input.cancel.cancelled() => None,
+            }
         };
+        match joined {
+            Some(results) => results,
+            None => {
+                if !stream_interrupted {
+                    interrupted_while_waiting = true;
+                    cooperative = !stop_tools(&mut runs, user_stop());
+                }
+                if cooperative {
+                    match tokio::time::timeout(COOPERATIVE_STOP, &mut all).await {
+                        Ok(results) => results,
+                        Err(_) => {
+                            interrupt_all();
+                            all.await
+                        }
+                    }
+                } else {
+                    interrupt_all();
+                    all.await
+                }
+            }
+        }
+    };
+
+    let mut declines: Vec<(String, Option<String>)> = Vec::new();
+    let mut tools_interrupted = interrupted_while_waiting;
+    let mut tool_defect: Option<String> = None;
+    for (r, result) in runs.drain(..).zip(results) {
         match result {
             ToolRun::Ok { .. } | ToolRun::Failed { .. } => {}
             ToolRun::Declined { question } => declines.push((r.id, question)),
@@ -355,7 +434,7 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
     if let (Some(error), Some(decision)) = (&llm_error, retry) {
         if !recorded.output_started {
             publisher.start_assistant().await?;
-            return Ok(Outcome::Retry { error: error.clone(), decision });
+            return Ok(Outcome::Retry { error: error.clone(), decision, fresh_assistant: false });
         }
     }
     if let Some(e) = &llm_error {
@@ -427,8 +506,8 @@ pub async fn attempt(input: Input<'_>) -> Result<Outcome, StepError> {
     }
 
     if let (Some(error), Some(decision)) = (&llm_error, retry) {
-        if record.output_started && declines.is_empty() && !tools_interrupted {
-            return Ok(Outcome::Continue { error: error.clone(), decision });
+        if declines.is_empty() && !tools_interrupted {
+            return Ok(Outcome::Retry { error: error.clone(), decision, fresh_assistant: true });
         }
     }
     if let Some(f) = stream_failure {

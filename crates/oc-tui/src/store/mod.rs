@@ -722,6 +722,7 @@ impl Store {
                     existing.error = None;
                     existing.finish = None;
                     existing.time.created = started;
+                    existing.time.first_token = None;
                     existing.time.streamed = None;
                     existing.time.completed = None;
                     existing.touch();
@@ -743,6 +744,10 @@ impl Store {
                         ..Default::default()
                     });
                 }
+            }
+            "session.step.first-token" => {
+                let c = ev.created;
+                self.edit_assistant(&sid, &s("assistantMessageID"), |m| m.time.first_token = Some(c));
             }
             "session.step.streamed" => {
                 let c = ev.created;
@@ -1287,6 +1292,11 @@ mod tests {
     fn streaming_assistant() {
         let mut s = Store::new("/tmp");
         s.apply(&ev("session.step.started", json!({"sessionID":"ses_1","assistantMessageID":"msg_a","agent":"build","model":{"id":"m","providerID":"p"},"started":5})));
+        // 2.3.0: the first output token is recorded on the message, and cleared when the step restarts.
+        s.apply(&Event { created: 1500, ..ev("session.step.first-token", json!({"sessionID":"ses_1","assistantMessageID":"msg_a"})) });
+        assert_eq!(s.messages("ses_1")[0].time.first_token, Some(1500));
+        s.apply(&ev("session.step.started", json!({"sessionID":"ses_1","assistantMessageID":"msg_a","agent":"build","model":{"id":"m","providerID":"p"},"started":5})));
+        assert_eq!(s.messages("ses_1")[0].time.first_token, None);
         s.apply(&ev("session.text.started", json!({"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0})));
         s.apply(&ev("session.text.delta", json!({"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"Hel"})));
         s.apply(&ev("session.text.delta", json!({"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"lo"})));

@@ -81,6 +81,14 @@ impl Coordinator {
         self.inner.executions.lock().contains_key(key)
     }
 
+    /// Why the key's execution is being stopped, once [`Coordinator::interrupt`] stopped it; `None` while it runs, for
+    /// teardown, and once it settled (`interruption`, 2.3.0). The step reads it to let tools stop on their own.
+    pub fn interruption(&self, key: &str) -> Option<Reason> {
+        let exec = self.inner.executions.lock().get(key).cloned()?;
+        let reason = exec.lock().reason;
+        reason
+    }
+
     fn start(&self, key: &str, force: bool, scope: Scope) -> Exec {
         let (tx, _) = watch::channel(None);
         let exec = Arc::new(Mutex::new(Execution {

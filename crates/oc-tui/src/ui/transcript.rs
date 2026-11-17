@@ -605,6 +605,19 @@ pub fn tool_output(t: &ToolPart) -> Option<String> {
     )
 }
 
+/// `stoppedShell` (2.3.0): a call the user stopped fails with its output followed by a notice, which its metadata
+/// names. Its output shows like a finished call's and only the notice as the error. A plugin that rewrote the error
+/// gets it shown as is. Returns `(output, notice)`.
+fn stopped_shell(t: &ToolPart, metadata: &Value) -> Option<(String, String)> {
+    if t.state.status != "error" || metadata.get("interrupted") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let notice = str_of(metadata, "notice").filter(|n| !n.is_empty())?;
+    let message = &t.state.error.as_ref()?.message;
+    let output = message.strip_suffix(notice)?;
+    Some((output.trim_end_matches('\n').to_string(), notice.to_string()))
+}
+
 fn tool_error(t: &ToolPart) -> Option<String> {
     if t.state.status == "error" { t.state.error.as_ref().map(|e| locale::strip_ansi(&e.message)) } else { None }
 }
@@ -870,7 +883,13 @@ fn render_tool(ctx: &RCtx, msg: &Message, t: &ToolPart) -> Vec<SLine> {
         "shell" => {
             let shell_id = str_of(&meta, "shellID");
             let background = status == "completed" && str_of(&meta, "status") == Some("running");
-            shell_display(ctx, &t.id, Some(t), shell_id, str_of(&input, "command"), str_of(&input, "workdir"), status, background, if shell_id.is_some() { None } else { output.as_deref() }, None)
+            let stopped = stopped_shell(t, &meta);
+            let output = match &stopped {
+                Some((output, _)) => Some(output.as_str()),
+                None if shell_id.is_some() => None,
+                None => output.as_deref(),
+            };
+            shell_display(ctx, &t.id, Some(t), shell_id, str_of(&input, "command"), str_of(&input, "workdir"), status, background, output, stopped.as_ref().map(|(_, notice)| notice.clone()))
         }
         "glob" | "grep" => {
             let pattern = str_of(&input, "pattern");
@@ -1300,11 +1319,20 @@ pub fn turn_tps(m: &Message, messages: &[Message]) -> Option<f64> {
     turn_tps_at(messages, idx, is_legacy(messages))
 }
 
-fn turn_tps_at(messages: &[Message], idx: usize, legacy: bool) -> Option<f64> {
+/// `turnSteps`: the assistant steps of the turn that ends at `idx`.
+fn turn_steps(messages: &[Message], idx: usize, legacy: bool) -> Vec<&Message> {
     let end = idx + 1;
     let start = turn_bounds(messages, end, legacy).map(|i| i as isize).unwrap_or(-1);
-    let steps: Vec<&Message> = messages[((start + 1) as usize)..end].iter().filter(|x| x.kind == "assistant").collect();
-    let durations: Vec<i64> = steps.iter().filter_map(|s| s.time.streamed.map(|st| (st - s.time.created).max(0))).collect();
+    messages[((start + 1) as usize)..end].iter().filter(|x| x.kind == "assistant").collect()
+}
+
+/// `SessionTurn.tokensPerSecond`: output and reasoning tokens per second while the provider streamed them. Each step
+/// counts from its first streamed token (2.3.0) to the end of the response body; steps recorded before
+/// `time.firstToken` existed count from request dispatch.
+fn turn_tps_at(messages: &[Message], idx: usize, legacy: bool) -> Option<f64> {
+    let steps = turn_steps(messages, idx, legacy);
+    let durations: Vec<i64> =
+        steps.iter().filter_map(|s| s.time.streamed.map(|st| (st - s.time.first_token.unwrap_or(s.time.created)).max(0))).collect();
     if steps.is_empty() || durations.len() != steps.len() {
         return None;
     }
@@ -1314,6 +1342,18 @@ fn turn_tps_at(messages: &[Message], idx: usize, legacy: bool) -> Option<f64> {
         return None;
     }
     Some(out / (d as f64 / 1000.0))
+}
+
+pub fn turn_ttft(m: &Message, messages: &[Message]) -> Option<i64> {
+    let idx = messages.iter().position(|x| x.id == m.id)?;
+    turn_ttft_at(messages, idx, is_legacy(messages))
+}
+
+/// `SessionTurn.timeToFirstToken`: ms from the dispatch of the turn's first token-producing step to its first
+/// streamed token, until a step records one.
+fn turn_ttft_at(messages: &[Message], idx: usize, legacy: bool) -> Option<i64> {
+    let step = turn_steps(messages, idx, legacy).into_iter().find(|s| s.time.first_token.is_some())?;
+    Some((step.time.first_token? - step.time.created).max(0))
 }
 
 /// Seconds left on a scheduled retry, as the footer shows them (`Retrying in Ns`).
@@ -1457,6 +1497,13 @@ fn render_footer(ctx: &RCtx, id: &str) -> Vec<SLine> {
         && let Some(v) = idx.and_then(|i| turn_tps_at(ctx.messages, i, legacy))
     {
         segs.push(s(format!(" · {v:.1} tok/s"), th.text.muted));
+    }
+    // `· 500ms ttft` (2.3.0); a zero wait is not shown.
+    if ctx.config.tps()
+        && ctx.term_width >= 36
+        && let Some(v) = idx.and_then(|i| turn_ttft_at(ctx.messages, i, legacy)).filter(|v| *v != 0)
+    {
+        segs.push(s(format!(" · {} ttft", locale::duration(v)), th.text.muted));
     }
     if interrupted {
         segs.push(s(" · interrupted", th.text.muted));
@@ -2043,6 +2090,68 @@ pub fn revert_banner(ctx: &RCtx, count: usize, files: &[FileDiff]) -> Vec<SLine>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // session-turn.test.ts (2.3.0, #63321): throughput from the first streamed token, and time to first token.
+    fn turn_messages(first: serde_json::Value, last: serde_json::Value) -> Vec<Message> {
+        serde_json::from_value(serde_json::json!([
+            {"id": "user-1", "type": "user", "text": "go", "time": {"created": 1000}},
+            {"id": "assistant-1", "type": "assistant", "time": first, "tokens": {"input": 0, "output": 20, "reasoning": 5, "cache": {"read": 0, "write": 0}}},
+            {"id": "assistant-2", "type": "assistant", "time": last, "tokens": {"input": 0, "output": 30, "reasoning": 10, "cache": {"read": 0, "write": 0}}},
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn measures_decode_throughput_from_the_first_streamed_token() {
+        let messages = turn_messages(
+            serde_json::json!({"created": 6000, "firstToken": 8000, "streamed": 10000, "completed": 20000}),
+            serde_json::json!({"created": 24000, "firstToken": 25000, "streamed": 28000, "completed": 31000}),
+        );
+        // 65 tokens over the 5s the provider spent streaming them, not the 10s that include waiting for the first.
+        assert_eq!(turn_tps(&messages[2], &messages), Some(13.0));
+        assert_eq!(turn_ttft(&messages[2], &messages), Some(2000));
+    }
+
+    #[test]
+    fn falls_back_to_the_request_window_for_steps_recorded_without_a_first_token() {
+        let messages = turn_messages(
+            serde_json::json!({"created": 6000, "streamed": 10000, "completed": 20000}),
+            serde_json::json!({"created": 24000, "firstToken": 25000, "streamed": 28000, "completed": 31000}),
+        );
+        // The old step counts its 4s request window, the new one its 3s decode window.
+        assert_eq!(turn_tps(&messages[2], &messages), Some(65.0 / 7.0));
+        // Only the step that recorded a first token can report how long it waited for one.
+        assert_eq!(turn_ttft(&messages[2], &messages), Some(1000));
+        let messages = turn_messages(
+            serde_json::json!({"created": 6000, "streamed": 10000, "completed": 20000}),
+            serde_json::json!({"created": 24000, "streamed": 30000, "completed": 31000}),
+        );
+        assert_eq!(turn_tps(&messages[2], &messages), Some(6.5));
+        assert_eq!(turn_ttft(&messages[2], &messages), None);
+    }
+
+    // session-shell-stopped.test.tsx (2.3.0, #62977): a stopped call's output shows like a finished call's, then the
+    // notice once.
+    #[test]
+    fn a_stopped_shell_call_shows_its_output_then_the_notice() {
+        let notice = "[full output saved to /tmp/sh_stopped.out]\n\nCommand interrupted by the user (shell ID: sh_stopped).";
+        let part: ToolPart = serde_json::from_value(serde_json::json!({
+            "type": "tool", "id": "call-stopped", "name": "shell", "time": {"created": 1, "completed": 2},
+            "state": {"status": "error", "input": {"command": "seq-stopped"},
+                "error": {"type": "tool.execution", "message": format!("step 1\nstep 2\n\n{notice}")},
+                "metadata": {"interrupted": true, "truncated": false, "shellID": "sh_stopped", "notice": notice}},
+        }))
+        .unwrap();
+        let metadata = part.state.metadata.clone().unwrap();
+        assert_eq!(stopped_shell(&part, &metadata), Some(("step 1\nstep 2".to_string(), notice.to_string())));
+        // A plugin that rewrote the error gets it shown as is.
+        let mut rewritten = part.clone();
+        rewritten.state.error.as_mut().unwrap().message = "rewritten by a plugin".into();
+        assert_eq!(stopped_shell(&rewritten, &metadata), None);
+        let mut plain = metadata.clone();
+        plain.as_object_mut().unwrap().remove("interrupted");
+        assert_eq!(stopped_shell(&part, &plain), None);
+    }
 
     #[test]
     fn shell_collapse() {

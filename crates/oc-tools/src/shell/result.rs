@@ -39,6 +39,36 @@ pub fn output(result: &ShellResult) -> Output {
     }
 }
 
+/// What the model gets for a command stopped because the user interrupted its call (`ShellResult.interrupted`,
+/// 2.3.0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Interrupted {
+    /// The output so far, as a finished call would show it.
+    pub output: String,
+    /// Where the full output is and the shell ID, even when the output fits (which `output` leaves unsaid).
+    pub notice: String,
+    /// `output` and `notice` joined: the call's failure text.
+    pub message: String,
+}
+
+pub fn interrupted(result: &ShellResult) -> Interrupted {
+    let stopping = if result.info.status == ShellStatus::Running { "; it is still being stopped" } else { "" };
+    let stopped = format!("Command interrupted by the user (shell ID: {}){stopping}.", result.info.id);
+    let (output, notice) = match &result.capture {
+        None => (MISSING.to_string(), stopped),
+        Some(capture) if capture.truncated => (capture.output.clone(), stopped),
+        Some(capture) if capture.output == "(no output)" => {
+            (String::new(), format!("[no output; output file: {}]\n\n{stopped}", result.info.file))
+        }
+        Some(capture) => (
+            capture.output.strip_suffix('\n').unwrap_or(&capture.output).to_string(),
+            format!("[full output saved to {}]\n\n{stopped}", result.info.file),
+        ),
+    };
+    let message = if output.is_empty() { notice.clone() } else { format!("{output}\n\n{notice}") };
+    Interrupted { output, notice, message }
+}
+
 /// `ShellResult.notice(output, timeout)`: how the command ended, for the model. `timeout` is the limit in ms that
 /// applied (none or 0 leaves out how long it waited).
 pub fn notice(output: &Output, timeout: Option<u64>) -> Option<String> {
@@ -401,4 +431,61 @@ mod tests {
         let n = notification("sh_1", Some("sh_1"), "ls", "completed", "out", None);
         assert_eq!(n.text, "<shell id=\"sh_1\" state=\"completed\" command=\"ls\">\nout\n</shell>");
     }
+    // shell-result.test.ts (2.3.0): `ShellResult.interrupted`.
+    fn stopped_info(status: ShellStatus) -> ShellInfo {
+        ShellInfo {
+            id: "sh_result".into(),
+            status,
+            command: "work".into(),
+            cwd: "/tmp".into(),
+            shell: "/bin/sh".into(),
+            file: "/tmp/sh_result.out".into(),
+            pid: None,
+            exit: None,
+            signal: None,
+            metadata: Metadata::new(),
+            time: oc_schema::message::ShellTime { started: 0, completed: Some(1) },
+        }
+    }
+
+    #[test]
+    fn interrupted_names_the_output_file_and_the_shell_even_when_the_output_fits() {
+        let result = ShellResult {
+            info: stopped_info(ShellStatus::Killed),
+            capture: Some(Capture { output: "partial\n".into(), truncated: false }),
+        };
+        assert_eq!(
+            interrupted(&result),
+            Interrupted {
+                output: "partial".into(),
+                notice: "[full output saved to /tmp/sh_result.out]\n\nCommand interrupted by the user (shell ID: sh_result).".into(),
+                message: "partial\n\n[full output saved to /tmp/sh_result.out]\n\nCommand interrupted by the user (shell ID: sh_result).".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn interrupted_keeps_a_truncated_tails_own_notice() {
+        let output = "tail\n\n[showing lines 9-10 of 10; full output saved to /tmp/sh_result.out]";
+        let result = ShellResult { info: stopped_info(ShellStatus::Killed), capture: Some(Capture { output: output.into(), truncated: true }) };
+        assert_eq!(
+            interrupted(&result),
+            Interrupted {
+                output: output.into(),
+                notice: "Command interrupted by the user (shell ID: sh_result).".into(),
+                message: format!("{output}\n\nCommand interrupted by the user (shell ID: sh_result)."),
+            }
+        );
+    }
+
+    #[test]
+    fn interrupted_says_once_there_was_no_output_and_that_a_command_still_stopping_is_not_done() {
+        let result = ShellResult {
+            info: stopped_info(ShellStatus::Running),
+            capture: Some(Capture { output: "(no output)".into(), truncated: false }),
+        };
+        let notice = "[no output; output file: /tmp/sh_result.out]\n\nCommand interrupted by the user (shell ID: sh_result); it is still being stopped.";
+        assert_eq!(interrupted(&result), Interrupted { output: String::new(), notice: notice.into(), message: notice.into() });
+    }
 }
+

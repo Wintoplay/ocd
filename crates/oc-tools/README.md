@@ -49,7 +49,18 @@ pub trait Tool: Send + Sync {
 - **`ToolContext`** (cloneable) carries:
   - ids: `session_id`, `message_id`, `call_id`, `agent`
   - location: `directory`, `worktree` (project dir), `project_id`, `workspace_id`
-  - `global: Arc<oc_util::Global>` and `cancel: CancellationToken`
+  - `global: Arc<oc_util::Global>` and `cancel: CancellationToken` (interrupts the call)
+  - `stop: Stop`: the user's cooperative stop (`Tool.Context.cancel`, 2.3.0). A tool that listens
+    (`stop.listen()`, held for as long as it would stop on its own) is asked to settle its own call when the
+    user stops the step; the step interrupts it through `cancel` only if it is not listening or does not
+    settle within 5 s. `Stop::none()` never fires (nested Code Mode calls, calls outside a step). The shell
+    tool listens for the whole call: a stop while it asks for permission fails with `Command interrupted by
+    the user before it started.`; a stop while the command runs stops it (`ShellService::stop`: SIGTERM, then
+    SIGKILL after 3 s, the command keeps its status `killed` and its file), waits up to 500 ms for it to exit,
+    and fails the call with `ShellResult::interrupted` (the output so far, `[full output saved to F]` or
+    `[no output; output file: F]`, then `Command interrupted by the user (shell ID: X)[; it is still being
+    stopped].`) and metadata `{interrupted, truncated, shellID, notice}`. Cancelling a shell job (or
+    interrupting its call) stops the command and keeps it instead of removing it.
   - `progress` callback: publishes `session.tool.progress`
   - `config: Arc<ToolConfig>`: `tool_output.max_*`, resolved `formatter` config,
     `experimental.subagent_depth`, `shell`, `media.image` limits and `image_model`

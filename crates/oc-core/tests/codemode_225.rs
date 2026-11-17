@@ -93,6 +93,7 @@ fn context(host: Arc<Host>, progress: Arc<Mutex<Vec<Metadata>>>) -> ToolContext 
         workspace_id: None,
         global: Arc::new(oc_util::Global::resolve()),
         cancel: tokio_util::sync::CancellationToken::new(),
+        stop: Default::default(),
         progress: Arc::new(move |m| progress.lock().unwrap().push(m)),
         config: Arc::new(ToolConfig::default()),
         host,

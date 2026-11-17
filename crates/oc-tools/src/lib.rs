@@ -26,7 +26,7 @@ pub mod websearch;
 
 pub use host::ToolHost;
 pub use registry::{Registry, Snapshot};
-pub use tool::{DefinitionContext, Tool, ToolContext, ToolDefinition, ToolError, ToolOptions, ToolResult};
+pub use tool::{DefinitionContext, Stop, Tool, ToolContext, ToolDefinition, ToolError, ToolOptions, ToolResult};
 
 #[cfg(test)]
 mod tests;

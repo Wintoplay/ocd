@@ -250,6 +250,7 @@ mod tests {
             workspace_id: None,
             global: Arc::new(global),
             cancel: tokio_util::sync::CancellationToken::new(),
+            stop: Default::default(),
             progress: Arc::new(|_| {}),
             config: Arc::new(ToolConfig::default()),
             host,

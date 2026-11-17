@@ -94,6 +94,18 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-17: 2.3.0 CATCH-UP, STEP LIFECYCLE: a retryable failure after output started retries into a fresh
+  assistant message (no `Continue` outcome, no "The previous response was interrupted" synthetic); `lower.rs` replays
+  a failed or interrupted assistant cut at its last locally-run call (unrun calls dropped, `tool.input*` errors kept,
+  reasoning only when output follows, no provider state on the last block). `session.step.first-token` (durable, once
+  per step) sets `time.firstToken`, cleared on a step restart; the TUI's tokens/s counts from it and the footer adds
+  `· N ttft`. Cooperative stop: `ToolContext.stop` (calls that listen settle on their own; the others are interrupted,
+  the rest after 5 s; a shutdown interrupts all). Shell: `ShellService::stop` (SIGTERM, SIGKILL after 3 s, the command
+  stays listed as killed); a stopped call fails with the output so far, the file and the shell ID
+  (`metadata.interrupted/notice`, rendered by the TUI like a finished call); a cancelled shell job stops its command
+  instead of removing it. Nested Code Mode calls never get the stop. The plugin host is rebuilt on 2.3.0's plugin
+  package: a Promise tool that reads `signal` tells the core it listens and is stopped through it. Parity:
+  `stop_shell_keeps_output`, `stop_first_token`, `plugin_tool_stop`.
 - 2026-11-17: 2.3.0 CATCH-UP, MCP OAUTH AND PASTED PROVIDER SIGN-IN (#63028, #63403, #63315): a connection's auth is
   `oc_mcp::oauth::ConnectAuth` (upstream's `AuthProvider`: `token()` + `onUnauthorized`) over the credential the
   manager selected; the SDK provider (`oauth::Provider`, `auth()`) is used only by `authorize`. `oauth::refresh::exchange`

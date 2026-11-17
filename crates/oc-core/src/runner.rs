@@ -30,9 +30,6 @@ use crate::permission::evaluate;
 use crate::retry::{Policy, MAX_STEPS_PROMPT};
 use crate::step::{self, Outcome, StepError, ToolCall, ToolRun, ToolRunner};
 
-pub const CONTINUE_AFTER_INCOMPLETE_STREAM: &str =
-    "The previous response was interrupted. Continue from where you left off without repeating completed content.";
-
 pub const CONTINUE_AFTER_OUTPUT_LIMIT: &str = "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces.";
 
 pub struct Engine {
@@ -1165,6 +1162,11 @@ impl Engine {
                     let location = loaded.sel.location.clone();
                     Arc::new(move || location.is_closed())
                 },
+                interruption: {
+                    let app = self.app.clone();
+                    let key = session_id.clone();
+                    Some(Arc::new(move || app.coordinator.get().and_then(|c| c.interruption(&key))))
+                },
                 recover_overflow: {
                     let this = self.clone();
                     let loaded_ref = &loaded;
@@ -1190,21 +1192,13 @@ impl Engine {
                     }
                     return Ok(needs_continuation);
                 }
-                Ok(Outcome::Retry { error, decision }) => {
+                Ok(Outcome::Retry { error, decision, fresh_assistant }) => {
                     crate::retry::wait(&self.app.bus, &session_id, &assistant, decision, error, &cancel).await?;
-                }
-                Ok(Outcome::Continue { error, decision }) => {
-                    crate::retry::wait(&self.app.bus, &session_id, &assistant, decision, error, &cancel).await?;
-                    if cancel.is_cancelled() {
-                        return Err(DrainError::Interrupted);
+                    // A failure after output started keeps that message; the retry streams into a new one and history
+                    // replays the failed one cut at its last local call that ran (no continuation prompt since 2.3.0).
+                    if fresh_assistant {
+                        assistant = oc_schema::id::message();
                     }
-                    self.app.bus.commit_one(SessionEvent::Synthetic {
-                        session_id: session_id.clone(),
-                        text: CONTINUE_AFTER_INCOMPLETE_STREAM.into(),
-                        description: None,
-                        metadata: None,
-                    })?;
-                    assistant = oc_schema::id::message();
                 }
                 Ok(Outcome::OutputLimit { needs_continuation }) => {
                     // The current response is included. User input or any other finish breaks the streak.
@@ -1442,6 +1436,7 @@ impl Engine {
             workspace_id: session.location.workspace_id.clone(),
             global: self.app.global.clone(),
             cancel: CancellationToken::new(),
+            stop: Default::default(),
             progress: Arc::new(|_| {}),
             config: env.config.clone(),
             host,
@@ -1476,7 +1471,7 @@ struct LocalTools {
 
 #[async_trait]
 impl ToolRunner for LocalTools {
-    async fn run(&self, call: ToolCall, progress: step::Progress, cancel: CancellationToken) -> ToolRun {
+    async fn run(&self, call: ToolCall, progress: step::Progress, cancel: CancellationToken, stop: oc_tools::Stop) -> ToolRun {
         // A tool call can arrive during a reload; its permission check reads the session's agent.
         self.engine.app.plugins.await_activation(&self.key).await;
         let host: Arc<dyn oc_tools::ToolHost> = Arc::new(crate::host::CoreHost {
@@ -1497,6 +1492,7 @@ impl ToolRunner for LocalTools {
             workspace_id: self.session.location.workspace_id.clone(),
             global: self.engine.app.global.clone(),
             cancel,
+            stop,
             progress: Arc::new(move |m: Metadata| progress(m)),
             config: self.config.clone(),
             host,

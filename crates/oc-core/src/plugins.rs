@@ -2385,8 +2385,36 @@ impl Tool for PluginTool {
             }
         });
         let location = LocationRef::new(self.key.clone());
+        // A call the user can stop (2.3.0): while the tool awaits its stop (a Promise tool read its `signal`), the
+        // step's stop reaches it through `tool.stop` instead of interrupting it.
+        let listening = tokio_util::sync::CancellationToken::new();
+        let listen: Option<oc_plugin::ListenFn> = ctx.stop.is_available().then(|| {
+            let stop = ctx.stop.clone();
+            let (host, location, call, listening) = (host.clone(), location.clone(), call.clone(), listening.clone());
+            let current: Arc<parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>> = Default::default();
+            let listen: oc_plugin::ListenFn = Arc::new(move |on: bool| {
+                if let Some(previous) = current.lock().take() {
+                    previous.cancel();
+                }
+                if !on {
+                    return;
+                }
+                let Some(listener) = stop.listen() else { return };
+                let done = listening.child_token();
+                *current.lock() = Some(done.clone());
+                let (host, location, call) = (host.clone(), location.clone(), call.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = listener.stopped() => host.stop_tool(&location, &call),
+                        _ = done.cancelled() => {}
+                    }
+                });
+            });
+            listen
+        });
+        let _listening = listening.drop_guard();
         let result = tokio::select! {
-            r = host.execute_tool(&location, &self.handle, input, context, Some(progress)) => r,
+            r = host.execute_tool_with(&location, &self.handle, input, context, Some(progress), listen) => r,
             _ = ctx.cancel.cancelled() => {
                 plugins.inflight.lock().remove(&call);
                 return Err(ToolError::interrupted());

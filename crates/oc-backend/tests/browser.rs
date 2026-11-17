@@ -145,6 +145,7 @@ fn context(h: &Harness, session: &str) -> ToolContext {
         workspace_id: None,
         global: Arc::new(global(h.root.path())),
         cancel: tokio_util::sync::CancellationToken::new(),
+        stop: Default::default(),
         progress: Arc::new(|_| {}),
         config: Arc::new(ToolConfig::default()),
         host: Arc::new(Host),

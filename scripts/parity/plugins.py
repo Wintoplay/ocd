@@ -106,6 +106,30 @@ def plugin_tool(ctx):
 
 
 @scenario("plugin")
+def plugin_tool_stop(ctx):
+    """2.3.0 (#63127): Promise tools that read their `signal` stop cooperatively when the user stops the session: one
+    rejects with its own error, one resolves with what it had; a tool that never reads it is interrupted."""
+    boot(ctx, ["./plugins/stoppable-plugin"], ["stoppable-plugin"], script=[
+        {"tools": [{"name": "listens", "args": {}, "id": "call_listens"}]},
+        {"text": "Stopped."},
+        {"tools": [{"name": "resolves", "args": {}, "id": "call_resolves"}]},
+        {"text": "Stopped again."},
+    ])
+    sid = ctx.create_session()
+    for prompt in ("listen", "resolve"):
+        mark = len(ctx.server.events)
+        ctx.prompt(sid, prompt, wait=False)
+        ctx.wait_for("session.tool.called", timeout=30, start=mark)
+        time.sleep(1.0)  # the tool reads its signal
+        ctx.call(f"interrupt.{prompt}", "POST", f"/api/session/{sid}/interrupt")
+        ctx.wait_idle(sid, start=mark)
+    ctx.prompt(sid, "and now?")
+    ctx.call("messages", "GET", f"/api/session/{sid}/message")
+    ctx.record_events()
+    ctx.record_llm()
+
+
+@scenario("plugin")
 def plugin_hooks(ctx):
     """permission.evaluate allows/denies .env reads, tool.execute.after, session.prompt/context, shell.create.before."""
     boot(ctx, ["./plugins/permission-plugin"], ["permission-plugin"], files={

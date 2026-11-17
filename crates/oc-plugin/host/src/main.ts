@@ -245,6 +245,11 @@ peer.handle("rpc.call", async (params: { location: string; rpcID: string; method
   })
 })
 
+// The user stopped a plugin tool call that listens for its stop (2.3.0 `Tool.Context.cancel`).
+peer.on("tool.stop", (params: { location: string; id: string }) => {
+  locations.get(params.location)?.stopTool(params.id)
+})
+
 peer.on("event", (params: { location?: string; event: unknown }) => {
   if (params.location !== undefined && params.location !== null) {
     locations.get(params.location)?.deliver(params.event)

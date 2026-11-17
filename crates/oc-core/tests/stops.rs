@@ -46,7 +46,7 @@ struct PanickingTools;
 
 #[async_trait]
 impl ToolRunner for PanickingTools {
-    async fn run(&self, _call: ToolCall, _progress: Progress, _cancel: CancellationToken) -> ToolRun {
+    async fn run(&self, _call: ToolCall, _progress: Progress, _cancel: CancellationToken, _stop: oc_tools::Stop) -> ToolRun {
         panic!("byte index 3 is not a char boundary");
     }
 }
@@ -185,6 +185,7 @@ async fn runs_do_not_stop_early() {
         retry: &mut policy,
         cancel: CancellationToken::new(),
         location_closed: Arc::new(|| false),
+        interruption: None,
         retry_hook: None,
         http_hook: None,
         web_socket: None,
@@ -193,8 +194,8 @@ async fn runs_do_not_stop_early() {
     .await;
     let shown = match &outcome {
         Ok(Outcome::Completed { needs_continuation }) => format!("completed {needs_continuation}"),
-        Ok(Outcome::Retry { error, .. }) => format!("retry {error:?}"),
-        Ok(Outcome::Continue { error, .. }) => format!("continue {error:?}"),
+        Ok(Outcome::Retry { error, fresh_assistant: false, .. }) => format!("retry {error:?}"),
+        Ok(Outcome::Retry { error, fresh_assistant: true, .. }) => format!("retry fresh {error:?}"),
         Ok(_) => "other".into(),
         Err(e) => format!("error {e}"),
     };
@@ -284,6 +285,7 @@ async fn runs_do_not_stop_early() {
         retry: &mut policy,
         cancel: CancellationToken::new(),
         location_closed: Arc::new(|| false),
+        interruption: None,
         retry_hook: None,
         http_hook: None,
         web_socket: None,
@@ -307,7 +309,13 @@ async fn runs_do_not_stop_early() {
     let streamed = order.iter().position(|e| e == "session.step.streamed").unwrap();
     assert_eq!(
         order[..=streamed],
-        ["session.step.started", "session.tool.called call_x", "session.tool.called call_y", "session.step.streamed"],
+        [
+            "session.step.started",
+            "session.step.first-token",
+            "session.tool.called call_x",
+            "session.tool.called call_y",
+            "session.step.streamed"
+        ],
         "{order:#?}"
     );
     // The two executions run concurrently and settle in completion order.
@@ -335,7 +343,7 @@ struct InstantTools {
 
 #[async_trait]
 impl ToolRunner for InstantTools {
-    async fn run(&self, call: ToolCall, _progress: Progress, _cancel: CancellationToken) -> ToolRun {
+    async fn run(&self, call: ToolCall, _progress: Progress, _cancel: CancellationToken, _stop: oc_tools::Stop) -> ToolRun {
         let snapshot = {
             let mut rx = self.rx.lock();
             let mut seen = self.seen.lock();

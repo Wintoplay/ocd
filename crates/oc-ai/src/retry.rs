@@ -5,10 +5,6 @@
 use crate::error::{AIError, ErrorKind};
 use serde_json::{Map, Value, json};
 
-/// Synthetic user text published before continuing an interrupted response (`llm.ts:35-36`).
-pub const CONTINUE_TEXT: &str =
-    "The previous response was interrupted. Continue from where you left off without repeating completed content.";
-
 /// Message of the InvalidProviderOutput raised when a stream completes with finish reason `unknown`.
 pub const UNKNOWN_FINISH_MESSAGE: &str = "The provider response ended with an unknown finish reason.";
 
@@ -81,17 +77,20 @@ impl Decision {
     }
 }
 
-/// Outcome kind of a failed step (`step.ts:145-288`).
+/// Outcome kind of a failed step (`step.ts`).
+///
+/// Since 2.3.0 there is no "continue" prompt: a failure after output started is retried from the prompt into a fresh
+/// assistant message, and history replays the failed message cut at its last local call that ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryOutcome {
     /// Failure before any output: the same assistant message is retried.
     Retry,
-    /// Failure after output started: wait, publish [`CONTINUE_TEXT`] and continue with a new message.
-    Continue,
+    /// Failure after output started: the failed message stays and the retry streams into a new one.
+    RetryFresh,
 }
 
 pub fn outcome(output_started: bool) -> RetryOutcome {
-    if output_started { RetryOutcome::Continue } else { RetryOutcome::Retry }
+    if output_started { RetryOutcome::RetryFresh } else { RetryOutcome::Retry }
 }
 
 /// Per-step retry state (`SessionRunnerRetry.policy`): exponential schedule capped at 10 s, 10 retries,

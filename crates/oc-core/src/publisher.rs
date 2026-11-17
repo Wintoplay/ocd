@@ -118,6 +118,7 @@ enum Kind {
 struct Inner {
     tools: IndexMap<String, ToolSt>,
     step_started: bool,
+    first_token: bool,
     provider_failed: bool,
     output_started: bool,
     failure: Option<SessionError>,
@@ -684,7 +685,31 @@ impl Publisher {
     }
 
     /// Fold one provider event into durable events.
+    /// `session.step.first-token`, once per step: the provider streamed its first output token.
+    async fn first_token(&self) -> anyhow::Result<()> {
+        {
+            let mut g = self.inner.lock();
+            if g.first_token {
+                return Ok(());
+            }
+            g.first_token = true;
+        }
+        let id = self.start_assistant().await?;
+        self.commit(SessionEvent::StepFirstToken { session_id: self.session_id.clone(), assistant_message_id: id })
+    }
+
     pub async fn publish(self: &Arc<Self>, event: &LLMEvent) -> anyhow::Result<()> {
+        // `beginsOutput`: the events that carry a step's first generated token, matching how the stream counts output.
+        if matches!(
+            event,
+            LLMEvent::TextStart { .. }
+                | LLMEvent::ReasoningStart { .. }
+                | LLMEvent::ToolInputStart { .. }
+                | LLMEvent::ToolInputError { .. }
+                | LLMEvent::ToolCall { .. }
+        ) {
+            self.first_token().await?;
+        }
         match event {
             LLMEvent::StepStart { .. } => {
                 self.start_assistant().await?;

@@ -397,6 +397,8 @@ impl Host for ExecuteHost {
         ctx.call_id = oc_schema::id::ascending("call");
         // Progress replaces the execute call's own, so an inner tool's updates would hide the call rows (#60480).
         ctx.progress = Arc::new(|_| {});
+        // A stop is the execute call's to handle: a nested call never fails it with its own error (2.3.0).
+        ctx.stop = oc_tools::Stop::none();
         let files = self.files.clone();
         let hooks = self.hooks.clone();
         let stop = self.stop.clone();
@@ -540,6 +542,7 @@ impl Host for CheckHost {
         };
         let mut ctx = self.ctx.clone();
         ctx.call_id = format!("call_{}_{index}", ctx.message_id);
+        ctx.stop = oc_tools::Stop::none();
         let hooks = self.hooks.clone();
         let unattended = self.unattended.clone();
         let run = async move {

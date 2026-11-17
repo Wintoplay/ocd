@@ -1039,7 +1039,7 @@ fn run(c: &Connection, e: &Committing<'_>, seq: i64) -> anyhow::Result<()> {
                 a.finish = None;
                 a.raw_finish = None;
                 a.native = None;
-                a.time = AssistantTime { created: *started, streamed: None, completed: None };
+                a.time = AssistantTime { created: *started, first_token: None, streamed: None, completed: None };
                 if let Some(snap) = snapshot {
                     let mut sn = a.snapshot.clone().unwrap_or_default();
                     sn.start = Some(snap.clone());
@@ -1056,7 +1056,7 @@ fn run(c: &Connection, e: &Committing<'_>, seq: i64) -> anyhow::Result<()> {
             append(Message::Assistant(Box::new(Assistant {
                 id: assistant_message_id.clone(),
                 metadata: meta.clone(),
-                time: AssistantTime { created: *started, streamed: None, completed: None },
+                time: AssistantTime { created: *started, first_token: None, streamed: None, completed: None },
                 agent: agent.clone(),
                 model: model.clone(),
                 content: vec![],
@@ -1069,6 +1069,9 @@ fn run(c: &Connection, e: &Committing<'_>, seq: i64) -> anyhow::Result<()> {
                 error: None,
                 retry: None,
             })))?;
+        }
+        E::StepFirstToken { assistant_message_id, .. } => {
+            with_assistant(c, e, s, assistant_message_id, |a| a.time.first_token = Some(created))?
         }
         E::StepStreamed { assistant_message_id, .. } => {
             with_assistant(c, e, s, assistant_message_id, |a| a.time.streamed = Some(created))?

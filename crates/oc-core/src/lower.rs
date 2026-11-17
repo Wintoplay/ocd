@@ -185,29 +185,67 @@ fn tool_result(t: &ToolItem, pm: Option<Map<String, Value>>) -> Option<ToolResul
     })
 }
 
+/// `ranTool`: a local or hosted call that ran. Sessions migrated from V1 never recorded `time.ran`, so a completed
+/// call also counts as run.
+fn ran_tool(item: &AssistantContent) -> bool {
+    matches!(item, AssistantContent::Tool { time, state, .. } if time.ran.is_some() || matches!(state, ToolState::Completed { .. }))
+}
+
 fn assistant(m: &Assistant, model: &ModelRef, key: &str) -> Vec<Message> {
     let same_provider = m.model.provider_id == model.provider_id;
     let same_model = same_provider && m.model.id == model.id;
-    let reuse = same_model && m.error.is_none();
-    let interrupted = m.content.iter().any(|c| matches!(c, AssistantContent::Reasoning { time: Some(t), .. } if t.completed.is_none()));
+    // A failed stream is retried from what had already happened: the local calls that ran and everything before
+    // them. Cutting after a local call's result keeps the retried request from ending on an assistant reply; hosted
+    // calls after it are provider-side reads, so the retry can redo them.
+    let kept: &[AssistantContent] = match &m.error {
+        None => &m.content,
+        Some(e) if e.kind == "aborted" => &m.content,
+        Some(_) => {
+            let last = m
+                .content
+                .iter()
+                .rposition(|item| matches!(item, AssistantContent::Tool { executed, .. } if *executed != Some(true)) && ran_tool(item));
+            &m.content[..last.map_or(0, |i| i + 1)]
+        }
+    };
+    // A stream cut by Esc, a crash or a failure may end mid-block, so its last block's provider state is not
+    // replayed, and reasoning is only replayed once the model moved on to output. Calls it cut off before they ran
+    // are dropped; input errors stay so the model can reissue the call.
+    let cut = m.error.is_some() || m.finish.is_none();
+    let tail = if cut { m.content.len().checked_sub(1) } else { None };
+    let items: Vec<(usize, &AssistantContent)> = kept
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            !cut || match item {
+                AssistantContent::Tool { state, .. } => {
+                    ran_tool(item) || matches!(state, ToolState::Error { error, .. } if error.kind.starts_with("tool.input"))
+                }
+                _ => true,
+            }
+        })
+        .collect();
     let mut content: Vec<ContentPart> = Vec::new();
-    for item in &m.content {
+    for (position, (index, item)) in items.iter().enumerate() {
         match item {
             AssistantContent::Text { text, native } => content.push(ContentPart::Text(TextPart {
                 text: text.clone(),
                 cache: None,
                 metadata: None,
-                // Text can carry provider-bound state (e.g. Gemini thought signatures), which is only
-                // replayable against the model that produced it.
-                provider_metadata: if reuse { provider_metadata(key, native) } else { None },
+                provider_metadata: if same_model && Some(*index) != tail { provider_metadata(key, native) } else { None },
             })),
-            // Errored or interrupted reasoning is not replayed; readable reasoning after a
-            // model/provider switch is left to the destination adapter.
+            // Readable reasoning after a model/provider switch is left to the destination adapter.
             AssistantContent::Reasoning { text, native, .. } => {
-                if m.error.is_some() || interrupted {
+                if cut
+                    && !items[position + 1..].iter().any(|(_, after)| match after {
+                        AssistantContent::Tool { .. } => true,
+                        AssistantContent::Text { text, .. } => !text.trim().is_empty(),
+                        _ => false,
+                    })
+                {
                     continue;
                 }
-                if reuse {
+                if same_model {
                     content.push(ContentPart::Reasoning(ReasoningPart {
                         text: text.clone(),
                         encrypted: None,
@@ -227,9 +265,9 @@ fn assistant(m: &Assistant, model: &ModelRef, key: &str) -> Vec<Message> {
             }
             AssistantContent::Tool { id, name, executed, native, state, .. } => {
                 let t = ToolItem { id, name, executed: *executed, state };
-                let settled = matches!(state, ToolState::Completed { .. } | ToolState::Error { .. });
-                let reuse_tool = reuse || (same_model && *executed == Some(true) && settled);
-                content.push(tool_call(&t, if reuse_tool { provider_metadata(key, native) } else { None }));
+                // Call-side metadata is model-scoped proof of generation (Gemini thought signatures, OpenAI
+                // encrypted reasoning): only the producing model may replay it.
+                content.push(tool_call(&t, if same_model { provider_metadata(key, native) } else { None }));
                 if *executed != Some(true) {
                     continue;
                 }
@@ -246,18 +284,23 @@ fn assistant(m: &Assistant, model: &ModelRef, key: &str) -> Vec<Message> {
     let meaningful: Vec<ContentPart> = content
         .into_iter()
         .filter(|p| match p {
-            ContentPart::Text(t) => !t.text.is_empty(),
+            ContentPart::Text(t) => {
+                if cut {
+                    !t.text.trim().is_empty()
+                } else {
+                    !t.text.is_empty()
+                }
+            }
             ContentPart::Reasoning(r) => !r.text.is_empty() || r.provider_metadata.as_ref().is_some_and(|m| !m.is_empty()),
             _ => true,
         })
         .collect();
-    let results: Vec<Message> = m
-        .content
+    let results: Vec<Message> = items
         .iter()
-        .filter_map(|c| match c {
+        .filter_map(|(_, c)| match c {
             AssistantContent::Tool { id, name, executed, native, state, .. } if *executed != Some(true) => {
                 let t = ToolItem { id, name, executed: *executed, state };
-                tool_result(&t, if reuse { provider_metadata(key, native) } else { None }).map(Message::tool)
+                tool_result(&t, if same_model { provider_metadata(key, native) } else { None }).map(Message::tool)
             }
             _ => None,
         })

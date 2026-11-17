@@ -287,6 +287,14 @@ pub enum SessionEvent {
         snapshot: Option<String>,
         started: u64,
     },
+    /// The provider streamed the step's first output token (2.3.0).
+    #[serde(rename = "session.step.first-token")]
+    StepFirstToken {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        #[serde(rename = "assistantMessageID")]
+        assistant_message_id: String,
+    },
     #[serde(rename = "session.step.streamed")]
     StepStreamed {
         #[serde(rename = "sessionID")]
@@ -572,6 +580,7 @@ fn session_id_of(e: &SessionEvent) -> &str {
         | ShellStarted { session_id, .. }
         | ShellEnded { session_id, .. }
         | StepStarted { session_id, .. }
+        | StepFirstToken { session_id, .. }
         | StepStreamed { session_id, .. }
         | StepEnded { session_id, .. }
         | StepFailed { session_id, .. }
