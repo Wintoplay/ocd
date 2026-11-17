@@ -36,6 +36,8 @@ PASSWORD = "parity"
 ID_RE = re.compile(r"\b([a-z]{2,6})_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
 # Ids derived from a schedule id (`msg_<sch_id>_<run>`, `msg_<sch_id>_check_<n>`, `call_msg_<sch_id>_check_<n>_<i>`).
 SCHEDULE_ID_RE = re.compile(r"(?<=msg_)(sch)_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
+# The fork notice's message ID names the fork (`msg_fork_notice_<ses_id>`, 2.3.0).
+FORK_NOTICE_ID_RE = re.compile(r"(?<=msg_fork_notice_)(ses)_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 ISO_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?\b")
 VERSION_RE = re.compile(r"^(0\.0\.0-[\w.-]+|2\.[012]\.\d+)$")
@@ -97,6 +99,7 @@ class Normalizer:
             if p:
                 s = s.replace(p, f"<{name}>")
         s = SCHEDULE_ID_RE.sub(self._id, s)
+        s = FORK_NOTICE_ID_RE.sub(self._id, s)
         s = ID_RE.sub(self._id, s)
         s = UUID_RE.sub(self._uuid, s)
         # Persistent terminal IDs are random numbers the daemon picks: renumbered by first appearance.

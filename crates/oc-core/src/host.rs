@@ -256,11 +256,9 @@ impl ToolHost for CoreHost {
     }
 
     async fn session_synthetic(&self, m: SyntheticMessage) -> Result<(), String> {
-        self.app
-            .sessions
-            .synthetic(&m.session_id, m.id, m.text, Some(m.description), Some(m.metadata), None)
-            .await
-            .map_err(|e| e.to_string())?;
+        let admit = self.app.sessions.synthetic(&m.session_id, m.id, m.text, Some(m.description), Some(m.metadata), None);
+        let admitted = if m.unlocated { crate::bus::without_location_async(admit).await } else { admit.await };
+        admitted.map_err(|e| e.to_string())?;
         if let Some(c) = self.app.coordinator.get() {
             c.wake(&m.session_id, crate::inbox::Scope::Input);
         }

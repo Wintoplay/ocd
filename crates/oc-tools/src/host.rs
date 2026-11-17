@@ -258,6 +258,9 @@ pub struct SyntheticMessage {
     pub description: String,
     pub text: String,
     pub metadata: Metadata,
+    /// Admitted outside any location: upstream 2.3.0 tells a session how a shell command ended from the shell
+    /// service's own scope, which outlives the location (`shell.watch`), so the notice's events carry none.
+    pub unlocated: bool,
 }
 
 /// Shell invocation passed through the `shell.create.before` plugin hook.

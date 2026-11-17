@@ -303,6 +303,7 @@ fn notify_when_done(host: Arc<dyn ToolHost>, session_id: String, id: String, fil
                 description: "Image generation".into(),
                 text: notice(&id, state, &body),
                 metadata: meta(vec![("source", json!(NAME)), ("jobID", json!(id)), ("state", json!(state)), ("path", json!(file))]),
+                unlocated: false,
             })
             .await;
         if let Some(n) = &info.notification_id {

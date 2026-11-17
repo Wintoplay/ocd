@@ -275,6 +275,7 @@ fn spawn_notifier(ctx: &ToolContext, job_id: String, shell_id: String, command: 
                 description: command.clone(),
                 text: note.text,
                 metadata: note.metadata,
+                unlocated: true,
             })
             .await;
         if let Some(id) = &info.notification_id {
