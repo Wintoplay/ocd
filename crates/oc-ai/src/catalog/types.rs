@@ -132,7 +132,8 @@ pub const BUILTIN_PACKAGES: &[&str] = &[
 ];
 
 /// Every `@opencode/ai/providers/*` entrypoint upstream's Core bundles (`Provider.builtinPackages`),
-/// including the image and decision entrypoints. The models.dev catalog keeps
+/// including the image, decision and video entrypoints (video models are library-only: the catalog keeps no video
+/// type). The models.dev catalog keeps
 /// models whose API names one of these (`loadable`); a chat model whose package is missing from
 /// [`BUILTIN_PACKAGES`] fails to load.
 pub const CATALOG_PACKAGES: &[&str] = &[
@@ -155,6 +156,7 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/azure/messages",
     "@opencode/ai/providers/baseten",
     "@opencode/ai/providers/baseten/decisions",
+    "@opencode/ai/providers/byteplus/videos",
     "@opencode/ai/providers/cerebras",
     "@opencode/ai/providers/cloudflare-ai-gateway",
     "@opencode/ai/providers/cloudflare-ai-gateway/decisions",
@@ -171,8 +173,10 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/digitalocean/responses",
     "@opencode/ai/providers/fireworks",
     "@opencode/ai/providers/google",
+    "@opencode/ai/providers/google/decisions",
     "@opencode/ai/providers/google/interactions",
     "@opencode/ai/providers/google/images",
+    "@opencode/ai/providers/google/videos",
     "@opencode/ai/providers/google-vertex",
     "@opencode/ai/providers/google-vertex/chat",
     "@opencode/ai/providers/google-vertex/gemini",
@@ -193,6 +197,7 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/minimax/images",
     "@opencode/ai/providers/minimax/messages",
     "@opencode/ai/providers/minimax/responses",
+    "@opencode/ai/providers/minimax/videos",
     "@opencode/ai/providers/mistral",
     "@opencode/ai/providers/moonshot",
     "@opencode/ai/providers/moonshot/chat",
@@ -212,10 +217,12 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/openrouter/decisions",
     "@opencode/ai/providers/openrouter/images",
     "@opencode/ai/providers/openrouter/responses",
+    "@opencode/ai/providers/openrouter/videos",
     "@opencode/ai/providers/togetherai",
     "@opencode/ai/providers/typesafe-ai/decisions",
     "@opencode/ai/providers/venice",
     "@opencode/ai/providers/venice/responses",
+    "@opencode/ai/providers/volcengine/videos",
     "@opencode/ai/providers/vercel-ai-gateway",
     "@opencode/ai/providers/vercel-ai-gateway/chat",
     "@opencode/ai/providers/vercel-ai-gateway/messages",

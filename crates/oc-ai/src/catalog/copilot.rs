@@ -411,12 +411,28 @@ pub struct State {
 /// The provider and model transforms of `opencode.provider.github.copilot`.
 pub struct GithubCopilot {
     pub state: State,
+    /// The endpoint saved with the active OAuth login (`copilotBaseURL(metadata)`). It serves requests until the
+    /// first refresh reads the account's current one, so an Enterprise login doesn't send its token to the public
+    /// host while that refresh is still running (2.3.0, #63146).
+    pub login: Option<String>,
+}
+
+impl GithubCopilot {
+    /// The login setting of the active credential (`credentialSettings`): OAuth logins only.
+    pub fn login_base_url(credential: Option<&crate::credentials::CredentialValue>) -> Option<String> {
+        match credential {
+            Some(crate::credentials::CredentialValue::Oauth { metadata, .. }) => {
+                Some(crate::credentials::flows::copilot::copilot_base_url(metadata.as_ref()))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl CatalogPlugin for GithubCopilot {
     fn providers(&mut self, editor: &mut ProviderEditor) {
         let Some(record) = editor.get(PROVIDER_ID) else { return };
-        let base_url = self.state.base_url.clone().unwrap_or_else(|| DEFAULT_BASE_URL.into());
+        let base_url = self.state.base_url.clone().or_else(|| self.login.clone()).unwrap_or_else(|| DEFAULT_BASE_URL.into());
         if let Some(models) = &self.state.models {
             let existing: Vec<ModelInfo> = record.models.values().cloned().collect();
             let mut derived = derive(&base_url, models, &existing);
@@ -543,11 +559,42 @@ mod tests {
         editor
     }
 
+    /// provider-github-copilot.test.ts (2.3.0, #63146): until the first model list arrives, an Enterprise login is
+    /// served from its own host, or from the endpoint saved with it.
+    #[test]
+    fn serves_a_login_from_its_own_endpoint_until_the_first_model_list_arrives() {
+        let oauth = |metadata: Value| crate::credentials::CredentialValue::Oauth {
+            method_id: "device".into(),
+            refresh: "r".into(),
+            access: "a".into(),
+            expires: 0,
+            metadata: metadata.as_object().cloned(),
+        };
+        let route = |credential: Option<crate::credentials::CredentialValue>| {
+            let mut editor = copilot_editor();
+            GithubCopilot { state: State::default(), login: GithubCopilot::login_base_url(credential.as_ref()) }.providers(&mut editor);
+            let settings = editor.get(PROVIDER_ID).unwrap().models["gpt-5.4"].settings.clone();
+            serde_json::to_value(settings).unwrap()["baseURL"].clone()
+        };
+        assert_eq!(route(Some(oauth(json!({"enterpriseUrl": "company.ghe.com"})))), json!("https://copilot-api.company.ghe.com"));
+        assert_eq!(
+            route(Some(oauth(json!({"enterpriseUrl": "company.ghe.com", "apiEndpoint": "https://api.tenant.ghe.com"})))),
+            json!("https://api.tenant.ghe.com")
+        );
+        // A key is not a login: the public host.
+        assert_eq!(route(Some(crate::credentials::CredentialValue::key("k"))), json!("https://api.githubcopilot.com"));
+        // The loaded endpoint wins once the first refresh read it.
+        let mut editor = copilot_editor();
+        let state = State { base_url: Some("https://loaded.test".into()), ..State::default() };
+        GithubCopilot { state, login: Some("https://login.test".into()) }.providers(&mut editor);
+        assert_eq!(serde_json::to_value(&editor.get(PROVIDER_ID).unwrap().models["gpt-5.4"].settings).unwrap()["baseURL"], json!("https://loaded.test"));
+    }
+
     #[test]
     fn without_a_list_models_follow_their_models_dev_package() {
         // No connection: the default API base. Anthropic means Messages, OpenAI Responses, else by model id.
         let mut editor = copilot_editor();
-        GithubCopilot { state: State::default() }.providers(&mut editor);
+        GithubCopilot { state: State::default(), login: None }.providers(&mut editor);
         let record = editor.get(PROVIDER_ID).unwrap();
         let claude = &record.models["claude-sonnet-4.6"];
         assert_eq!(claude.package.as_deref(), Some("@opencode/ai/providers/anthropic"));
@@ -559,7 +606,7 @@ mod tests {
         // A connection whose model sync failed: its API base for every model (`/v1` for Messages).
         let mut editor = copilot_editor();
         let state = State { base_url: Some("http://x".into()), token: Some("t".into()), models: None, connection: Some("credential:c".into()) };
-        GithubCopilot { state }.providers(&mut editor);
+        GithubCopilot { state, login: None }.providers(&mut editor);
         let record = editor.get(PROVIDER_ID).unwrap();
         assert_eq!(serde_json::to_value(&record.models["claude-sonnet-4.6"].settings).unwrap(), json!({"baseURL": "http://x/v1"}));
         assert_eq!(serde_json::to_value(&record.models["gpt-5.4"].settings).unwrap(), json!({"baseURL": "http://x"}));
@@ -616,7 +663,7 @@ mod tests {
         // The synced catalog lists it after the derived models.
         let mut editor = copilot_editor();
         let state = State { base_url: Some("http://x".into()), token: None, models: Some(Arc::new(snapshot)), connection: None };
-        GithubCopilot { state }.providers(&mut editor);
+        GithubCopilot { state, login: None }.providers(&mut editor);
         let record = editor.get(PROVIDER_ID).unwrap();
         assert_eq!(record.models.keys().collect::<Vec<_>>(), vec!["routed", "other", "fallback", "auto"]);
     }
@@ -626,7 +673,7 @@ mod tests {
         let mut editor = copilot_editor();
         let snapshot = decode_snapshot(&json!({"data": [remote("gpt-5.4", json!({"supported_endpoints": ["/responses"]})), remote("new", json!({}))]})).unwrap();
         let state = State { base_url: Some("http://x".into()), token: None, models: Some(Arc::new(snapshot)), connection: Some("credential:c".into()) };
-        GithubCopilot { state }.providers(&mut editor);
+        GithubCopilot { state, login: None }.providers(&mut editor);
         let record = editor.get(PROVIDER_ID).unwrap();
         assert_eq!(record.models.keys().collect::<Vec<_>>(), vec!["gpt-5.4", "new"]);
         assert_eq!(record.source_connection.as_deref(), Some("credential:c"));

@@ -534,6 +534,60 @@ async fn places_media_in_the_openrouter_state_and_downloads_url_media_first() {
     );
 }
 
+/// decision.test.ts (2.3.0, #63443): PDFs go as `file` parts and audio by its OpenRouter format name.
+#[tokio::test]
+async fn sends_pdfs_as_file_parts_and_audio_by_its_openrouter_format_name_in_the_openrouter_state() {
+    let server = mock(|_, _| Resp::json(200, json!({ "model": "google/gemini-decision-1", "answers": { "refund": { "type": "noul", "noul": 0.9 } } }))).await;
+    let model = decision_model("openrouter/decisions", "google/gemini-decision-1", json!({ "apiKey": "openrouter-key", "baseURL": format!("{}/api/v1", server.base) }));
+    decide(
+        model,
+        vec![
+            DecisionPart::Media { media: MediaAsset::base64("JVBE", "application/pdf"), filename: Some("invoice.pdf".into()) },
+            DecisionPart::Media { media: MediaAsset::base64("AAAA", "audio/x-wav"), filename: None },
+        ],
+        vec![object(json!({ "name": "refund", "type": "predicate", "instructions": "Is this a refund request?" }))],
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let sent = server.requests_to("/api/v1/systemone");
+    assert_eq!(
+        sent[0].json()["state"],
+        json!([
+            { "type": "file", "file": { "file_data": "data:application/pdf;base64,JVBE", "filename": "invoice.pdf" } },
+            { "type": "input_audio", "input_audio": { "data": "AAAA", "format": "wav" } },
+        ])
+    );
+}
+
+/// decision.test.ts (2.3.0, #63443): a System One host's refusals are per-question errors.
+#[tokio::test]
+async fn returns_a_system_one_hosts_refusals_as_per_question_errors() {
+    let server = mock(|_, _| {
+        Resp::json(200, json!({ "model": "openai/gpt-6-luna-decisions", "answers": { "greeting": { "type": "noul", "noul": 0.99 }, "unsafe": { "type": "refusal" } } }))
+    })
+    .await;
+    let model = decision_model("openrouter/decisions", "openai/gpt-6-luna-decisions", json!({ "apiKey": "openrouter-key", "baseURL": format!("{}/api/v1", server.base) }));
+    let response = decide(
+        model,
+        vec![DecisionPart::Text("hello".into())],
+        vec![
+            object(json!({ "name": "greeting", "type": "predicate", "instructions": "Is this a greeting?" })),
+            object(json!({ "name": "unsafe", "type": "predicate", "instructions": "Something the model declines" })),
+        ],
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answers(&response),
+        json!([
+            { "name": "greeting", "type": "predicate", "probability": 0.99 },
+            { "name": "unsafe", "type": "error", "reason": "refusal" },
+        ])
+    );
+}
+
 #[tokio::test]
 async fn puts_media_in_a_user_message_inside_the_baseten_state() {
     let server = mock(|_, _| Resp::json(200, json!({ "model": "mammoth", "answers": { "red": { "type": "noul", "noul": 0.99 } } }))).await;

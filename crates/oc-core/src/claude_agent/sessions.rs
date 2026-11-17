@@ -24,7 +24,7 @@ pub const IDLE: Duration = Duration::from_millis(5 * 60_000);
 const START: Duration = Duration::from_secs(30);
 
 /// Claude Code features that duplicate opencode's. opencode's version wins.
-pub const ISOLATION_ENV: [(&str, &str); 9] = [
+pub const ISOLATION_ENV: [(&str, &str); 10] = [
     ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
     ("DISABLE_AUTO_COMPACT", "1"),
@@ -35,6 +35,9 @@ pub const ISOLATION_ENV: [(&str, &str); 9] = [
     ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
     // Raised so opencode's own truncation applies instead
     ("MAX_MCP_OUTPUT_TOKENS", "200000"),
+    // OpenCode changes the system prompt and tools mid-session (agent switches, instruction edits). Without this,
+    // the agent CLI replays thinking bound to the old prompt and the API rejects the request (2.3.0).
+    ("CLAUDE_CODE_POLISHED_DEWDROP", "drop"),
 ];
 
 /// Removed from the environment: `CLAUDE_CODE_SIMPLE` skips OAuth, `CLAUDE_CODE_EFFORT_LEVEL` would

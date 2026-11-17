@@ -103,20 +103,41 @@ fn classifies_bedrock_throttling_as_a_retryable_rate_limit_not_context_overflow(
 }
 
 #[test]
-fn classifies_429_token_throttles_as_retryable_rate_limits_not_context_overflow() {
+fn classifies_429_throttles_as_retryable_rate_limits_not_context_overflow() {
     for body in [
         // Cerebras, captured live
         r#"{"message":"Tokens per minute limit exceeded - too many tokens processed.","type":"too_many_tokens_error","param":"quota","code":"token_quota_exceeded"}"#,
         r#"{"message":"Token limit reached: too many tokens per minute for this model."}"#,
+        // 2.3.0 (#59816): an exhausted request rate limit is a rate limit, not a quota.
+        r#"{"error":{"message":"User 10s request rate limit exhausted (3 of 3).","type":"rate_limit_exceeded","code":null}}"#,
     ] {
         let error = classify_provider_failure(ProviderFailure {
             message: provider_error_message(body).unwrap(),
             status: Some(429),
             raw_body: Some(body.into()),
+            retry_after_ms: Some(4000.0),
             ..Default::default()
         });
         assert_eq!(error.tag(), "RateLimit", "{body}");
+        assert_eq!(error.retry_after_ms(), Some(4000.0));
         assert!(error.is_retryable());
+    }
+    // Other exhausted limits are still quotas.
+    let quota = classify_provider_failure(ProviderFailure { message: "Monthly limit exhausted".into(), status: Some(429), ..Default::default() });
+    assert_eq!(quota.tag(), "QuotaExceeded");
+}
+
+/// decision.test.ts (2.3.0, #63369): Gemini Decisions' `error.code` strings for blocked input are content policy
+/// errors.
+#[test]
+fn classifies_google_decisions_safety_codes_as_content_policy() {
+    for code in ["safety", "prohibited_content", "blocklist", "image_safety", "content_blocked"] {
+        let body = json!({ "error": {
+            "code": code,
+            "message": "Request blocked due to safety violations (harmful content). Please modify your input and retry.",
+        }});
+        let message = provider_error_message(&body.to_string()).unwrap();
+        assert_eq!(classify(&message, Some(400), &body).tag(), "ContentPolicy", "{code}");
     }
 }
 

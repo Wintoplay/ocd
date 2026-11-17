@@ -798,6 +798,7 @@ impl Models {
         for id in catalog::transforms::LOGIN_INTEGRATIONS {
             logins.set(id, integrations.stored(id).await.as_ref());
         }
+        let copilot_login = catalog::copilot::GithubCopilot::login_base_url(integrations.stored(catalog::copilot::PROVIDER_ID).await.as_ref());
         {
             use std::hash::Hash;
             let mut ids: Vec<&String> = configured.iter().collect();
@@ -805,6 +806,7 @@ impl Models {
             ids.hash(&mut fingerprint);
             connected.hash(&mut fingerprint);
             logins.hash(&mut fingerprint);
+            copilot_login.hash(&mut fingerprint);
             plugin_state.hash(&mut fingerprint);
             serde_json::to_string(&claude.as_ref().map(|c| &c.catalog)).unwrap_or_default().hash(&mut fingerprint);
             (&sign_in, chatgpt_on, openai_on, caps_on).hash(&mut fingerprint);
@@ -859,7 +861,7 @@ impl Models {
             }
             // opencode.provider.github.copilot (github-copilot.ts:216-244) with the location's loaded state.
             if let Some(state) = copilot {
-                plugins.push(Box::new(catalog::copilot::GithubCopilot { state }));
+                plugins.push(Box::new(catalog::copilot::GithubCopilot { state, login: copilot_login.clone() }));
             }
             // opencode.provider.lmstudio and opencode.provider.ollama (before the OpenCode plugin).
             let (early, late): (Vec<_>, Vec<_>) = local.iter().cloned().partition(|d| d.kind != catalog::local::Kind::Vllm);

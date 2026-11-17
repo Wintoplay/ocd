@@ -270,13 +270,24 @@ fn percent_encode(input: &str) -> String {
     out
 }
 
+/// The `GET /api/v2/config` response header Console sends while the caller has workspace instructions and skills
+/// (2.3.0, #63259).
+pub const LISTS_HEADER: &str = "x-opencode-instructions-skills";
+
+/// Console's config answer: the config, and whether the workspace has instructions and skills to fetch.
+#[derive(Debug, Clone)]
+pub struct Remote {
+    pub info: Info,
+    pub lists: bool,
+}
+
 /// `fetchConfig`: the Console's config, `None` when it has none (404). A Console that accepts the connection but
 /// never answers would otherwise hold the load, including the one at startup, so it times out after 5 seconds.
 pub async fn fetch_config(
     http: &dyn crate::usage_limits::Http,
     user_agent: &str,
     credential: &CredentialValue,
-) -> Result<Option<Info>, LoadError> {
+) -> Result<Option<Remote>, LoadError> {
     match tokio::time::timeout(REQUEST_TIMEOUT, fetch_config_now(http, user_agent, credential)).await {
         Ok(result) => result,
         Err(_) => Err(LoadError::Transient("TimeoutError".into())),
@@ -289,7 +300,7 @@ fn status_failure(status: u16, url: &str) -> LoadError {
     if shared_cache::transient_status(status) { LoadError::Transient(message) } else { LoadError::Other(message) }
 }
 
-async fn fetch_config_now(http: &dyn crate::usage_limits::Http, user_agent: &str, credential: &CredentialValue) -> Result<Option<Info>, LoadError> {
+async fn fetch_config_now(http: &dyn crate::usage_limits::Http, user_agent: &str, credential: &CredentialValue) -> Result<Option<Remote>, LoadError> {
     let server = server_url(credential);
     let url = format!("{server}/api/v2/config");
     let mut headers = vec![("user-agent".to_string(), user_agent.to_string()), ("accept".to_string(), "application/json".to_string())];
@@ -315,8 +326,10 @@ async fn fetch_config_now(http: &dyn crate::usage_limits::Http, user_agent: &str
     if !(200..300).contains(&response.status) {
         return Err(status_failure(response.status, &url));
     }
+    let lists = response.header(LISTS_HEADER).is_some();
     let body: Value = serde_json::from_str(&response.body).map_err(|e| LoadError::Other(e.to_string()))?;
-    oc_config::integration::decode_remote(&body).map(Some).map_err(LoadError::Other)
+    let info = oc_config::integration::decode_remote(&body).map_err(LoadError::Other)?;
+    Ok(Some(Remote { info, lists }))
 }
 
 /// Whether a 403 body is Console's SSO error (`SsoRequired`).
@@ -384,7 +397,7 @@ fn shared(error: LoadError) -> shared_cache::LoadError {
 
 /// What one fetch of the config shares: the config, or Console's answer for this sign-in. A sign-in error is
 /// shared like a config rather than replaced by the last config, as a network failure is.
-type ConfigAnswer = Result<Option<Info>, LoadError>;
+type ConfigAnswer = Result<Option<Remote>, LoadError>;
 
 /// The workspace's config through the cache, then its instructions and skills together (each its own entry).
 async fn workspace(
@@ -412,7 +425,11 @@ async fn workspace(
             .await
             .map_err(|e| LoadError::Other(e.message))?
     };
-    let Some(remote) = answer? else { return Ok((None, vec![], vec![])) };
+    let Some(Remote { info: remote, lists }) = answer? else { return Ok((None, vec![], vec![])) };
+    // Instructions and skills are fetched only when the config says the workspace has them.
+    if !lists {
+        return Ok((Some(remote), vec![], vec![]));
+    }
     let list = |name: &str| (cache.clone(), format!("opencode-console-{name}:{workspace}"), http.clone(), user_agent.to_string(), credential.clone());
     let (cache_a, key_a, http_a, ua_a, credential_a) = list("instructions");
     let (cache_b, key_b, http_b, ua_b, credential_b) = list("skills");

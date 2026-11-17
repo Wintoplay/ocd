@@ -30,7 +30,17 @@ impl Http for Fake {
     async fn get(&self, url: &str, headers: &[(String, String)]) -> Result<Response, String> {
         self.requests.lock().push((url.to_string(), headers.to_vec()));
         let (_, status, body) = self.routes.iter().find(|(suffix, _, _)| url.ends_with(suffix)).ok_or("no route")?;
-        Ok(Response { status: *status, body: if body.is_string() { body.as_str().unwrap().to_string() } else { body.to_string() } })
+        Ok(Response { status: *status, body: if body.is_string() { body.as_str().unwrap().to_string() } else { body.to_string() }, headers: lists(url) })
+    }
+}
+
+/// Console's config answer says the workspace has instructions and skills (`withLists`), except at a server whose
+/// URL says it has none.
+fn lists(url: &str) -> Vec<(String, String)> {
+    if url.ends_with("/api/v2/config") && !url.contains("no-lists") {
+        vec![(console_config::LISTS_HEADER.to_string(), "1".to_string())]
+    } else {
+        vec![]
     }
 }
 
@@ -287,7 +297,7 @@ impl Http for Live {
     async fn get(&self, url: &str, _headers: &[(String, String)]) -> Result<Response, String> {
         let routes = self.routes.lock();
         let (_, status, body) = routes.iter().find(|(suffix, _, _)| url.ends_with(suffix)).ok_or("no route")?;
-        Ok(Response { status: *status, body: if body.is_string() { body.as_str().unwrap().to_string() } else { body.to_string() } })
+        Ok(Response { status: *status, body: if body.is_string() { body.as_str().unwrap().to_string() } else { body.to_string() }, headers: lists(url) })
     }
 }
 
@@ -351,6 +361,31 @@ async fn workspace_lists_keep_their_last_copy_and_never_hold_back_policies() {
     let document = cleared.document().unwrap();
     assert!(cleared.allowed(std::slice::from_ref(&document)));
     assert!(!cleared.allowed(&[]));
+}
+
+/// provider-opencode.test.ts (2.3.0, #63259): without Console's `x-opencode-instructions-skills` header on the
+/// config, the workspace's instructions and skills are not fetched and its lists are empty.
+#[tokio::test(start_paused = true)]
+async fn fetches_workspace_lists_only_when_the_config_says_the_workspace_has_them() {
+    let credential = CredentialValue::Key {
+        key: "secret".into(),
+        metadata: Some(json!({"server": "https://no-lists.console.test", "orgID": "org_test"}).as_object().unwrap().clone()),
+    };
+    let integrations = location(Some(credential)).await;
+    let http = Fake::new(vec![
+        ("/api/v2/config", 200, json!({"providers": {}, "websearch": {"provider": "opencode"}})),
+        ("/api/v2/instructions", 200, json!({"instructions": [{"id": "style", "content": "Use tabs."}]})),
+        ("/api/v2/skills", 200, json!({"skills": [{"slug": "deploy", "version": "1"}]})),
+    ]);
+    let previous = Snapshot {
+        instructions: vec![console_config::Instruction { id: "old".into(), content: "Old.".into() }],
+        ..Snapshot::default()
+    };
+    let snapshot = load(&integrations, &http, "ua", &previous).await;
+    assert!(snapshot.document().is_some());
+    assert!(snapshot.instructions.is_empty() && snapshot.skills.is_empty());
+    let urls: Vec<String> = http.requests.lock().iter().map(|(url, _)| url.clone()).collect();
+    assert_eq!(urls, ["https://no-lists.console.test/api/v2/config"]);
 }
 
 type Seen = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;

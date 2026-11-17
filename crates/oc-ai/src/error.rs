@@ -436,19 +436,28 @@ const CONTENT_POLICY_CODES: &[&str] = &[
     "refusal",
     "datainspectionfailed",
     "moderation_blocked",
+    // Gemini Decisions rejects blocked input with these `error.code` strings on a 400.
+    "safety",
+    "prohibited_content",
+    "blocklist",
+    "image_safety",
+    "content_blocked",
 ];
 
 static GATEWAY_CODE_LABEL: Lazy<Regex> = Lazy::new(|| re(r"^[^:\n]+: \[([A-Za-z0-9_.-]+)\]"));
 static AUTH_TEXT: Lazy<Regex> = Lazy::new(|| re(r"(?i)incorrect api key provided"));
 static RATE_LIMIT_TEXT: Lazy<Regex> =
     Lazy::new(|| re(r"(?i)rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests"));
-// Upstream: `/insufficient[-_\s]?(?:quota|balance)|(?<!token_)quota[-_\s]?exceeded|.../i`. The `regex` crate has no
-// look-behind, so `quota exceeded` is matched on its own and rejected after `token_` (Cerebras's per-minute
-// throttle `token_quota_exceeded` is a rate limit).
+// Upstream: `/insufficient[-_\s]?(?:quota|balance)|(?<!token_)quota[-_\s]?exceeded|...|(?<!rate[-_\s]?)limit
+// exhausted|.../i`. The `regex` crate has no look-behind, so `quota exceeded` and `limit exhausted` are matched on
+// their own and rejected after `token_` (Cerebras's per-minute throttle `token_quota_exceeded` is a rate limit) and
+// after `rate` (an exhausted request rate limit stays retryable, #59816).
 static QUOTA_TEXT: Lazy<Regex> = Lazy::new(|| {
-    re(r"(?i)insufficient[-_\s]?(?:quota|balance)|budget exceeded|usage limit|limit exhausted|package has expired|plan does not yet include")
+    re(r"(?i)insufficient[-_\s]?(?:quota|balance)|budget exceeded|usage limit|package has expired|plan does not yet include")
 });
 static QUOTA_EXCEEDED_TEXT: Lazy<Regex> = Lazy::new(|| re(r"(?i)quota[-_\s]?exceeded"));
+static LIMIT_EXHAUSTED_TEXT: Lazy<Regex> = Lazy::new(|| re(r"(?i)limit exhausted"));
+static RATE_BEFORE: Lazy<Regex> = Lazy::new(|| re(r"(?i)rate[-_\s]?$"));
 
 fn quota_text(text: &str) -> bool {
     QUOTA_TEXT.is_match(text)
@@ -456,6 +465,7 @@ fn quota_text(text: &str) -> bool {
             let before = &text.as_bytes()[..m.start()];
             !(before.len() >= 6 && before[before.len() - 6..].eq_ignore_ascii_case(b"token_"))
         })
+        || LIMIT_EXHAUSTED_TEXT.find_iter(text).any(|m| !RATE_BEFORE.is_match(&text[..m.start()]))
 }
 static CONTENT_POLICY_TEXT: Lazy<Regex> = Lazy::new(|| {
     re(r"(?i)violating our usage policy|blocked by content filtering policy|content[-_\s]?policy|rejected (?:as a result of our|by the) safety system|detected potentially unsafe or sensitive content")

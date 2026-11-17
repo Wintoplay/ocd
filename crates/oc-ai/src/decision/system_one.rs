@@ -37,7 +37,7 @@ impl MediaInput {
     }
 }
 
-fn encode_questions(questions: &[Object]) -> Result<Object, AIError> {
+pub(crate) fn encode_questions(questions: &[Object]) -> Result<Object, AIError> {
     let mut out = Object::new();
     for question in questions {
         let name = question.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -70,7 +70,7 @@ fn encode_questions(questions: &[Object]) -> Result<Object, AIError> {
                 let unique: std::collections::HashSet<&String> = keys.iter().collect();
                 if unique.len() != keys.len() {
                     return Err(invalid_request(format!(
-                        "System One choice options are strings; \"{name}\" has a boolean and a string with the same text"
+                        "Decision choice options are sent as string keys; \"{name}\" has a boolean and a string with the same text"
                     )));
                 }
                 let mut criteria = Object::new();
@@ -117,18 +117,43 @@ fn unsupported(request: &DecisionRequest, asset: &MediaAsset, accepted: &str) ->
     )
 }
 
-fn state_item(request: &DecisionRequest, part: &DecisionPart) -> Result<Value, AIError> {
-    let DecisionPart::Media { media: asset, .. } = part else { return Ok(plain(part)) };
+/// A media part as a Chat Completions content part; `files` sends other media, such as PDFs, as `file` parts
+/// (2.3.0, #63443).
+fn state_item(request: &DecisionRequest, part: &DecisionPart, files: bool) -> Result<Value, AIError> {
+    let DecisionPart::Media { media: asset, filename } = part else { return Ok(plain(part)) };
     let kind = asset.kind();
-    if !matches!(kind, MediaKind::Image | MediaKind::Audio | MediaKind::Video) {
+    if !files && !matches!(kind, MediaKind::Image | MediaKind::Audio | MediaKind::Video) {
         return Err(unsupported(request, asset, "images, audio and video"));
     }
     let inline = require_inline(NAME, asset)?;
     Ok(match kind {
         MediaKind::Image => json!({ "type": "image_url", "image_url": { "url": inline.data_url } }),
         MediaKind::Video => json!({ "type": "video_url", "video_url": { "url": inline.data_url } }),
-        _ => json!({ "type": "input_audio", "input_audio": { "data": inline.base64, "format": &inline.mime["audio/".len().min(inline.mime.len())..] } }),
+        MediaKind::Audio => {
+            let format = inline.mime["audio/".len().min(inline.mime.len())..].to_lowercase();
+            let format = audio_format(&format).unwrap_or(&format).to_string();
+            json!({ "type": "input_audio", "input_audio": { "data": inline.base64, "format": format } })
+        }
+        _ => {
+            let mut file = Object::new();
+            file.insert("file_data".into(), json!(inline.data_url));
+            if let Some(name) = filename {
+                file.insert("filename".into(), json!(name));
+            }
+            json!({ "type": "file", "file": file })
+        }
     })
+}
+
+/// OpenRouter's `input_audio` format names for MIME subtypes that aren't one themselves.
+fn audio_format(subtype: &str) -> Option<&'static str> {
+    match subtype {
+        "x-wav" | "wave" | "vnd.wave" => Some("wav"),
+        "x-m4a" => Some("m4a"),
+        "x-aiff" => Some("aiff"),
+        "x-flac" => Some("flac"),
+        _ => None,
+    }
 }
 
 fn place_media(request: &DecisionRequest, media_input: MediaInput) -> Result<Object, AIError> {
@@ -149,7 +174,7 @@ fn place_media(request: &DecisionRequest, media_input: MediaInput) -> Result<Obj
         MediaInput::State => {
             let mut items = vec![];
             for part in parts {
-                items.push(state_item(request, part)?);
+                items.push(state_item(request, part, true)?);
             }
             out.insert("state".into(), Value::Array(items));
         }
@@ -158,7 +183,7 @@ fn place_media(request: &DecisionRequest, media_input: MediaInput) -> Result<Obj
             let mut content = vec![];
             for part in parts {
                 content.push(match part {
-                    DecisionPart::Media { .. } => state_item(request, part)?,
+                    DecisionPart::Media { .. } => state_item(request, part, false)?,
                     DecisionPart::Text(t) => json!({ "type": "text", "text": t }),
                     DecisionPart::Json(v) => json!({ "type": "text", "text": encode(v) }),
                 });
@@ -238,6 +263,20 @@ fn probability(value: Option<&Value>) -> Option<f64> {
     value.and_then(Value::as_f64).filter(|p| (0.0..=1.0).contains(p))
 }
 
+/// The System One `Answer` schema.
+pub(crate) fn valid_answer(answer: &Value) -> bool {
+    let Some(a) = answer.as_object() else { return false };
+    let probs = || a.get("probabilities").and_then(Value::as_object).is_some_and(|p| p.values().all(|v| probability(Some(v)).is_some()));
+    match a.get("type").and_then(Value::as_str) {
+        Some("noul") => probability(a.get("noul")).is_some(),
+        Some("choice") => a.get("choice").is_some_and(Value::is_string) && probs() && probability(a.get("confidence")).is_some(),
+        Some("score") => a.get("score").is_some_and(Value::is_number) && probs() && probability(a.get("confidence")).is_some(),
+        // OpenRouter's and OpenCode Zen's answer for a question the upstream model declined.
+        Some("refusal") => a.get("message").is_none_or(Value::is_string),
+        _ => false,
+    }
+}
+
 /// Decode the System One `Response` schema; `None` when it does not match.
 fn valid_response(value: &Value) -> bool {
     let Some(o) = value.as_object() else { return false };
@@ -245,16 +284,7 @@ fn valid_response(value: &Value) -> bool {
         return false;
     }
     let Some(answers) = o.get("answers").and_then(Value::as_object) else { return false };
-    let answers_ok = answers.values().all(|a| {
-        let Some(a) = a.as_object() else { return false };
-        let probs = || a.get("probabilities").and_then(Value::as_object).is_some_and(|p| p.values().all(|v| probability(Some(v)).is_some()));
-        match a.get("type").and_then(Value::as_str) {
-            Some("noul") => probability(a.get("noul")).is_some(),
-            Some("choice") => a.get("choice").is_some_and(Value::is_string) && probs() && probability(a.get("confidence")).is_some(),
-            Some("score") => a.get("score").is_some_and(Value::is_number) && probs() && probability(a.get("confidence")).is_some(),
-            _ => false,
-        }
-    });
+    let answers_ok = answers.values().all(valid_answer);
     let usage_ok = o.get("usage").is_none_or(|u| {
         u.as_object().is_some_and(|u| ["input_tokens", "output_tokens", "cost"].iter().all(|k| u.get(*k).is_none_or(Value::is_number)))
     });
@@ -322,13 +352,20 @@ fn js_entries(map: &Object) -> Vec<(&String, &Value)> {
     indexed
 }
 
-fn to_answer(question: &Object, answer: &Object) -> Object {
+pub(crate) fn to_answer(question: &Object, answer: &Object) -> Object {
     let name = question.get("name").cloned().unwrap_or(Value::Null);
     let mut out = Object::new();
     out.insert("name".into(), name);
     let empty = Object::new();
     let probabilities = answer.get("probabilities").and_then(Value::as_object).unwrap_or(&empty);
     match answer.get("type").and_then(Value::as_str) {
+        Some("refusal") => {
+            out.insert("type".into(), json!("error"));
+            out.insert("reason".into(), json!("refusal"));
+            if let Some(message) = answer.get("message") {
+                out.insert("message".into(), message.clone());
+            }
+        }
         Some("noul") => {
             out.insert("type".into(), json!("predicate"));
             out.insert("probability".into(), answer["noul"].clone());

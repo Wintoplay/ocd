@@ -274,6 +274,8 @@ async fn probe_reports_version_account_and_context_windows() {
         ("DISABLE_AUTO_COMPACT", "1"),
         ("ENABLE_TOOL_SEARCH", "false"),
         ("MAX_MCP_OUTPUT_TOKENS", "200000"),
+        // 2.3.0: earlier thinking is dropped when the prompt or tools change mid-session.
+        ("CLAUDE_CODE_POLISHED_DEWDROP", "drop"),
         ("CLAUDE_CODE_ENTRYPOINT", "sdk-ts"),
         ("CLAUDE_AGENT_SDK_VERSION", "0.3.301"),
         ("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1"),

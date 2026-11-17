@@ -1,6 +1,7 @@
 //! Decision models (`packages/ai/src/decision.ts`, `decision-client.ts`, `route/decision.ts`): typed predicate,
 //! choice and score questions about some input, answered with probabilities.
 
+pub mod google;
 pub mod openai;
 pub mod system_one;
 

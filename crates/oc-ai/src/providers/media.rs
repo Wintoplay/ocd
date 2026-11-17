@@ -2,7 +2,7 @@
 //! `imageModel(modelID, settings)`, `providers/<P>/decisions.ts` → `decisionModel(modelID, settings)`).
 
 use super::{Settings, PREFIX};
-use crate::decision::{openai as openai_decisions, system_one, DecisionModel};
+use crate::decision::{google as google_decisions, openai as openai_decisions, system_one, DecisionModel};
 use crate::error::ProviderConfigurationError;
 use crate::image::{self, ImageModel, ImageRequest};
 use crate::json::Object;
@@ -367,6 +367,7 @@ pub fn decision_model(package: &str, model_id: &str, settings: &Object) -> Optio
         "opencode/decisions" => {
             typesafe_like(model_id, &mut s, "opencode", "opencode", "https://opencode.ai/inference/systemone/v1", "OPENCODE_API_KEY")
         }
+        "google/decisions" => google_decision(model_id, &mut s),
         "openrouter/decisions" => openrouter_decision(model_id, &mut s),
         "digitalocean/decisions" => digitalocean_decision(model_id, &mut s),
         "baseten/decisions" => baseten_decision(model_id, &mut s),
@@ -407,6 +408,21 @@ fn typesafe_like(model_id: &str, s: &mut Settings, provider: &str, key: &str, de
         .with_base_url(Some(base))
         .with_auth(bearer(api_key, &[env]))
         .with_headers(Some(merged))
+        .with_http(http_body(body));
+    Ok(route.model(model_id, None, Some(take_rest(s))))
+}
+
+/// `Google.configure(settings).decision(id)` (2.3.0): the media deployment's base URL, API key, headers and body.
+fn google_decision(model_id: &str, s: &mut Settings) -> Result<DecisionModel> {
+    let api_key = s.string("apiKey");
+    let base = s.string("baseURL");
+    let headers = s.headers();
+    let body = s.body();
+    let credential = Credential::optional(api_key, "apiKey").or_else(Credential::env("GOOGLE_GENERATIVE_AI_API_KEY"));
+    let route = google_decisions::route()
+        .with_base_url(base)
+        .with_auth(auth::header("x-goog-api-key", credential))
+        .with_headers(headers)
         .with_http(http_body(body));
     Ok(route.model(model_id, None, Some(take_rest(s))))
 }

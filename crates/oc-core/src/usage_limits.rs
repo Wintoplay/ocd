@@ -32,6 +32,15 @@ impl UnavailableError {
 pub struct Response {
     pub status: u16,
     pub body: String,
+    /// Response headers, names lowercased.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Response {
+    /// The value of header `name` (case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
 }
 
 /// `GET url` with headers (a transport failure is an error message).
@@ -58,8 +67,13 @@ impl Http for ReqwestHttp {
         }
         let response = request.send().await.map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_ascii_lowercase(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .collect();
         let body = response.text().await.map_err(|e| e.to_string())?;
-        Ok(Response { status, body })
+        Ok(Response { status, body, headers })
     }
 }
 
