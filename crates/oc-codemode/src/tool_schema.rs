@@ -532,7 +532,8 @@ pub struct InputProperty {
     pub required: bool,
 }
 
-pub fn input_properties(input: &ToolSchema) -> Vec<InputProperty> {
+/// `inputDocument`: the input schema with its definitions, a top-level `$ref` resolved.
+fn input_document(input: &ToolSchema) -> Option<(Json, Map<String, Json>)> {
     let (schema, definitions) = match input {
         ToolSchema::Json(s) => {
             let mut defs = Map::new();
@@ -546,19 +547,19 @@ pub fn input_properties(input: &ToolSchema) -> Vec<InputProperty> {
             (s.clone(), defs)
         }
         ToolSchema::Document { document: Some((s, d)), .. } => (s.clone(), d.clone()),
-        ToolSchema::Document { document: None, .. } => return Vec::new(),
+        ToolSchema::Document { document: None, .. } => return None,
     };
-    let mut schema = schema;
-    if let Some(r) = obj(&schema).get("$ref").cloned() {
-        if !r.is_string() {
-            return Vec::new();
-        }
-        let resolved = r.as_str().and_then(definition_name).and_then(|n| definitions.get(&n).cloned());
-        match resolved {
-            Some(s) => schema = s,
-            None => return Vec::new(),
+    match obj(&schema).get("$ref") {
+        None => Some((schema, definitions)),
+        Some(r) => {
+            let resolved = r.as_str().and_then(definition_name).and_then(|n| definitions.get(&n).cloned())?;
+            Some((resolved, definitions))
         }
     }
+}
+
+pub fn input_properties(input: &ToolSchema) -> Vec<InputProperty> {
+    let Some((schema, _)) = input_document(input) else { return Vec::new() };
     let s = obj(&schema);
     let required: HashSet<String> = match s.get("required") {
         Some(Json::Array(r)) => r.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
@@ -575,6 +576,37 @@ pub fn input_properties(input: &ToolSchema) -> Vec<InputProperty> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A freeform tool's one required string field, which programs pass directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StringParameter {
+    /// The field the string fills.
+    pub name: String,
+    /// The call's parameter list: `(/** desc */ name: string)`.
+    pub signature: String,
+}
+
+/// `stringParameter`: a freeform tool whose input is one required string field takes that string directly:
+/// `tools.patch(patchText: string)`.
+pub fn string_parameter(input: &ToolSchema) -> Option<StringParameter> {
+    let (schema, definitions) = input_document(input)?;
+    let s = obj(&schema);
+    let Some(Json::Object(props)) = field(s, "properties") else { return None };
+    let fields = js_entries(props);
+    let [(name, field_schema)] = fields.as_slice() else { return None };
+    if obj(field_schema).get("type").and_then(Json::as_str) != Some("string") {
+        return None;
+    }
+    let required = matches!(s.get("required"), Some(Json::Array(r)) if r.iter().any(|x| x.as_str() == Some(name.as_str())));
+    if !required {
+        return None;
+    }
+    let label = if is_identifier_segment(name) { name.as_str() } else { "input" };
+    let rendered = guarded(|| render(field_schema, &Ctx { definitions, pretty: false }, 0, &HashSet::new()));
+    let doc = jsdoc(field_schema, "");
+    let doc = doc.strip_suffix('\n').map(|d| format!("{d} ")).unwrap_or(doc);
+    Some(StringParameter { name: (*name).clone(), signature: format!("({doc}{label}: {rendered})") })
 }
 
 pub fn is_empty_input(input: &ToolSchema) -> bool {
@@ -597,6 +629,33 @@ pub fn output_typescript(output: Option<&ToolSchema>, pretty: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `stringParameter` (codemode 2.3.0): one required string field, its JSDoc kept on one line, a label for
+    /// names that are not identifiers, and `$ref` inputs resolved.
+    #[test]
+    fn string_parameter_signatures() {
+        let sig = |schema: Json| string_parameter(&ToolSchema::Json(schema)).map(|p| (p.name, p.signature));
+        assert_eq!(
+            sig(json!({"type": "object", "properties": {"url": {"type": "string", "description": "Page URL"}}, "required": ["url"]})),
+            Some(("url".into(), "(/** Page URL */ url: string)".into()))
+        );
+        assert_eq!(
+            sig(json!({"type": "object", "properties": {"patch-text": {"type": "string", "enum": ["a", "b"]}}, "required": ["patch-text"]})),
+            Some(("patch-text".into(), "(input: \"a\" | \"b\")".into()))
+        );
+        let long = "x".repeat(130);
+        assert_eq!(
+            sig(json!({"type": "object", "properties": {"code": {"type": "string", "description": long}}, "required": ["code"]})).unwrap().1,
+            format!("(/**\n * {long}\n */ code: string)")
+        );
+        assert_eq!(
+            sig(json!({"$ref": "#/$defs/In", "$defs": {"In": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}}})),
+            Some(("q".into(), "(q: string)".into()))
+        );
+        assert_eq!(sig(json!({"type": "object", "properties": {"q": {"type": "string"}}})), None);
+        assert_eq!(sig(json!({"type": "object", "properties": {"q": {"type": "number"}}, "required": ["q"]})), None);
+        assert_eq!(sig(json!({"type": "object", "properties": {"q": {"type": "string"}, "r": {"type": "string"}}, "required": ["q", "r"]})), None);
+    }
 
     #[test]
     fn renders_objects_and_docs() {

@@ -7,7 +7,7 @@
 use crate::json::Object;
 use crate::types::{Compatibility, HttpOptions, HttpTimeout, RequestEncoding, DEFAULT_CHUNK_TIMEOUT_MS as HTTP_CHUNK_TIMEOUT_MS, DEFAULT_HTTP_TIMEOUT_MS};
 use indexmap::IndexMap;
-use oc_schema::types::ModelRef;
+use oc_schema::types::{FreeformFormat, ModelRef};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -310,6 +310,9 @@ impl ProviderInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub tools: bool,
+    /// Freeform tool input formats advertised by the selected API. Absent or empty means JSON tools only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Vec<FreeformFormat>>,
     pub input: Vec<String>,
     pub output: Vec<String>,
     /// Whether the model accepts a sampling temperature. Unknown when unset.
@@ -320,7 +323,7 @@ pub struct Capabilities {
 impl Default for Capabilities {
     /// `Capabilities.default()`.
     fn default() -> Self {
-        Self { tools: true, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None }
+        Self { tools: true, freeform: None, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None }
     }
 }
 
@@ -329,6 +332,9 @@ impl Default for Capabilities {
 pub struct PartialCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Unset falls back to the base model's formats; `[]` turns freeform tools off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Vec<FreeformFormat>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +351,7 @@ pub fn merge_capabilities(config: &PartialCapabilities, base: Option<&Capabiliti
     let fallback = base.cloned().unwrap_or_default();
     Capabilities {
         tools: config.tools.unwrap_or(fallback.tools),
+        freeform: config.freeform.clone().or_else(|| base.and_then(|b| b.freeform.clone())),
         input: config.input.clone().unwrap_or(fallback.input),
         output: config.output.clone().unwrap_or(fallback.output),
         temperature: config.temperature.or(base.and_then(|b| b.temperature)),

@@ -2,6 +2,7 @@
 //! effort updates, context management, and the WebSocket channel transport (`channelTransport`).
 
 use super::open_responses::{self as base, finalize, Adapter, HostedTool, OpenResponses};
+use super::openai_freeform::{self as freeform, Custom};
 use super::options;
 use super::shared::{flatten_tools, match_tool_choice, ToolChoiceMode};
 use super::{Protocol, StreamParser};
@@ -12,6 +13,7 @@ use crate::route::framing::Framing;
 use crate::route::{Endpoint, Route};
 use crate::types::*;
 use base64::Engine;
+use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -177,18 +179,25 @@ fn image_tool(native: &Object) -> Option<Value> {
     Some(Value::Object(out))
 }
 
-fn lower_tool(tool: &ToolDefinition) -> Result<Value, AIError> {
+fn lower_tool(tool: &ToolDefinition, custom: &IndexMap<String, Custom>) -> Result<Value, AIError> {
     if let Some(native) = native_image_input(tool) {
         return image_tool(native).ok_or_else(|| AIError::invalid_request("OpenAI Responses image generation tool options are invalid"));
+    }
+    if let Some(definition) = custom.get(&tool.name) {
+        return Ok(base::lower_custom_tool(tool, definition));
     }
     base::lower_tool(NAME, tool)
 }
 
-pub fn lower_tools(tools: &[ToolEntry]) -> Result<Vec<Value>, AIError> {
-    tools
+/// Native namespaces hold only function tools, so deeper levels flatten into the leaf names the same way
+/// non-native protocols flatten the whole tree.
+pub fn lower_tools(request: &LLMRequest) -> Result<Vec<Value>, AIError> {
+    let custom = freeform::tools(request);
+    request
+        .tools
         .iter()
         .map(|entry| match entry {
-            ToolEntry::Tool(t) => lower_tool(t),
+            ToolEntry::Tool(t) => lower_tool(t, &custom),
             ToolEntry::Namespace(ns) => Ok(json!({
                 "type": "namespace",
                 "name": ns.name,
@@ -199,14 +208,14 @@ pub fn lower_tools(tools: &[ToolEntry]) -> Result<Vec<Value>, AIError> {
         .collect()
 }
 
-fn lower_tool_choice(choice: &ToolChoice, tools: &[ToolEntry]) -> Result<Value, AIError> {
+fn lower_tool_choice(choice: &ToolChoice, tools: &[ToolEntry], custom: &IndexMap<String, Custom>) -> Result<Value, AIError> {
     Ok(match match_tool_choice(NAME, choice)? {
         ToolChoiceMode::Auto => json!("auto"),
         ToolChoiceMode::None => json!("none"),
         ToolChoiceMode::Required => json!("required"),
         ToolChoiceMode::Tool(name) => {
             let image = tools.iter().any(|t| matches!(t, ToolEntry::Tool(d) if d.name == name && native_image_input(d).and_then(image_tool).is_some()));
-            if image { json!({"type": "image_generation"}) } else { json!({"type": "function", "name": name}) }
+            if image { json!({"type": "image_generation"}) } else { base::named_tool(&name, custom) }
         }
     })
 }
@@ -268,10 +277,11 @@ pub fn body_fields(request: &LLMRequest) -> Result<base::Fields, AIError> {
         f.insert("tools".into(), None);
         f.insert("tool_choice".into(), None);
     } else {
-        f.insert("tools".into(), Some(Value::Array(lower_tools(&request.tools)?)));
-        let choice = match base::allowed_tool_choice(&options::resolve(request)) {
+        let custom = freeform::tools(request);
+        f.insert("tools".into(), Some(Value::Array(lower_tools(request)?)));
+        let choice = match base::allowed_tool_choice(&options::resolve(request), &custom) {
             Some(c) => Some(c),
-            None => request.tool_choice.as_ref().map(|c| lower_tool_choice(c, &request.tools)).transpose()?,
+            None => request.tool_choice.as_ref().map(|c| lower_tool_choice(c, &request.tools, &custom)).transpose()?,
         };
         f.insert("tool_choice".into(), choice);
     }

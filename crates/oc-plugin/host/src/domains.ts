@@ -389,6 +389,7 @@ export function decodeTool(item: any, codec: Codec): ToolInfo {
     name: item.name,
     description: item.description,
     input: item.input ?? { type: "object", properties: {} },
+    ...(item.freeform === undefined || item.freeform === null ? {} : { freeform: item.freeform }),
     ...(item.output === undefined || item.output === null ? {} : { output: item.output }),
     ...(item.options === undefined || item.options === null ? {} : { options: item.options }),
     execute: isWireFn(item.execute)
@@ -408,6 +409,7 @@ export function encodeTool(tool: ToolInfo, codec: Codec) {
     name: tool.name,
     description: tool.description,
     input: def.inputSchema,
+    ...(def.freeform === undefined ? {} : { freeform: def.freeform }),
     ...(def.outputSchema === undefined ? {} : { output: def.outputSchema }),
     ...(tool.options === undefined ? {} : { options: toWire(tool.options, undefined) }),
     execute: {

@@ -3,6 +3,7 @@
 //! `responses_variants`.
 
 use super::lifecycle::Lifecycle;
+use super::openai_freeform::{self as freeform, Custom};
 use super::options::{self, ResponsesOptions};
 use super::shared::{
     self, flatten_tool_request, match_tool_choice, prompt_cache_key, tool_file_media, tool_result_text,
@@ -146,22 +147,44 @@ pub fn lower_tool(protocol_name: &str, tool: &ToolDefinition) -> Result<Value, A
     Ok(json!({"type": "function", "name": tool.name, "description": tool.description, "parameters": Value::Object(tool.input_schema.clone()), "strict": false}))
 }
 
-pub fn lower_tools(tools: &[ToolDefinition], adapter: &Adapter) -> Result<Vec<Value>, AIError> {
+/// `lowerCustomTool`: a freeform tool as a Responses custom tool.
+pub fn lower_custom_tool(tool: &ToolDefinition, custom: &Custom) -> Value {
+    let format = match freeform::grammar(&custom.format) {
+        Some(grammar) => {
+            let mut o = Object::new();
+            o.insert("type".into(), json!("grammar"));
+            o.extend(grammar);
+            Value::Object(o)
+        }
+        None => json!({"type": "text"}),
+    };
+    json!({"type": "custom", "name": tool.name, "description": tool.description, "format": format})
+}
+
+pub fn lower_tools(tools: &[ToolDefinition], adapter: &Adapter, custom: &IndexMap<String, Custom>) -> Result<Vec<Value>, AIError> {
     tools
         .iter()
         .map(|t| match (&t.native, adapter.native_tool) {
             (Some(native), Some(f)) => f(native),
-            _ => lower_tool(adapter.name, t),
+            _ => match custom.get(&t.name) {
+                Some(definition) => Ok(lower_custom_tool(t, definition)),
+                None => lower_tool(adapter.name, t),
+            },
         })
         .collect()
 }
 
-pub fn lower_tool_choice(protocol_name: &str, choice: &ToolChoice) -> Result<Value, AIError> {
+/// `namedTool`: a custom tool is chosen as `custom`, any other as `function`.
+pub fn named_tool(name: &str, custom: &IndexMap<String, Custom>) -> Value {
+    json!({"type": if custom.contains_key(name) { "custom" } else { "function" }, "name": name})
+}
+
+pub fn lower_tool_choice(protocol_name: &str, choice: &ToolChoice, custom: &IndexMap<String, Custom>) -> Result<Value, AIError> {
     Ok(match match_tool_choice(protocol_name, choice)? {
         ToolChoiceMode::Auto => json!("auto"),
         ToolChoiceMode::None => json!("none"),
         ToolChoiceMode::Required => json!("required"),
-        ToolChoiceMode::Tool(name) => json!({"type": "function", "name": name}),
+        ToolChoiceMode::Tool(name) => named_tool(&name, custom),
     })
 }
 
@@ -264,6 +287,9 @@ fn is_builtin_hosted(value: &Value) -> bool {
 fn lower_messages(request: &LLMRequest, adapter: &Adapter) -> Result<Vec<Value>, AIError> {
     let mut input: Vec<Value> = vec![];
     let key = metadata_key(request);
+    let custom = freeform::tools(request);
+    // A call replays as the type its tool is declared with now.
+    let custom_tool = |name: &str, namespace: &Option<String>| if namespace.is_none() { custom.get(name) } else { None };
     for message in &request.messages {
         let metadata = match message.provider_metadata.as_ref().and_then(|pm| pm.get(&key)) {
             None => None,
@@ -415,9 +441,27 @@ fn lower_messages(request: &LLMRequest, adapter: &Adapter) -> Result<Vec<Value>,
                             if c.provider_executed == Some(true) {
                                 continue;
                             }
+                            // The item id only survives when the call goes out as the type it arrived as.
+                            let custom = custom_tool(&c.name, &c.namespace);
+                            let id = if freeform::keeps_item_id(c.provider_metadata.as_ref(), &key, custom.is_some()) {
+                                item_id(c.provider_metadata.as_ref(), &key)
+                            } else {
+                                None
+                            };
                             let mut o = Object::new();
+                            if let Some(custom) = custom {
+                                o.insert("type".into(), json!("custom_tool_call"));
+                                if let Some(id) = id {
+                                    o.insert("id".into(), json!(id));
+                                }
+                                o.insert("call_id".into(), json!(c.id));
+                                o.insert("name".into(), json!(c.name));
+                                o.insert("input".into(), json!(freeform::to_raw(custom, &c.input)));
+                                input.push(Value::Object(o));
+                                continue;
+                            }
                             o.insert("type".into(), json!("function_call"));
-                            if let Some(id) = item_id(c.provider_metadata.as_ref(), &key) {
+                            if let Some(id) = id {
                                 o.insert("id".into(), json!(id));
                             }
                             o.insert("call_id".into(), json!(c.id));
@@ -482,7 +526,8 @@ fn lower_messages(request: &LLMRequest, adapter: &Adapter) -> Result<Vec<Value>,
                         ),
                         other => json!(tool_result_text(other)),
                     };
-                    input.push(json!({"type": "function_call_output", "call_id": r.id, "output": output}));
+                    let kind = if custom_tool(&r.name, &r.namespace).is_some() { "custom_tool_call_output" } else { "function_call_output" };
+                    input.push(json!({"type": kind, "call_id": r.id, "output": output}));
                 }
             }
         }
@@ -567,12 +612,12 @@ pub fn lower_generation(request: &LLMRequest, options: &ResponsesOptions, f: &mu
     }
 }
 
-pub fn allowed_tool_choice(options: &ResponsesOptions) -> Option<Value> {
+pub fn allowed_tool_choice(options: &ResponsesOptions, custom: &IndexMap<String, Custom>) -> Option<Value> {
     let allowed = options.allowed_tools.as_ref()?;
     Some(json!({
         "type": "allowed_tools",
         "mode": allowed.mode,
-        "tools": allowed.tool_names.iter().map(|n| json!({"type": "function", "name": n})).collect::<Vec<_>>(),
+        "tools": allowed.tool_names.iter().map(|n| named_tool(n, custom)).collect::<Vec<_>>(),
     }))
 }
 
@@ -581,11 +626,12 @@ pub fn body_fields(request: &LLMRequest, adapter: &Adapter) -> Result<Fields, AI
     let (tools, projected) = flatten_tool_request(request);
     let mut f = lower_conversation(&projected, adapter)?;
     let options = options::resolve(request);
+    let custom = freeform::tools(request);
     lower_generation(request, &options, &mut f);
-    f.insert("tools".into(), if tools.is_empty() { None } else { Some(Value::Array(lower_tools(&tools, adapter)?)) });
-    let choice = match allowed_tool_choice(&options) {
+    f.insert("tools".into(), if tools.is_empty() { None } else { Some(Value::Array(lower_tools(&tools, adapter, &custom)?)) });
+    let choice = match allowed_tool_choice(&options, &custom) {
         Some(c) => Some(c),
-        None => request.tool_choice.as_ref().map(|c| lower_tool_choice(adapter.name, c)).transpose()?,
+        None => request.tool_choice.as_ref().map(|c| lower_tool_choice(adapter.name, c, &custom)).transpose()?,
     };
     f.insert("tool_choice".into(), choice);
     Ok(f)
@@ -740,12 +786,18 @@ pub struct ResponsesParser {
     adapter: Adapter,
     completed_compactions: HashSet<String>,
     tools: ToolStream,
+    custom: IndexMap<String, Custom>,
     has_function_call: bool,
     lifecycle: Lifecycle,
     output_items: BTreeMap<i64, String>,
     message: Option<(String, Option<Value>)>,
     reasoning_items: IndexMap<String, ReasoningItem>,
     completed_items: IndexSet<String>,
+}
+
+/// `rawInput`: a custom call item's raw text.
+fn raw_input(item: &Value) -> String {
+    item.get("input").and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 fn mint(prefix: &str) -> String {
@@ -814,6 +866,7 @@ impl ResponsesParser {
             adapter: adapter.clone(),
             completed_compactions: HashSet::new(),
             tools: ToolStream::new(adapter.id),
+            custom: freeform::tools(request),
             has_function_call: false,
             lifecycle: Lifecycle::new(),
             output_items: BTreeMap::new(),
@@ -844,6 +897,7 @@ impl ResponsesParser {
                 Some("message") => "msg",
                 Some("reasoning") => "rs",
                 Some("function_call") => "fc",
+                Some("custom_tool_call") => "ctc",
                 Some("compaction") => "cmp",
                 _ => "item",
             };
@@ -980,19 +1034,21 @@ impl ResponsesParser {
                 parts.insert(0, PartStatus::Active);
                 self.reasoning_items.insert(id, ReasoningItem { encrypted, parts, delta_indexes: HashSet::new() });
             }
-            Some("function_call") => {
+            Some(kind @ ("function_call" | "custom_tool_call")) => {
                 let Some(call_id) = item.get("call_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return };
                 let key = StreamKey::Id(id.clone());
                 if self.tools.contains(&key) {
                     return;
                 }
-                let meta = self.pm(json!({"itemId": id}));
+                let custom = kind == "custom_tool_call";
+                let meta = self.pm(freeform::metadata(&id, custom));
                 self.lifecycle.step_start(events);
+                let name = item.get("name").and_then(Value::as_str).unwrap_or("");
                 let tool = PendingTool {
                     id: call_id.into(),
-                    name: item.get("name").and_then(Value::as_str).unwrap_or("").into(),
+                    name: name.into(),
                     namespace: item.get("namespace").and_then(Value::as_str).map(String::from),
-                    input: item.get("arguments").and_then(Value::as_str).unwrap_or("").into(),
+                    input: if custom { String::new() } else { item.get("arguments").and_then(Value::as_str).unwrap_or("").into() },
                     provider_executed: false,
                     provider_metadata: Some(meta.clone()),
                 };
@@ -1003,7 +1059,12 @@ impl ResponsesParser {
                     provider_executed: None,
                     provider_metadata: Some(meta),
                 });
-                self.tools.start(key, tool);
+                self.tools.start(key.clone(), tool);
+                // Custom calls stream raw text; open the JSON fragment of the call's field.
+                if custom {
+                    let opening = freeform::stream_start(self.custom.get(name), &raw_input(item));
+                    self.tools.append(key, &opening, events);
+                }
             }
             _ => {}
         }
@@ -1132,16 +1193,26 @@ impl ResponsesParser {
                     self.message = None;
                 }
             }
-            Some("function_call") => {
+            Some(kind @ ("function_call" | "custom_tool_call")) => {
                 let (Some(call_id), Some(name)) = (
                     item.get("call_id").and_then(Value::as_str).filter(|s| !s.is_empty()),
                     item.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()),
                 ) else {
                     return Ok(());
                 };
-                let meta = self.pm(json!({"itemId": id}));
+                let custom = kind == "custom_tool_call";
+                let meta = self.pm(freeform::metadata(&id, custom));
                 let key = StreamKey::Id(id.clone());
                 let registered = self.tools.contains(&key);
+                let mut finished = vec![];
+                let input = if custom {
+                    let declared = self.custom.get(name).cloned();
+                    let raw = raw_input(item);
+                    freeform::close(&mut self.tools, std::slice::from_ref(&key), Some((declared.as_ref(), &raw)), &mut finished);
+                    Some(freeform::from_raw(declared.as_ref(), &raw))
+                } else {
+                    item.get("arguments").and_then(Value::as_str).map(String::from)
+                };
                 if !registered {
                     self.tools.start(
                         key.clone(),
@@ -1155,10 +1226,9 @@ impl ResponsesParser {
                         },
                     );
                 }
-                let mut finished = vec![];
-                match item.get("arguments").and_then(Value::as_str) {
+                match input {
                     None => self.tools.finish(key, &mut finished)?,
-                    Some(args) => self.tools.finish_with_input(key, args, &mut finished)?,
+                    Some(args) => self.tools.finish_with_input(key, &args, &mut finished)?,
                 };
                 let mut result_events = vec![];
                 if !registered && !finished.is_empty() {
@@ -1273,7 +1343,8 @@ impl ResponsesParser {
                 if kind == "compaction" && self.lifecycle.step_started && !self.completed_compactions.contains(&id) {
                     return Err(self.err("Cannot recover a compaction checkpoint after output has been emitted"));
                 }
-                let recoverable = kind == "compaction" || (kind == "function_call" && self.tools.contains(&StreamKey::Id(id)));
+                let recoverable = kind == "compaction"
+                    || ((kind == "function_call" || kind == "custom_tool_call") && self.tools.contains(&StreamKey::Id(id)));
                 if recoverable {
                     self.on_output_item_done(&item, events)?;
                 }
@@ -1380,6 +1451,13 @@ impl ResponsesParser {
             "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
                 let id = item_id.ok_or_else(|| missing(&kind))?;
                 self.on_arguments(event, &id, events)?;
+            }
+            "response.custom_tool_call_input.delta" => {
+                let id = item_id.ok_or_else(|| missing(&kind))?;
+                // Raw text re-encoded as a JSON-argument delta of the call's field.
+                let delta = freeform::stream_delta(event.get("delta").and_then(Value::as_str).unwrap_or(""));
+                let as_arguments = json!({"type": "response.function_call_arguments.delta", "item_id": id, "delta": delta});
+                self.on_arguments(&as_arguments, &id, events)?;
             }
             "response.output_item.done" => {
                 if let Some(item) = event.get("item").filter(|i| i.is_object()).cloned() {

@@ -35,7 +35,7 @@ impl ToolOptions {
     }
 }
 
-/// Definition sent to the model (`{type:"tool", name, description, inputSchema, outputSchema?}`).
+/// Definition sent to the model (`{type:"tool", name, description, inputSchema, freeform?, outputSchema?}`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
@@ -44,13 +44,28 @@ pub struct ToolDefinition {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// The raw-text wire encoding of the one required string field, on models that accept the format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<oc_schema::Freeform>,
     #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
 }
 
 impl ToolDefinition {
     pub fn new(name: impl Into<String>, description: impl Into<String>, input_schema: Value) -> Self {
-        Self { kind: "tool".into(), name: name.into(), description: description.into(), input_schema, output_schema: None }
+        Self {
+            kind: "tool".into(),
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            freeform: None,
+            output_schema: None,
+        }
+    }
+
+    pub fn with_freeform(mut self, freeform: Option<oc_schema::Freeform>) -> Self {
+        self.freeform = freeform;
+        self
     }
 
     pub fn with_output(mut self, output: Option<Value>) -> Self {

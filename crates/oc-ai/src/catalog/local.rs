@@ -188,7 +188,7 @@ pub fn apply(editor: &mut ProviderEditor, discovered: &Discovered) {
             if spec.vision == Some(true) {
                 input.push("image".into());
             }
-            model.capabilities = Capabilities { tools: spec.tools.unwrap_or(false), input, output: vec!["text".into()], temperature: None };
+            model.capabilities = Capabilities { tools: spec.tools.unwrap_or(false), freeform: None, input, output: vec!["text".into()], temperature: None };
             if let Some(context) = spec.context.filter(|c| *c > 0.0) {
                 model.limit.context = context as i64;
             }
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(record.models.keys().collect::<Vec<_>>(), ["google/gemma", "unknown-context"]);
         let gemma = &record.models["google/gemma"];
         assert_eq!((gemma.name.as_str(), gemma.family.as_deref()), ("Gemma", Some("gemma4")));
-        assert_eq!(gemma.capabilities, Capabilities { tools: true, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None });
+        assert_eq!(gemma.capabilities, Capabilities { tools: true, freeform: None, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None });
         assert_eq!((gemma.limit.context, gemma.limit.output), (16_384, 32_000));
         let unknown = &record.models["unknown-context"];
         assert_eq!((unknown.name.as_str(), unknown.family.as_deref()), ("unknown-context", None));

@@ -1,19 +1,20 @@
 //! OpenAI Chat Completions protocol (`protocols/openai-chat.ts`, `openai-compatible-chat.ts`).
 
 use super::lifecycle::Lifecycle;
+use super::openai_freeform::{self as freeform, Custom};
 use super::options;
 use super::shared::{
     self, flatten_tool_request, match_tool_choice, prompt_cache_key, tool_file_media, tool_result_text,
     unsupported_content, wrapped_system_update, CacheControl, ToolChoiceMode,
 };
-use super::tool_stream::ToolStream;
+use super::tool_stream::{StreamKey, ToolStream};
 use super::{decode_json_frame, route_label, Protocol, Step, StreamParser};
 use crate::error::{classify_provider_failure, AIError, ProviderFailure};
 use crate::json::{encode, num, Object};
 use crate::route::framing::{Frame, Framing};
 use crate::route::{Endpoint, Route};
 use crate::types::*;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -111,6 +112,8 @@ pub fn detect_zai_tool_stream(provider: &str, base_url: &str, model_id: &str) ->
 struct Lowering<'a> {
     cc: Option<CacheControl>,
     key: String,
+    /// Custom tools in this request, by flattened name.
+    custom: IndexMap<String, Custom>,
     model_lower: String,
     mistral: bool,
     request: &'a LLMRequest,
@@ -284,6 +287,11 @@ fn lower_assistant(message: &Message, configured: Option<&str>, require_reasonin
                 content.push(text_content(&t.text, cc));
             }
             ContentPart::Reasoning(r) => reasoning.push(r),
+            // A call replays as the type its tool is declared with in this request.
+            ContentPart::ToolCall(c) if l.custom.contains_key(&c.name) => {
+                let raw = freeform::to_raw(&l.custom[&c.name], &c.input);
+                tool_calls.push(json!({"id": l.tool_call_id(&c.id), "type": "custom", "custom": {"name": c.name, "input": raw}}));
+            }
             ContentPart::ToolCall(c) => {
                 let mut o = Object::new();
                 o.insert("id".into(), json!(l.tool_call_id(&c.id)));
@@ -521,6 +529,7 @@ pub fn body_fields(request: &LLMRequest, opts: &ChatOptions) -> Result<Fields, A
         // format adds one.
         cc: if opts.cache_control || compat.cache_format.is_some() { Some(CacheControl::default()) } else { None },
         key: request.metadata_key(),
+        custom: freeform::tools(request),
         mistral: MISTRAL_FAMILIES.iter().any(|f| model_lower.contains(f)),
         model_lower,
         request,
@@ -533,6 +542,19 @@ pub fn body_fields(request: &LLMRequest, opts: &ChatOptions) -> Result<Fields, A
             tools_flat
                 .iter()
                 .map(|t| {
+                    if let Some(custom) = l.custom.get(&t.name).cloned() {
+                        let format = match freeform::grammar(&custom.format) {
+                            Some(grammar) => json!({"type": "grammar", "grammar": grammar}),
+                            None => json!({"type": "text"}),
+                        };
+                        let mut o = Object::new();
+                        o.insert("type".into(), json!("custom"));
+                        o.insert("custom".into(), json!({"name": t.name, "description": t.description, "format": format}));
+                        if let Some(cc) = l.cache(t.cache.as_ref()) {
+                            o.insert("cache_control".into(), cc);
+                        }
+                        return Value::Object(o);
+                    }
                     let mut f = Object::new();
                     f.insert("name".into(), json!(t.name));
                     f.insert("description".into(), json!(t.description));
@@ -556,6 +578,7 @@ pub fn body_fields(request: &LLMRequest, opts: &ChatOptions) -> Result<Fields, A
             ToolChoiceMode::Auto => json!("auto"),
             ToolChoiceMode::None => json!("none"),
             ToolChoiceMode::Required => json!("required"),
+            ToolChoiceMode::Tool(name) if l.custom.contains_key(&name) => json!({"type": "custom", "custom": {"name": name}}),
             ToolChoiceMode::Tool(name) => json!({"type": "function", "function": {"name": name}}),
         }),
         _ => None,
@@ -689,6 +712,9 @@ pub struct ChatParser {
     key: String,
     label: String,
     tools: ToolStream,
+    custom: IndexMap<String, Custom>,
+    /// Stream indexes of custom tool calls, whose JSON fragment closes when the call finishes.
+    custom_calls: IndexSet<i64>,
     pending: BTreeMap<i64, PendingDelta>,
     tool_call_events: Vec<LLMEvent>,
     usage: Option<Usage>,
@@ -861,6 +887,8 @@ impl ChatParser {
             key: request.metadata_key(),
             label: route_label(request),
             tools: ToolStream::new(ADAPTER),
+            custom: freeform::tools(request),
+            custom_calls: IndexSet::new(),
             pending: BTreeMap::new(),
             tool_call_events: vec![],
             usage: None,
@@ -1041,11 +1069,29 @@ impl ChatParser {
             });
             let current = self.tool_at(index).cloned();
             let pending = self.pending.get(&index).cloned();
-            let fname = tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).filter(|s| !s.is_empty());
+            let custom = tool.get("custom").filter(|c| c.is_object());
+            let fname = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| custom.and_then(|c| c.get("name")).and_then(Value::as_str).filter(|s| !s.is_empty()));
             let fargs = tool.get("function").and_then(|f| f.get("arguments")).and_then(Value::as_str).unwrap_or("");
             let id = current.as_ref().map(|c| c.id.clone()).or_else(|| pending.as_ref().and_then(|p| p.id.clone())).or(tid.map(String::from));
             let name = current.as_ref().map(|c| c.name.clone()).or_else(|| pending.as_ref().and_then(|p| p.name.clone())).or(fname.map(String::from));
-            let text = format!("{}{}", pending.as_ref().map(|p| p.input.as_str()).unwrap_or(""), fargs);
+            // Custom calls stream raw text; re-encode it as JSON arguments for the call's field.
+            let fragment = match custom {
+                Some(c) => {
+                    let raw = c.get("input").and_then(Value::as_str).unwrap_or("");
+                    if self.custom_calls.insert(index) {
+                        freeform::stream_start(self.custom.get(name.as_deref().unwrap_or("")), raw)
+                    } else {
+                        freeform::stream_delta(raw)
+                    }
+                }
+                None => fargs.to_string(),
+            };
+            let text = format!("{}{}", pending.as_ref().map(|p| p.input.as_str()).unwrap_or(""), fragment);
             let extra = pending.as_ref().and_then(|p| p.extra.clone()).or_else(|| {
                 let sig = tool.get("extra_content").and_then(|e| e.get("google")).and_then(|g| g.get("thought_signature")).and_then(Value::as_str)?;
                 Some(json!({"google": {"thought_signature": sig}}))
@@ -1082,9 +1128,7 @@ impl ChatParser {
             return Err(AIError::invalid_output(ADAPTER, "OpenAI Chat tool call delta is missing id or name").with_body(encode(event)));
         }
         if finish.is_some() && !incomplete && first_finish && !self.tools.is_empty() {
-            let mut out = vec![];
-            self.tools.finish_all(&mut out)?;
-            self.tool_call_events = out;
+            self.tool_call_events = self.finish_tools()?;
         }
         self.usage = usage;
         // The first finish reason sticks.
@@ -1094,15 +1138,22 @@ impl ChatParser {
         Ok(events)
     }
 
+    /// Custom calls close their JSON fragment before every pending call finishes.
+    fn finish_tools(&mut self) -> Result<Vec<LLMEvent>, AIError> {
+        let mut out = vec![];
+        let keys: Vec<StreamKey> = self.custom_calls.iter().map(|i| StreamKey::Index(*i)).collect();
+        freeform::close(&mut self.tools, &keys, None, &mut out);
+        self.tools.finish_all(&mut out)?;
+        Ok(out)
+    }
+
     pub fn finish_events(&mut self) -> Result<Vec<LLMEvent>, AIError> {
         if self.finish.is_none() && self.require_finish_reason {
             return Err(AIError::incomplete_stream(ADAPTER, "OpenAI Chat stream ended without finish_reason"));
         }
         let mut events = vec![];
         let tool_call_events = if self.finish.is_none() && !self.tools.is_empty() {
-            let mut out = vec![];
-            self.tools.finish_all(&mut out)?;
-            out
+            self.finish_tools()?
         } else {
             std::mem::take(&mut self.tool_call_events)
         };

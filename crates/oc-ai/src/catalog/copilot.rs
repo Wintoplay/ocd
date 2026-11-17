@@ -293,7 +293,7 @@ pub fn auto_model(base_url: &str, remote: &Snapshot) -> Option<ModelInfo> {
     model.name = "Auto".into();
     model.package = Some(route.package.into());
     model.settings = json!({"baseURL": route.base_url}).as_object().cloned();
-    model.capabilities = Capabilities { tools: true, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None };
+    model.capabilities = Capabilities { tools: true, freeform: None, input: vec!["text".into(), "image".into()], output: vec!["text".into()], temperature: None };
     model.limit = Limit {
         context: min(&mut pool.iter().map(|m| m.max_context_window_tokens.or(m.max_prompt_tokens).unwrap_or_default())) as i64,
         input: Some(min(&mut pool.iter().map(|m| m.max_prompt_tokens.unwrap_or_default())) as i64),
@@ -339,7 +339,7 @@ pub fn build(id: &str, remote: &RemoteModel, base_url: &str, previous: Option<&M
     model.settings = merge_overlay(previous.and_then(|p| p.settings.as_ref()), Some(&overlay));
     model.headers = previous.and_then(|p| p.headers.clone());
     model.body = previous.and_then(|p| p.body.clone());
-    model.capabilities = Capabilities { tools: remote.tool_calls.unwrap_or(false), input, output: vec!["text".into()], temperature: None };
+    model.capabilities = Capabilities { tools: remote.tool_calls.unwrap_or(false), freeform: None, input, output: vec!["text".into()], temperature: None };
     model.variants = variants(remote, messages);
     model.time = ModelTime { released: if released.is_finite() { released } else { 0.0 } };
     model.cost = vec![Cost {

@@ -16,7 +16,8 @@ use crate::interp::errors::{locate, tool_runtime_error, DiagnosticKind, JsResult
 use crate::interp::runner::Resolving;
 use crate::interp::{Rt, Site};
 use crate::tool_schema::{
-    input_properties, is_empty_input, is_identifier_segment, output_typescript, schema_to_typescript, ToolSchema,
+    input_properties, is_empty_input, is_identifier_segment, output_typescript, schema_to_typescript, string_parameter,
+    StringParameter, ToolSchema,
 };
 use crate::value::Value;
 
@@ -27,13 +28,24 @@ pub struct ToolDef {
     pub path: String,
     pub description: String,
     pub input: ToolSchema,
+    /// The tool's input is one required string field that programs pass directly, as in `tools.patch("...")`.
+    /// The object form still works, and the executor receives the object either way.
+    pub freeform: bool,
     /// `None` renders `Promise<void>` and the program receives `undefined`.
     pub output: Option<ToolSchema>,
 }
 
 impl ToolDef {
     pub fn new(path: impl Into<String>, description: impl Into<String>, input: Json) -> ToolDef {
-        ToolDef { path: path.into(), description: description.into(), input: ToolSchema::Json(input), output: None }
+        ToolDef { path: path.into(), description: description.into(), input: ToolSchema::Json(input), freeform: false, output: None }
+    }
+    pub fn with_freeform(mut self, freeform: bool) -> ToolDef {
+        self.freeform = freeform;
+        self
+    }
+    /// `stringParameter(tool)`: the string field a freeform tool takes directly.
+    pub fn string_parameter(&self) -> Option<StringParameter> {
+        if self.freeform { string_parameter(&self.input) } else { None }
     }
     pub fn with_output(mut self, output: Json) -> ToolDef {
         self.output = Some(ToolSchema::Json(output));
@@ -114,7 +126,9 @@ pub fn tool_expression(path: &str) -> String {
 pub const SEARCH_SIGNATURE: &str = "search({\n  query?: string,\n  namespace?: string,\n  /** @integer @exclusiveMinimum 0 */\n  limit?: number,\n  /** @integer @minimum 0 */\n  offset?: number,\n}): {\n  items: Array<{\n      path: string,\n      description: string,\n      signature: string,\n    }>,\n  /** @integer @minimum 0 */\n  remaining: number,\n  next: {\n      /** @integer @minimum 0 */\n      offset: number,\n    } | null,\n}";
 
 pub fn signature_of(def: &ToolDef) -> String {
-    let input = if is_empty_input(&def.input) {
+    let input = if let Some(parameter) = def.string_parameter() {
+        parameter.signature
+    } else if is_empty_input(&def.input) {
         "()".to_string()
     } else {
         format!("({})", schema_to_typescript(&def.input, true))
@@ -489,6 +503,11 @@ fn tool_work(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>) -> Local
             ));
         }
         let raw_input = normalized.into_iter().next().unwrap();
+        // A freeform tool takes its one string field directly.
+        let raw_input = match (&raw_input, def.as_ref().and_then(|d| d.string_parameter())) {
+            (Some(Json::String(text)), Some(parameter)) => Some(json!({ (parameter.name): text })),
+            _ => raw_input,
+        };
         let invalid = |message: String| {
             tool_runtime_error(
                 DiagnosticKind::InvalidToolInput,

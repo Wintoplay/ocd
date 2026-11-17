@@ -381,7 +381,7 @@ fn preserves_catalog_capabilities_unless_overridden() {
         providers(|e| {
             for id in ["inherited", "overridden", "partial"] {
                 e.update_model("custom", id, |m| {
-                    m.capabilities = Capabilities { tools: false, input: vec!["text".into()], output: vec!["text".into()], temperature: None }
+                    m.capabilities = Capabilities { tools: false, freeform: None, input: vec!["text".into()], output: vec!["text".into()], temperature: None }
                 });
             }
         }),

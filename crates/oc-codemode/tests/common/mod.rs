@@ -134,6 +134,7 @@ pub fn tree_entries(tree: &Json) -> Vec<ToolEntry> {
                 path: path.join("."),
                 description: tool["description"].as_str().unwrap_or("").to_string(),
                 input: schema_of(&tool["input"]),
+                freeform: tool["freeform"].as_bool().unwrap_or(false),
                 output: if tool["output"].is_null() { None } else { Some(schema_of(&tool["output"])) },
             }));
         }

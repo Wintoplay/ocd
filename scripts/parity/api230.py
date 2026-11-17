@@ -38,10 +38,7 @@ def api230_config_keys(ctx):
     _, providers = ctx.call("provider.list", "GET", "/api/provider", record=False)
     ctx.rec("provider.list mock", [p for p in providers.get("data", []) if p.get("id") == "mock"])
     _, models = ctx.call("model.list", "GET", "/api/model", record=False)
-    # `capabilities.freeform` reaches the model with the freeform batch; until then compare the rest.
-    mock = [{k: v for k, v in m.items() if k != "capabilities"} for m in models.get("data", [])
-            if m.get("providerID") == "mock"]
-    ctx.rec("model.list mock (without capabilities)", mock)
+    ctx.rec("model.list mock", [m for m in models.get("data", []) if m.get("providerID") == "mock"])
     for types in ["session.step.first-token", "experimental.mcp.event&types=session.step.first-token",
                   "experimental.mcp.subscription.changed"]:
         ctx.rec(f"event.subscribe ?types={types}", subscribe(ctx, types))

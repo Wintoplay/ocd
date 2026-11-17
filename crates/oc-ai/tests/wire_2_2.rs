@@ -546,10 +546,28 @@ async fn gateway_responses_routes_match_the_recordings() {
         let events = run_loop(req, &rec).await;
         assert_eq!(finish_reasons(&events), vec![FinishReason::ToolCalls, FinishReason::Stop], "{dir}");
 
-        // "calls a freeform text tool": freeform tools are library-only; the stream still decodes to its end.
+        // "calls a freeform text tool": a custom tool out, a custom tool call back (2.3.0 declares freeform tools).
         let rec = load(&format!("recorded/{dir}/calls-a-freeform-text-tool.json"));
-        let out = decode(&LLMRequest::new(model()), &rec.interactions[0].response.bytes());
-        assert!(matches!(out.last(), Some(Ok(LLMEvent::Finish { .. }))), "{dir}: {:?}", types(&out.iter().filter_map(|e| e.as_ref().ok().cloned()).collect::<Vec<_>>()));
+        let run = ToolDefinition::new(
+            "run",
+            "Run a Python snippet.",
+            json!({"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"], "additionalProperties": false}),
+        )
+        .with_freeform(Some(Freeform::Text));
+        let mut req = LLMRequest::new(model()).prompt("Use the run tool to execute exactly this code: print(1)").tool(run);
+        req.tool_choice = Some(ToolChoice::from_str("required"));
+        req.generation = Some(GenerationOptions { max_tokens: Some(256.0), ..Default::default() });
+        let compiled = Client::new().compile(&req).await.unwrap();
+        json_eq(&compiled.prepared.body, &rec.interactions[0].request.body);
+        let events = decode_ok(&req, &rec.interactions[0].response.bytes());
+        let calls: Vec<&LLMEvent> = events.iter().filter(|e| matches!(e, LLMEvent::ToolCall { .. })).collect();
+        let [LLMEvent::ToolCall { name, input, provider_metadata, .. }] = calls.as_slice() else { panic!("{dir}: {calls:?}") };
+        assert_eq!(name, "run", "{dir}");
+        assert!(input["code"].as_str().unwrap().contains("print(1)"), "{dir}: {input}");
+        let provider = package_name.split('/').next().unwrap();
+        assert_eq!(provider_metadata.as_ref().unwrap()[provider]["custom"], json!(true), "{dir}");
+        let LLMEvent::Finish { reason, .. } = events.last().unwrap() else { panic!("{dir}") };
+        assert_eq!(reason.normalized, FinishReason::ToolCalls, "{dir}");
     }
 }
 
@@ -655,12 +673,8 @@ fn recordings_decode_like_upstream() {
         } else {
             (entry_name.split('-').next().unwrap_or_default().to_string(), vec![dir.path()])
         };
-        // Freeform (custom) tools are library-only (core never declares them), so their recordings are left out.
         // Recordings taken from 2.2.7's corpus decode by 2.2.7's rules (`wire_2_2_7` checks them against it).
-        let mut files: Vec<_> = files
-            .into_iter()
-            .filter(|p| !p.to_string_lossy().contains("freeform") && !ADDED_2_2_7.iter().any(|a| p.ends_with(a)))
-            .collect();
+        let mut files: Vec<_> = files.into_iter().filter(|p| !ADDED_2_2_7.iter().any(|a| p.ends_with(a))).collect();
         files.sort();
         for file in files {
             let rec = oc_ai::testing::recording(&std::fs::read_to_string(&file).unwrap());

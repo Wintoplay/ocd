@@ -224,6 +224,28 @@ fn partial_capabilities_accepted() {
     assert_eq!(encoded["providers"], input["providers"]);
 }
 
+/// 2.3.0: `capabilities.freeform` lists the tool input formats a model takes (`Tool.FreeformFormat`); an unknown
+/// format makes the provider entry invalid.
+#[test]
+fn freeform_capabilities_accepted() {
+    let input = json!({ "providers": { "demo": { "name": "Demo", "models": {
+        "demo": { "name": "Demo", "capabilities": { "tools": true, "freeform": ["text", "regex"], "temperature": false } },
+        "off": { "capabilities": { "freeform": [] } },
+    } } } });
+    let (encoded, d) = normalized(input.clone());
+    assert!(d.is_empty());
+    assert_eq!(encoded["providers"], input["providers"]);
+    let info = Info::decode(&encoded).unwrap();
+    let models = &info.providers.as_ref().unwrap()["demo"].models.as_ref().unwrap();
+    let freeform = |id: &str| serde_json::to_value(&models[id].capabilities.as_ref().unwrap().freeform).unwrap();
+    assert_eq!(freeform("demo"), json!(["text", "regex"]));
+    assert_eq!(freeform("off"), json!([]));
+
+    let (encoded, d) = normalized(json!({ "providers": { "demo": { "models": { "m": { "capabilities": { "freeform": ["grammar"] } } } } } }));
+    assert!(encoded.get("providers").is_none() || encoded["providers"].get("demo").is_none());
+    assert_eq!(paths(&d, DiagnosticKind::Invalid), pv(&[&["providers", "demo"]]));
+}
+
 #[test]
 fn retired_alias_used_when_canonical_malformed() {
     let (encoded, d) = normalized(json!({

@@ -19,6 +19,8 @@ use crate::tool::{DefinitionContext, Tool, ToolContext, ToolDefinition, ToolErro
 use crate::util::{bom, js};
 
 pub const DESCRIPTION: &str = include_str!("../../../../assets/tool/patch.txt");
+/// The Lark grammar of a patch (`tool/patch-grammar.txt`), sent to models that take `patch` as a freeform tool.
+pub const GRAMMAR: &str = include_str!("../../../../assets/tool/patch-grammar.txt");
 
 /// Session hook: `gpt-` models (except `oss`/`gpt-4`) use `patch`; others use `edit`/`write`.
 pub fn use_patch(ctx: &DefinitionContext) -> bool {
@@ -305,6 +307,7 @@ impl Tool for PatchTool {
 
     fn definition(&self, _ctx: &DefinitionContext) -> ToolDefinition {
         super::definition("patch", DESCRIPTION, include_str!("../../schemas/patch.json"))
+            .with_freeform(Some(oc_schema::Freeform::Lark { grammar: GRAMMAR.into() }))
     }
 
     fn advertised(&self, ctx: &DefinitionContext) -> bool {
@@ -358,6 +361,24 @@ impl Tool for PatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tool-patch.test.ts (2.3.0): `patch` declares its Lark grammar, sent to models that take it freeform.
+    #[test]
+    fn declares_the_patch_grammar_as_freeform_input() {
+        let definition = PatchTool::new(Arc::new(Formatter::new())).definition(&DefinitionContext::default());
+        match &definition.freeform {
+            Some(oc_schema::Freeform::Lark { grammar }) => {
+                assert!(grammar.contains("\"*** Begin Patch\""));
+                assert_eq!(grammar, GRAMMAR);
+                assert!(grammar.starts_with("start: begin_patch hunk+ end_patch\n") && grammar.ends_with("%import common.LF\n"));
+            }
+            other => panic!("expected a lark grammar, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(&definition).unwrap();
+        let keys: Vec<&String> = encoded.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["type", "name", "description", "inputSchema", "freeform", "outputSchema"]);
+        assert_eq!(encoded["freeform"]["type"], "lark");
+    }
 
     #[test]
     fn trims_common_indent() {

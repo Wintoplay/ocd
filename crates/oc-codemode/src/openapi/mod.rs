@@ -290,6 +290,7 @@ fn from_spec_impl(options: Options) -> Result<OpenApi, OpenApiError> {
                 path: tool_path.clone(),
                 description,
                 input: ToolSchema::Json(schema),
+                freeform: false,
                 output: output.map(ToolSchema::Json),
             }));
             let plan = Plan {

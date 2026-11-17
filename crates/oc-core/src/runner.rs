@@ -767,10 +767,8 @@ impl Engine {
         let mut req = LLMRequest::new(model.language_model.clone());
         req.system = crate::prompt::system_request(system, &loaded.initial, &loaded.rendered);
         req.messages = messages;
-        req.tools = defs
-            .into_iter()
-            .map(|d| ToolEntry::Tool(ToolDefinition::new(d.name, d.description, d.input_schema)))
-            .collect();
+        let freeform = model.capabilities().freeform.clone().unwrap_or_default();
+        req.tools = defs.into_iter().map(|d| ToolEntry::Tool(request_tool(d, &freeform))).collect();
         if step_limit {
             req.tool_choice = Some(ToolChoice::from_str("none"));
         }
@@ -1824,4 +1822,47 @@ impl Driver for ExecutionDriver {
 pub(crate) fn request_cache(model: &oc_ai::catalog::ResolvedModel) -> Option<oc_ai::CachePolicy> {
     let ttl = model.cache_ttl()?;
     Some(oc_ai::CachePolicy::Object(oc_ai::CachePolicyObject { ttl: Some(ttl.to_string()), ..Default::default() }))
+}
+
+/// A tool definition as the model request carries it: `freeform` only when the model lists that format
+/// (`SessionModelRequest.prepare`), so other models get the tool's JSON form.
+pub(crate) fn request_tool(definition: oc_tools::ToolDefinition, supported: &[oc_schema::FreeformFormat]) -> ToolDefinition {
+    let freeform = definition.freeform.filter(|f| supported.contains(&f.format()));
+    ToolDefinition::new(definition.name, definition.description, definition.input_schema).with_freeform(freeform)
+}
+
+#[cfg(test)]
+mod freeform_tests {
+    use super::*;
+    use oc_schema::{Freeform, FreeformFormat};
+    use serde_json::{json, Value};
+
+    /// session-model-request-hooks.test.ts "advertises only supported freeform formats without removing tools or
+    /// changing the shared definitions" (2.3.0).
+    #[test]
+    fn advertises_only_supported_freeform_formats() {
+        let input_schema = json!({ "type": "object", "properties": { "value": { "type": "string" } }, "required": ["value"] });
+        let formats =
+            [Freeform::Text, Freeform::Regex { pattern: "[0-9]+".into() }, Freeform::Lark { grammar: "start: \"x\"".into() }];
+        let definitions: Vec<oc_tools::ToolDefinition> = formats
+            .iter()
+            .map(|f| oc_tools::ToolDefinition::new(f.format().as_str(), "", input_schema.clone()).with_freeform(Some(f.clone())))
+            .collect();
+        let cases: [&[FreeformFormat]; 4] = [&[], &[], &[FreeformFormat::Text, FreeformFormat::Lark], &[FreeformFormat::Regex]];
+        for supported in cases {
+            let tools: Vec<(String, Value, Option<Freeform>)> = definitions
+                .iter()
+                .cloned()
+                .map(|d| request_tool(d, supported))
+                .map(|t| (t.name, Value::Object(t.input_schema), t.freeform))
+                .collect();
+            let expected: Vec<(String, Value, Option<Freeform>)> = formats
+                .iter()
+                .map(|f| (f.format().as_str().to_string(), input_schema.clone(), supported.contains(&f.format()).then(|| f.clone())))
+                .collect();
+            assert_eq!(tools, expected);
+        }
+        // The shared definitions keep their encoding.
+        assert!(definitions.iter().all(|d| d.freeform.is_some()));
+    }
 }

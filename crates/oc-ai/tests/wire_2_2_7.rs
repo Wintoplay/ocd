@@ -469,8 +469,7 @@ fn recordings_decode_like_upstream_2_2_7() {
         } else {
             (entry_name.split('-').next().unwrap_or_default().to_string(), vec![dir.path()])
         };
-        // Freeform (custom) tools are library-only (core never declares them), so their recordings are left out.
-        let mut files: Vec<_> = files.into_iter().filter(|p| !p.to_string_lossy().contains("freeform")).collect();
+        let mut files = files;
         files.sort();
         for file in files {
             let rec = oc_ai::testing::recording(&std::fs::read_to_string(&file).unwrap());

@@ -10,6 +10,7 @@ use oc_ai::catalog::models_dev::{
 use oc_ai::catalog::plugins::ModelsDevPlugin;
 use oc_ai::catalog::registry::{Access, Catalog, CatalogPlugin, ProviderEditor};
 use oc_ai::catalog::types::Activation;
+use oc_ai::FreeformFormat;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -238,10 +239,13 @@ async fn takes_each_models_package_from_its_first_api_and_skips_urls_packages_bu
     };
     let mut acme = fixture()["acme"].clone();
     acme["models"]["acme-responses"] = source_model("acme-responses", json!({"api": {
-        "responses": {"base_url": "https://api.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/openai", "opencodeai": "@opencode/ai/providers/openai/responses"}},
-        "chat-completions": {"base_url": "https://other.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/openai"}}
+        "responses": {"base_url": "https://api.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/openai", "opencodeai": "@opencode/ai/providers/openai/responses"},
+            "capabilities": {"tools": {"freeform": ["text", "future-grammar", "lark"]}}},
+        "chat-completions": {"base_url": "https://other.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/openai"}, "capabilities": {"tools": {"freeform": ["regex"]}}}
     }}));
-    acme["models"]["acme-fallback"] = source_model("acme-fallback", json!({"api": {"messages": {"base_url": "https://claude.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/anthropic"}}}}));
+    acme["models"]["acme-fallback"] = source_model("acme-fallback", json!({"api": {"messages": {
+        "base_url": "https://claude.acme.test/v1", "sdk": {"aisdk": "@ai-sdk/anthropic"}, "capabilities": {"tools": {"freeform": ["future-grammar"]}}
+    }}}));
     let data = json!({
         "acme": acme,
         "azure": {"id": "azure", "name": "Azure", "env": ["AZURE_RESOURCE_NAME", "AZURE_API_KEY"], "models": {
@@ -254,8 +258,12 @@ async fn takes_each_models_package_from_its_first_api_and_skips_urls_packages_bu
     let model = |p: usize, id: &str| result[p].models.iter().find(|m| m.id == id).unwrap().clone();
     assert_eq!(model(0, "acme-responses").package.as_deref(), Some("@opencode/ai/providers/openai/responses"));
     assert!(model(0, "acme-responses").settings.is_none());
+    // The selected API's freeform formats, without the ones this version doesn't know (2.3.0).
+    assert_eq!(model(0, "acme-responses").capabilities.freeform, Some(vec![FreeformFormat::Text, FreeformFormat::Lark]));
+    assert_eq!(model(0, "acme-1").capabilities.freeform, None);
     // Without an opencode package, the AI SDK package maps to the native one as before.
     assert_eq!(model(0, "acme-fallback").package.as_deref(), Some("@opencode/ai/providers/anthropic"));
+    assert_eq!(model(0, "acme-fallback").capabilities.freeform, Some(vec![]));
     assert_eq!(Value::Object(model(0, "acme-fallback").settings.unwrap()), json!({"baseURL": "https://claude.acme.test/v1"}));
     assert_eq!(result[1].info.package, "@opencode/ai/providers/azure/responses");
     assert!(result[1].info.settings.is_none());

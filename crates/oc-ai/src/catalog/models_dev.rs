@@ -12,7 +12,7 @@ use super::types::{
 };
 use super::variant;
 use crate::json::Object;
-use crate::types::Compatibility;
+use crate::types::{Compatibility, FreeformFormat};
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
@@ -410,6 +410,8 @@ fn d_model(value: &Value) -> Decoded<SourceModel> {
 #[derive(Debug, Clone, Default)]
 struct SourceApi {
     base_url: Option<String>,
+    /// `capabilities.tools.freeform`: format names; those this version doesn't know are skipped when the route is built.
+    freeform: Option<Vec<String>>,
     aisdk: Option<String>,
     opencodeai: Option<String>,
     reasoning_field: Option<String>,
@@ -421,6 +423,11 @@ fn d_api(value: &Value) -> Option<SourceApi> {
     let decode = || -> Decoded<SourceApi> {
         let o = d_object(value, "")?;
         let mut out = SourceApi { base_url: d_opt_string(o.get("base_url"), "")?, ..Default::default() };
+        if let Some(capabilities) = d_opt_record(o.get("capabilities"), "")? {
+            if let Some(tools) = d_opt_record(capabilities.get("tools"), "")? {
+                out.freeform = tools.get("freeform").map(|f| d_strings(Some(f), "")).transpose()?;
+            }
+        }
         if let Some(sdk) = d_opt_record(o.get("sdk"), "")? {
             out.aisdk = d_opt_string(sdk.get("aisdk"), "")?;
             out.opencodeai = d_opt_string(sdk.get("opencodeai"), "")?;
@@ -485,6 +492,7 @@ fn d_provider(value: &Value) -> Option<SourceProvider<'_>> {
 #[derive(Debug, Clone)]
 struct Route {
     package: String,
+    freeform: Option<Vec<FreeformFormat>>,
     base_url: Option<String>,
     compatibility: Option<Compatibility>,
 }
@@ -576,7 +584,8 @@ fn route(provider_id: &str, model: &SourceModel, unknown: &mut IndexSet<String>)
         compatibility.reasoning_field.is_some() || compatibility.max_tokens_field.is_some() || compatibility.media_input.is_some();
     // An empty base_url is how models.dev says it has no URL for the API.
     let base_url = if BUILDS_OWN_URL.contains(&package.as_str()) { None } else { api.base_url.clone().filter(|u| !u.is_empty()) };
-    Some(Route { package, base_url, compatibility: has_compatibility.then_some(compatibility) })
+    let freeform = api.freeform.as_ref().map(|names| names.iter().filter_map(|name| FreeformFormat::parse(name)).collect());
+    Some(Route { package, freeform, base_url, compatibility: has_compatibility.then_some(compatibility) })
 }
 
 /// `mostCommon(values)`: the most frequent value, the first seen on ties.
@@ -811,6 +820,7 @@ fn model_info(provider_id: &str, provider: &ProviderDefaults<'_>, id: String, mo
         body: input.body,
         capabilities: Capabilities {
             tools: model.tools,
+            freeform: route.freeform.clone(),
             input: modalities(&model.input),
             output: modalities(&model.output),
             temperature: model.temperature,

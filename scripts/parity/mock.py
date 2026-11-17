@@ -8,7 +8,9 @@ answers "(script exhausted)" so over-calls show up in the dumps.
 Turn fields (all optional):
   text: str | [str]          assistant text, one SSE chunk per list item
   reasoning: str | [str]     `reasoning_content` deltas sent before the text
-  tools: [{name, args, id}]  tool calls (args: dict or raw string); several entries = parallel calls
+  tools: [{name, args, id}]  tool calls (args: dict or raw string); several entries = parallel calls. On Responses an
+                             entry with `custom: true` is a custom (freeform) tool call: raw `input` text streamed as
+                             `response.custom_tool_call_input.delta` events (`chunks`, default two halves)
   finish: str                finish_reason (default "tool_calls" when tools are present, else "stop")
   usage: {prompt_tokens, completion_tokens, ...}   final usage chunk (default 10/5)
   status: int                answer with this HTTP status instead of a stream; `body` (JSON) and `headers` apply
@@ -464,6 +466,23 @@ class Mock:
             events.append({"type": "response.output_item.done", "output_index": len(output), "item": done})
             output.append(done)
         for i, tool in enumerate((turn.get("tools") or []) if kind != "title" else []):
+            if tool.get("custom"):
+                # A custom (freeform) tool call: raw `input` text streamed in `chunks` (default: two halves).
+                raw = tool.get("input", "")
+                chunks = tool.get("chunks") or [raw[:len(raw) // 2], raw[len(raw) // 2:]]
+                iid = f"ctc_{n}_{len(output)}"
+                call = {"id": iid, "type": "custom_tool_call", "call_id": tool.get("id", f"call_{i + 1}"),
+                        "name": tool["name"]}
+                added(len(output), {**call, "input": ""})
+                for c in chunks:
+                    events.append({"type": "response.custom_tool_call_input.delta", "item_id": iid,
+                                   "output_index": len(output), "delta": c})
+                events.append({"type": "response.custom_tool_call_input.done", "item_id": iid,
+                               "output_index": len(output), "input": raw})
+                done = {**call, "input": raw, "status": "completed"}
+                events.append({"type": "response.output_item.done", "output_index": len(output), "item": done})
+                output.append(done)
+                continue
             args = tool.get("args", {})
             args = args if isinstance(args, str) else json.dumps(args)
             iid = f"fc_{n}_{len(output)}"

@@ -2226,6 +2226,9 @@ pub fn tool_value(registry: &Registry) -> Value {
                 "description": definition.description,
                 "input": definition.input_schema,
             });
+            if let Some(freeform) = &definition.freeform {
+                v["freeform"] = json!(freeform);
+            }
             if let Some(output) = definition.output_schema {
                 v["output"] = output;
             }
@@ -2240,7 +2243,9 @@ pub fn tool_value(registry: &Registry) -> Value {
 }
 
 fn same_definition(before: &Value, after: &Value) -> bool {
+    // A helper bundle that predates `freeform` sends no such key; that keeps the native tool's encoding.
     ["name", "description", "input", "output", "options"].iter().all(|k| before.get(*k) == after.get(*k))
+        && (after.get("freeform").is_none() || before.get("freeform") == after.get("freeform"))
 }
 
 fn result_json(result: &ToolResult) -> Value {
@@ -2266,6 +2271,9 @@ pub struct EditedTool {
     description: String,
     input: Value,
     output: Option<Value>,
+    /// `Some` when the edited registration names its `freeform` encoding (`null` drops it); `None` keeps the
+    /// native tool's.
+    freeform: Option<Option<oc_schema::Freeform>>,
     options: ToolOptions,
 }
 
@@ -2275,6 +2283,7 @@ impl EditedTool {
             description: item.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
             input: item.get("input").cloned().unwrap_or(json!({ "type": "object", "properties": {} })),
             output: item.get("output").cloned(),
+            freeform: item.get("freeform").map(|f| serde_json::from_value(f.clone()).ok()),
             options: options_from_json(item.get("options")),
             inner,
         }
@@ -2294,6 +2303,9 @@ impl Tool for EditedTool {
         definition.description = self.description.clone();
         definition.input_schema = self.input.clone();
         definition.output_schema = self.output.clone();
+        if let Some(freeform) = &self.freeform {
+            definition.freeform = freeform.clone();
+        }
         definition
     }
     fn advertised(&self, ctx: &DefinitionContext) -> bool {
@@ -2321,6 +2333,8 @@ pub struct PluginTool {
     description: String,
     input: Value,
     output: Option<Value>,
+    /// The tool's declared freeform encoding (`Tool.Info.freeform`).
+    freeform: Option<oc_schema::Freeform>,
     options: ToolOptions,
 }
 
@@ -2334,6 +2348,7 @@ impl PluginTool {
             description: item.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
             input: item.get("input").cloned().unwrap_or(json!({ "type": "object", "properties": {} })),
             output: item.get("output").cloned(),
+            freeform: item.get("freeform").and_then(|f| serde_json::from_value(f.clone()).ok()),
             options: options_from_json(item.get("options")),
         }
     }
@@ -2349,7 +2364,9 @@ impl Tool for PluginTool {
     }
     fn definition(&self, _ctx: &DefinitionContext) -> ToolDefinition {
         let id = oc_tools::tool::effective_name(&self.name, self.options.namespace.as_deref());
-        ToolDefinition::new(id, self.description.clone(), self.input.clone()).with_output(self.output.clone())
+        ToolDefinition::new(id, self.description.clone(), self.input.clone())
+            .with_freeform(self.freeform.clone())
+            .with_output(self.output.clone())
     }
     /// The sidecar validates with the plugin's own schema (upstream's runtime decode).
     fn validate(&self, _input: &Value) -> Vec<oc_tools::validate::Issue> {

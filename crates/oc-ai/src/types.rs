@@ -735,6 +735,9 @@ pub struct ToolDefinition {
     pub input_schema: Object,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Object>,
+    /// Raw-text wire encoding for a tool with exactly one required string parameter (`LLM.Freeform`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Freeform>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -750,10 +753,31 @@ impl ToolDefinition {
             description: description.into(),
             input_schema: input_schema.as_object().cloned().unwrap_or_default(),
             output_schema: None,
+            freeform: None,
             cache: None,
             metadata: None,
             native: None,
         }
+    }
+
+    pub fn with_freeform(mut self, freeform: Option<Freeform>) -> Self {
+        self.freeform = freeform;
+        self
+    }
+
+    /// `ToolDefinition.freeformField`: the parameter a freeform call fills, the input schema's only property when it
+    /// is a required string.
+    pub fn freeform_field(schema: &Object) -> Option<String> {
+        let properties = schema.get("properties").and_then(Value::as_object)?;
+        if properties.len() != 1 {
+            return None;
+        }
+        let (name, property) = properties.iter().next()?;
+        if property.as_object()?.get("type").and_then(Value::as_str) != Some("string") {
+            return None;
+        }
+        let required = schema.get("required").and_then(Value::as_array)?;
+        required.iter().any(|r| r.as_str() == Some(name.as_str())).then(|| name.clone())
     }
 }
 
@@ -921,6 +945,7 @@ impl LLMRequest {
 // ---------------------------------------------------------------------------------------------
 
 pub use oc_schema::types::FinishReason;
+pub use oc_schema::types::{Freeform, FreeformFormat};
 
 /// `Usage` (inclusive totals + non-overlapping breakdown).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

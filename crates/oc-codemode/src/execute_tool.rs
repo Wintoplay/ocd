@@ -14,8 +14,9 @@ pub const NAME: &str = "execute";
 /// Invariant model-facing guidance; the changing tool catalog is delivered through the catalog instructions.
 pub const DESCRIPTION: &str = concat!(
     "Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.\n",
+    "Write plain JavaScript and send it exactly as written: no code fence, and no JSON or other wrapper around it.\n",
     "`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable: there is no `setTimeout` or sleep. All other external access goes through `tools`.\n",
-    "Within `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.\n",
+    "Inside `execute`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.\n",
     "Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>[\"tool-name\"](input)`.\n",
     "Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.\n",
     "Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`."

@@ -111,6 +111,55 @@ pub struct PermissionRule {
 
 pub type Ruleset = Vec<PermissionRule>;
 
+/// `Tool.Freeform`: optional wire encoding of a tool's single required string field. Models that accept the format
+/// write that field's value directly instead of JSON arguments; execution still receives the object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Freeform {
+    Text,
+    Regex { pattern: String },
+    Lark { grammar: String },
+}
+
+impl Freeform {
+    pub fn format(&self) -> FreeformFormat {
+        match self {
+            Freeform::Text => FreeformFormat::Text,
+            Freeform::Regex { .. } => FreeformFormat::Regex,
+            Freeform::Lark { .. } => FreeformFormat::Lark,
+        }
+    }
+}
+
+/// `Tool.FreeformFormat`: `"text" | "regex" | "lark"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FreeformFormat {
+    Text,
+    Regex,
+    Lark,
+}
+
+impl FreeformFormat {
+    /// The format named `name`, when this version knows it.
+    pub fn parse(name: &str) -> Option<FreeformFormat> {
+        match name {
+            "text" => Some(FreeformFormat::Text),
+            "regex" => Some(FreeformFormat::Regex),
+            "lark" => Some(FreeformFormat::Lark),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FreeformFormat::Text => "text",
+            FreeformFormat::Regex => "regex",
+            FreeformFormat::Lark => "lark",
+        }
+    }
+}
+
 /// `Tool.Content`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]

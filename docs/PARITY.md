@@ -17,7 +17,7 @@ export PATH=$HOME/.cargo/bin:$PATH
 cargo build -p ocd                          # debug build is enough
 python3 scripts/parity.py --list            # scenarios and groups
 python3 scripts/parity.py -q                # everything (about 25 minutes with a debug build)
-python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230
+python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230
 python3 scripts/parity.py 'loop_*' cli_run  # by name or glob
 ```
 
@@ -90,7 +90,7 @@ creation waits until `agent.list` answers the same twice and `plugin.updated` wa
 the agent/command/skill/model/provider/integration lists the same way; `readonly_vcs*` issue one unrecorded
 `vcs.get` first.
 
-## Scenarios (217)
+## Scenarios (221)
 
 | group | scenarios |
 |---|---|
@@ -129,9 +129,18 @@ the agent/command/skill/model/provider/integration lists the same way; `readonly
 | run227 | the rewritten `run`: message arguments, waiting for background jobs, retry notices, a permission question it cannot answer, `--worktree`, `--archived`, SIGTERM |
 | acp | `opencode acp` over stdio (`scripts/parity/acp227.py`, a minimal ACP client with the child-session capability that answers permission requests `once`): a background subagent outliving the root turn, outliving a cancelled turn with its `read: ask` permission request, and a session closed while it runs. Every JSON-RPC message the client received is compared in three ordered lists (the root's updates with responses and requests, the child updates, everything after the prompt response), plus the root's and the child's model requests each in order: the server publishes a background child's start concurrently with the root's tool result, so how those interleave during the turn is a race in both binaries |
 | local | the LM Studio, Ollama and vLLM discovery plugins against mock servers (`scripts/parity/local.py`, ephemeral ports shared by both runs, configured `baseURL`s only): the discovery requests (paths, bearer keys, Ollama's `/api/show` bodies), the provider, model and integration lists they produce (embedding, foreign and failing models left out, contexts, families, capabilities), `apiKey` and `/api`/`/api/v1` base URLs, a chat through a discovered vLLM model (path, key, model), a 30 s outage keeping the inventory and the next answer replacing it, a config change moving LM Studio to another server and key and dropping vLLM's endpoint; the `*.updated` counts of the boot and of each change |
-| api230 | 2.3.0's config keys: the flags `shell_timeout_background` and `mcp_events`, the deprecated `codemode_vm` and the retired `codemodeVm` alias, provider `settings.tls` (echoed by `/api/config` and `/api/provider`, never a model setting; malformed ones invalidate the provider), model `capabilities.freeform` in config (the model list is compared without `capabilities` until freeform tools land), and the event filter with the new public types |
+| api230 | 2.3.0's config keys: the flags `shell_timeout_background` and `mcp_events`, the deprecated `codemode_vm` and the retired `codemodeVm` alias, provider `settings.tls` (echoed by `/api/config` and `/api/provider`, never a model setting; malformed ones invalidate the provider), model `capabilities.freeform` in config (and on the listed model), and the event filter with the new public types |
+| freeform230 | 2.3.0 freeform tool input against the mock's Responses and Chat endpoints (`scripts/parity/freeform230.py`; the mock streams `custom_tool_call` items): `execute` and `patch` as custom tools (free text, and the Lark patch grammar) on a model configured with `capabilities.freeform`, custom calls run with their object input, the stored parts, the files the patch wrote, and the replay of the calls as `custom_tool_call`/`custom_tool_call_output` in later requests; the formats a model lists (`["text"]`, `[]`, unset) deciding which tools go out custom; `openai/gpt-5.4-mini` freeform from the bundled models.dev catalog (and its `/api/model` capabilities); Chat Completions custom tools and a streamed `custom` call. Every request body (custom tools in full, function tools as one digest each, input/messages in full) is compared |
 
 ## Results
+
+**Freeform tool input (debug build, 2026-11-17):** the new group `freeform230` against the local v2.3.0 build
+(`up-dist-2.3.0`), with `api230` now comparing the listed models' `capabilities`: `api230_config_keys` identical; in
+the four `freeform230` scenarios every freeform part is identical (the custom `execute` and `patch` definitions with
+the grammar text, the custom calls and their stored parts, the files the patch wrote, the replayed
+`custom_tool_call`/`custom_tool_call_output` items, which tools go out custom per listed format, the Chat custom
+tools, and `/api/model`'s `freeform` capabilities). They differ only by two 2.3.0 changes of other batches:
+`time.firstToken` on assistant messages (P3) and the `subagent` tool's schema and description (P2).
 
 **2.3.0 catch-up, API/config batch (debug build, 2026-11-17):** against an opencode 2.3.0 binary
 (`up-dist-2.3.0`), groups `api227`, `readonly`, `errors`, `cli` and the new `api230` (20 scenarios): 15 identical

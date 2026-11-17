@@ -88,6 +88,7 @@ Per-call options are `StreamOptions { http, web_socket }` (`Client::stream_opts`
 | `open_responses_channel` | The Responses WebSocket channel (`open-responses-channel.ts` + `open-responses-continuation.ts`): `ChannelOptions` (id, name, rotation age, `enabled`/`url`/`headers` endpoint hooks, continuation shape), the `response.create` message, the base driver (event order checks, error/failed frames → provider failures with the frame as body) and the continuation driver (checkpoint, incremental `previous_response_id` frames, `retry-full` / `rotate-and-retry-full` rejections), `xai_continuation`. |
 | `openai_responses` | `openai-responses`: namespaces, image generation, hosted tools, effort updates, `context_management`. |
 | `responses_variants` | `xai-responses`, `alibaba-responses`, `meta-responses`. |
+| `openai_freeform` | Freeform tools as OpenAI custom tools, shared by the Responses and Chat protocols (see below). |
 | `gemini` | `gemini`, `google-vertex-gemini`; Vertex helpers; `gemini::adc`: Google ADC as google-auth-library 10.5.0 resolves it (see below). |
 | `google_interactions` | `google-interactions`, `google-vertex-interactions`. |
 | `bedrock_converse` | `bedrock-converse`, hand-written SigV4 (`sigv4`), the AWS default credential chain (`aws`, see below). |
@@ -325,10 +326,38 @@ opencode 2.2.6-2.2.7 changes (`tests/wire_2_2_7.rs`):
 response of the corpus (with 2.2.7's Azure Messages and Foundry recordings) decodes to the same events as upstream's
 route, and requests on the changed routes compile to the same URL, body text and auth headers.
 
+## Freeform tool input (2.3.0)
+
+`protocols::openai_freeform` ports `openai-freeform.ts` (#61703). A `ToolDefinition` may carry `freeform`
+(`Freeform::{Text, Regex{pattern}, Lark{grammar}}`, the `Tool.Freeform` schema in `oc-schema`); it applies only when
+the input schema has exactly one property, a required string (`ToolDefinition::freeform_field`), and the tool is not
+provider-native. Core sets it only for the formats the model lists (`Capabilities.freeform`).
+- **Request**: on every route that reuses the OpenAI wire format (OpenAI, Azure, Bedrock Mantle, Vercel, OpenRouter,
+  DigitalOcean, Venice, xAI, the compatible packages, the Responses WebSocket) the tool goes out as a custom tool:
+  Responses `{type: "custom", name, description, format}` with `format` `{type: "text"}` or
+  `{type: "grammar", syntax: "lark" | "regex", definition}`, Chat `{type: "custom", custom: {name, description, format}}`
+  with `format.grammar = {syntax, definition}`. Choosing it (`tool_choice`, `allowed_tools`) names it as `custom`.
+  Other protocols send the JSON tool.
+- **Stream**: `custom_tool_call` items (`output_item.added`/`.done`, `response.custom_tool_call_input.delta`, recovery
+  from `response.completed`) and Chat `tool_calls[].custom` deltas are re-encoded as JSON-argument fragments of the
+  field (`{"code":"` + escaped chunks + `"}`), so the tool-input events and the call's input look like a JSON tool's
+  (`{field: raw}`; an undeclared custom tool fills `input`). An authoritative final input that disagrees with the
+  streamed text replaces it. Calls carry `providerMetadata.<key> = {itemId, custom: true}`.
+- **Replay**: a past call goes out as the type its tool is declared with in this request (`custom_tool_call` with the
+  raw text, or `function_call` with JSON arguments; Chat `custom` or `function`), its result as
+  `custom_tool_call_output` or `function_call_output`; the item id survives only when the type is unchanged.
+- **Catalog**: models.dev `api.<route>.capabilities.tools.freeform` (unknown format names skipped; a malformed value
+  skips that API entry) becomes `Capabilities.freeform` of the model on that route; config
+  `capabilities.freeform` overrides it (`[]` turns it off, unset keeps the base model's).
+
+`tests/freeform_2_3_0.rs` ports `provider/freeform-tools.test.ts` and cross-checks with the 2.3.0 checkout under Bun:
+208 request bodies (every format, the choice and `allowed_tools`, replays with each kind of item metadata, a tool that
+can't be freeform; 16 routes) compile to the same URL and body text, and 33 custom-call streams (Responses and Chat,
+streamed, done-only, recovered, disagreeing, unclosed, the recorded OpenRouter/DigitalOcean/Venice calls) decode to the
+same events.
+
 ## Not ported / gaps
 
-- **Freeform (custom) tools** (`ToolDefinition.freeform`, `custom` tool calls on Chat and Responses): core never
-  declares them, so they are not ported; `custom_tool_call` items in a stream are ignored.
 - **Provider option validation messages**: strict provider options fail with "Invalid <route> provider option
   `<key>`" (xAI's `minP` uses upstream's Effect Schema text); upstream reports the Effect Schema message.
 

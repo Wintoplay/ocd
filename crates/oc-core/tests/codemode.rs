@@ -107,8 +107,10 @@ fn definition_is_verbatim_and_gated() {
     let definition = codemode::execute_definition(&snapshot).unwrap();
     assert_eq!(definition.name, "execute");
     assert!(definition.description.starts_with(
-        "Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.\n`fetch` is available"
+        "Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.\nWrite plain JavaScript and send it exactly as written: no code fence, and no JSON or other wrapper around it.\n`fetch` is available"
     ));
+    // Models that take freeform text send the program as raw text (2.3.0).
+    assert_eq!(definition.freeform, Some(oc_schema::Freeform::Text));
     assert_eq!(
         definition.input_schema,
         json!({"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false})
@@ -248,4 +250,79 @@ async fn failures_are_results_not_tool_errors() {
         unknown.output.unwrap()["output"],
         json!("Unknown tool 'orders.look'. Did you mean tools.orders.lookup?\nUse search to find available tools.")
     );
+}
+
+/// A Code Mode tool whose input is one required non-empty string (`Schema.Struct({ text: Schema.NonEmptyString })`).
+struct SendText {
+    name: &'static str,
+    freeform: Option<oc_schema::Freeform>,
+}
+
+#[async_trait]
+impl Tool for SendText {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn options(&self) -> ToolOptions {
+        ToolOptions { codemode: true, ..ToolOptions::default() }
+    }
+    fn definition(&self, _ctx: &DefinitionContext) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name,
+            "Send text",
+            json!({ "type": "object", "properties": { "text": { "type": "string", "minLength": 1 } }, "required": ["text"], "additionalProperties": false }),
+        )
+        .with_freeform(self.freeform.clone())
+        .with_output(Some(json!({ "type": "string" })))
+    }
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolResult, ToolError> {
+        let text = input["text"].as_str().unwrap_or_default().to_string();
+        Ok(ToolResult::text(text.clone()).with_output(json!(text)))
+    }
+}
+
+// Upstream tool-execute.test.ts "execute takes raw code as freeform text, and Code Mode calls freeform tools with a
+// string" (2.3.0) and codemode.test.ts "a freeform tool takes its one string field directly and still accepts the
+// object".
+#[tokio::test]
+async fn freeform_tools_take_their_string_field_directly() {
+    let mut registry = Registry::new();
+    registry.add(Arc::new(SendText { name: "echo", freeform: None })).unwrap();
+    registry.add(Arc::new(SendText { name: "send", freeform: Some(oc_schema::Freeform::Text) })).unwrap();
+    let snapshot = registry.snapshot(&[]);
+    assert_eq!(codemode::execute_definition(&snapshot).unwrap().freeform, Some(oc_schema::Freeform::Text));
+    let signatures: Vec<String> = codemode::catalog_inventory(&snapshot)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            oc_codemode::catalog::CatalogEntry::Tool(tool) => Some(tool.signature),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signatures,
+        vec![
+            "tools.echo({\n  /** @minLength 1 */\n  text: string,\n}): Promise<string>".to_string(),
+            "tools.send(/** @minLength 1 */ text: string): Promise<string>".to_string(),
+        ]
+    );
+    let calls = codemode::execute(
+        &snapshot,
+        json!({ "code": "return [await tools.send(\"first\"), await tools.send({text: \"second\"})]" }),
+        context(Arc::new(Mutex::new(Vec::new()))),
+    )
+    .await
+    .unwrap()
+    .output
+    .unwrap();
+    let output: Value = serde_json::from_str(calls["output"].as_str().unwrap()).unwrap();
+    assert_eq!(output, json!(["first", "second"]));
+    let inputs: Vec<Value> = calls["toolCalls"].as_array().unwrap().iter().map(|c| c["input"].clone()).collect();
+    assert_eq!(inputs, vec![json!({ "text": "first" }), json!({ "text": "second" })]);
+    // A tool that is not freeform keeps taking only the object.
+    let plain = codemode::execute(&snapshot, json!({ "code": "return await tools.echo(\"a\")" }), context(Arc::new(Mutex::new(Vec::new()))))
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(plain["error"], json!(true));
 }

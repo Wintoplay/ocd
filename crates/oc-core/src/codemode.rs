@@ -29,6 +29,7 @@ pub fn execute_definition(snapshot: &Snapshot) -> Option<ToolDefinition> {
     }
     Some(
         ToolDefinition::new(execute_tool::NAME, execute_tool::DESCRIPTION, execute_tool::input_schema())
+            .with_freeform(Some(oc_schema::Freeform::Text))
             .with_output(Some(output_schema())),
     )
 }
@@ -122,6 +123,7 @@ fn entries(snapshot: &Snapshot) -> Vec<ToolEntry> {
                 path: path.join("."),
                 description: definition.description,
                 input: ToolSchema::Json(definition.input_schema),
+                freeform: definition.freeform.is_some(),
                 // Without a declared output the value is the joined text or null (`Schema.NullOr(Schema.String)`).
                 output: Some(ToolSchema::Json(
                     definition

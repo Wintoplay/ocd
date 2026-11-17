@@ -525,13 +525,15 @@ fn applies_configured_release_date_temperature_support_and_reasoning_field() {
         "package": "aisdk:@ai-sdk/openai-compatible",
         "models": {"reasoner": {
             "releaseDate": "2026-02-03",
-            "capabilities": {"temperature": false},
+            "capabilities": {"temperature": false, "freeform": ["text", "regex"]},
             "compatibility": {"reasoningField": "reasoning_content"}
         }}
     }})))]);
     let model = catalog.model("custom", "reasoner").unwrap();
     assert_eq!(model.time.released, 1770076800000.0);
     assert_eq!(model.capabilities.temperature, Some(false));
+    // 2.3.0: configured freeform formats.
+    assert_eq!(model.capabilities.freeform, Some(vec![oc_ai::FreeformFormat::Text, oc_ai::FreeformFormat::Regex]));
     assert_eq!(model.compatibility.as_ref().unwrap().reasoning_field.as_deref(), Some("reasoning_content"));
 }
 
