@@ -490,6 +490,7 @@ impl Models {
             .clone();
         if created && let Some(plugins) = self.plugins.read().as_ref() {
             plugins.azure.register(key, state.integrations.clone());
+            plugins.local.register(key, state.integrations.clone());
         }
         state
     }
@@ -508,6 +509,7 @@ impl Models {
         if let Some(plugins) = self.plugins.read().as_ref() {
             plugins.openai.remove(key);
             plugins.azure.remove(key);
+            plugins.local.unregister(key);
             plugins.set_catalog(key, None);
         }
     }
@@ -525,8 +527,10 @@ impl Models {
     /// Runs plugin `provider`/`model` transforms in catalog builds of plugin locations.
     pub fn set_plugins(&self, plugins: Arc<crate::plugins::Plugins>) {
         *self.plugins.write() = Some(plugins.clone());
+        plugins.local.set_models_dev(self.models_dev.clone());
         for (key, state) in self.by_location.lock().iter() {
             plugins.azure.register(key, state.integrations.clone());
+            plugins.local.register(key, state.integrations.clone());
         }
     }
 
@@ -730,14 +734,15 @@ impl Models {
             _ => None,
         };
         // opencode.provider.{lmstudio,ollama,vllm}: a provider discovered on a local server needs no integration
-        // (each plugin's integration transform removes it while its inventory is not empty).
+        // (each plugin's integration transform removes it while its inventory is not empty), unless the discovery
+        // used the integration's connection: a key connection lives on the integration.
         let local: Vec<catalog::local::Discovered> = match (&host, key) {
             (Some(plugins), Some(key)) => {
                 plugins.local.discovered(key).into_iter().filter(|d| plugins.builtin_enabled(key, d.kind.plugin_id())).collect()
             }
             _ => vec![],
         };
-        for discovered in &local {
+        for discovered in local.iter().filter(|d| !d.connected) {
             integrations.remove(discovered.kind.provider_id());
         }
         // Plugin `integration` transforms run between the internal plugins and the configured ones.

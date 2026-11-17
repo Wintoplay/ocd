@@ -40,6 +40,16 @@ fn bearer(api_key: Option<String>, env: &[&str]) -> std::sync::Arc<dyn crate::ro
     auth::bearer_options(api_key, env)
 }
 
+/// `apiKey: false` (`AuthOptions.apiKey`): a provider that needs no key, so no env lookup and no auth header. The
+/// resolver sets it for an enabled provider without a credential (`ModelResolver` `loadMedia`).
+fn key_disabled(s: &mut Settings) -> bool {
+    if s.peek("apiKey") == Some(&Value::Bool(false)) {
+        s.take("apiKey");
+        return true;
+    }
+    false
+}
+
 /// Build an image model for a native `.../images` entrypoint. Entrypoints that are not image packages fail
 /// with `None`: the resolver reports them as unsupported for this type.
 pub fn image_model(package: &str, model_id: &str, settings: &Object) -> Option<Result<ImageModel>> {
@@ -89,6 +99,7 @@ fn take_rest(s: &mut Settings) -> Object {
 }
 
 fn openai(model_id: &str, s: &mut Settings) -> Result<ImageModel> {
+    let keyless = key_disabled(s);
     let api_key = s.string("apiKey");
     let base = s.string("baseURL");
     let given = s.headers();
@@ -107,7 +118,8 @@ fn openai(model_id: &str, s: &mut Settings) -> Result<ImageModel> {
         headers.insert(k, v);
     }
     let headers = if headers.is_empty() { None } else { Some(headers) };
-    let mut deployment = Deployment::new(bearer(api_key, &["OPENAI_API_KEY"]), base, headers, body);
+    let auth = if keyless { auth::none() } else { bearer(api_key, &["OPENAI_API_KEY"]) };
+    let mut deployment = Deployment::new(auth, base, headers, body);
     deployment.http = HttpOptions::merge(&[deployment.http.as_ref(), query.map(|q| HttpOptions { query: Some(q), ..Default::default() }).as_ref()]);
     // The ChatGPT backend (ChatGPT sign-in) rejects multipart image edits with "Unsupported content type".
     let image_input = deployment.base_url.as_deref().filter(|b| b.starts_with("https://chatgpt.com/")).map(|_| image::openai::ImageInput::JsonEdits);
@@ -119,6 +131,7 @@ fn query_params(value: Option<Value>) -> Option<IndexMap<String, String>> {
 }
 
 fn azure(model_id: &str, s: &mut Settings) -> Result<ImageModel> {
+    let keyless = key_disabled(s);
     let api_key = s.string("apiKey");
     let api_version = s.string("apiVersion");
     let base = s.string("baseURL");
@@ -146,7 +159,8 @@ fn azure(model_id: &str, s: &mut Settings) -> Result<ImageModel> {
         (format!("{root}/v1"), Some(full_query))
     };
     let credential = Credential::optional(api_key, "apiKey").or_else(Credential::env("AZURE_OPENAI_API_KEY"));
-    let auth = auth::and_then(auth::remove("authorization"), auth::header("api-key", credential));
+    let key = if keyless { auth::none() } else { auth::header("api-key", credential) };
+    let auth = auth::and_then(auth::remove("authorization"), key);
     let mut deployment = Deployment::new(auth, Some(target_base), headers, body);
     deployment.http = HttpOptions::merge(&[deployment.http.as_ref(), target_query.map(|q| HttpOptions { query: Some(q), ..Default::default() }).as_ref()]);
     Ok(image::openai::model(model_id, &deployment, Some("azure"), Some(take_rest(s)), None, None))
@@ -358,6 +372,7 @@ pub fn decision_model(package: &str, model_id: &str, settings: &Object) -> Optio
         "baseten/decisions" => baseten_decision(model_id, &mut s),
         "cloudflare-workers-ai/decisions" => cloudflare_workers_decision(model_id, &mut s),
         "cloudflare-ai-gateway/decisions" => cloudflare_gateway_decision(model_id, &mut s),
+        "openai-compatible/decisions" => openai_compatible_decision(model_id, &mut s),
         _ => return None,
     })
 }
@@ -429,6 +444,24 @@ fn digitalocean_decision(model_id: &str, s: &mut Settings) -> Result<DecisionMod
         // `config` always sets `http: {body}`.
         .with_http(http_body(body));
     Ok(route.model(model_id, None, Some(take_rest(s))))
+}
+
+/// `OpenAICompatible.decisionModel`: System One at the configured base URL. Compatible hosts follow llama.cpp's
+/// System One API, which takes inline media in root `images` (alias of `files`).
+fn openai_compatible_decision(model_id: &str, s: &mut Settings) -> Result<DecisionModel> {
+    let keyless = key_disabled(s);
+    let api_key = s.string("apiKey");
+    let base = s.string("baseURL");
+    let headers = s.headers();
+    let body = s.body();
+    let provider = s.string("provider").unwrap_or_else(|| "openai-compatible".into());
+    let route = system_one::route()
+        .with_provider(&provider, None)
+        .with_base_url(base)
+        .with_auth(if keyless { auth::none() } else { bearer(api_key, &[]) })
+        .with_headers(headers)
+        .with_http(http_body(body));
+    Ok(route.model(model_id, Some("root"), Some(take_rest(s))))
 }
 
 fn baseten_decision(model_id: &str, s: &mut Settings) -> Result<DecisionModel> {

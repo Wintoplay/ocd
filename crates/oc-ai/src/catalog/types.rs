@@ -205,6 +205,7 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/openai-compatible",
     "@opencode/ai/providers/openai-compatible/responses",
     "@opencode/ai/providers/openai-compatible/images",
+    "@opencode/ai/providers/openai-compatible/decisions",
     "@opencode/ai/providers/openai-compatible-responses",
     "@opencode/ai/providers/opencode/decisions",
     "@opencode/ai/providers/openrouter",

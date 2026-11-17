@@ -4,12 +4,16 @@
 //!
 //! Each plugin runs per location from the location's boot: it asks its server for the models it serves right away,
 //! then every 30 seconds, and again when the location's configuration changes the provider's `baseURL` or `apiKey`
-//! (`config.updated`). Without a configured `baseURL` it asks the default origin (LM Studio
-//! `http://127.0.0.1:1234`, Ollama `http://127.0.0.1:11434`, vLLM `http://127.0.0.1:8000`). Every request has a
-//! 1 second limit and carries `Authorization: Bearer <apiKey>` when one is configured.
+//! (`config.updated`), and when the integration's active credential switches (`credential.switched`). Without a
+//! configured `baseURL` it asks the default origin (LM Studio `http://127.0.0.1:1234`, Ollama
+//! `http://127.0.0.1:11434`, vLLM `http://127.0.0.1:8000`). Every request has a 15 second limit (remote and tunnelled
+//! hosts can take seconds to connect) and carries `Authorization: Bearer <key>`: the key of the integration's active
+//! connection (saved with `/connect`, or its env variable) when it has one, else the configured `apiKey`. A
+//! discovery made through the integration's connection keeps the integration.
 //!
-//! - LM Studio: `GET <root>/api/v1/models`, the `llm` models (`/v1` and `/api/v1` suffixes of the base URL are
-//!   stripped to find the root).
+//! - LM Studio: `GET <root>/api/v1/models`, the `llm` and `decision` models (`/v1` and `/api/v1` suffixes of the base
+//!   URL are stripped to find the root); a decision model's context may be `null`, and `has_vision_adapter` marks
+//!   image input when `capabilities` doesn't say.
 //! - Ollama: `GET <root>/api/tags`, then `POST <root>/api/show` for each model (4 at a time, cached by digest), the
 //!   ones with the `completion` capability (`/v1` and `/api` suffixes stripped).
 //! - vLLM: `GET <root>/health`, then `GET <root>/v1/models`, the models `owned_by` `vllm`.
@@ -17,7 +21,9 @@
 //! An answer that changed the inventory reloads the integrations and providers (`integration.updated` when the
 //! integration list changed, `provider.updated`, `model.updated`). A failed request keeps the last inventory; an
 //! empty answer restores the models.dev definition. Answers are cached per server root and API key for the
-//! refresh interval across locations (one request at a time per plugin).
+//! refresh interval across locations (one request at a time per server root, so an unresponsive host doesn't delay
+//! another). A failure at a configured `baseURL` is logged as a warning once per outage; a failure of a source that
+//! a reload replaced meanwhile is dropped.
 //!
 //! Upstream's plugins start inside the boot's `State.batch`, so an inventory a server answers at once is part of the
 //! boot's notifications: the server's boot waits up to 250 ms for the first round ([`LocalProviders::first_round`]),
@@ -50,7 +56,7 @@ pub const ORIGIN_OVERRIDE: &str = "OCD_TEST_LOCAL_PROVIDER_ORIGIN";
 pub const INTERVAL: Duration = Duration::from_secs(30);
 
 /// The limit of every discovery request.
-const TIMEOUT: Duration = Duration::from_secs(1);
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The default origins with [`ORIGIN_OVERRIDE`] applied (`None`: no default discovery).
 fn default_origins(value: Option<&str>) -> [Option<String>; 3] {
@@ -82,7 +88,6 @@ enum Schema {
     Str,
     Int,
     Bool,
-    Literals(&'static [&'static str]),
     NullOr(Box<Schema>),
     Array(Box<Schema>),
     /// `(key, schema, optional)`.
@@ -99,10 +104,6 @@ fn decode(schema: &Schema, value: &Value) -> Result<Value, String> {
         Schema::Int => match value.as_f64() {
             Some(n) if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 => Ok(value.clone()),
             _ => fail("an integer"),
-        },
-        Schema::Literals(options) => match value.as_str() {
-            Some(s) if options.contains(&s) => Ok(value.clone()),
-            _ => fail(&format!("{options:?}")),
         },
         Schema::NullOr(inner) => if value.is_null() { Ok(Value::Null) } else { decode(inner, value) },
         Schema::Array(inner) => match value.as_array() {
@@ -136,13 +137,15 @@ fn lmstudio_response() -> Schema {
     Struct(vec![(
         "models",
         Array(Box::new(Struct(vec![
-            ("type", Literals(&["llm", "embedding"]), false),
+            ("type", Str, false),
             ("key", Str, false),
             ("display_name", Str, false),
             ("architecture", NullOr(Box::new(Str)), true),
             ("loaded_instances", Array(Box::new(Struct(vec![("config", Struct(vec![("context_length", Int, false)]), false)]))), false),
-            ("max_context_length", Int, false),
+            // Null for decision models whose context is unknown.
+            ("max_context_length", NullOr(Box::new(Int)), false),
             ("capabilities", Struct(vec![("vision", Bool, false), ("trained_for_tool_use", Bool, false)]), true),
+            ("has_vision_adapter", Bool, true),
         ]))),
         false,
     )])
@@ -225,8 +228,9 @@ fn model(kind: Kind, item: &Value) -> LocalModel {
                 name: Some(if display.is_empty() { key } else { display }.to_string()),
                 family: item.get("architecture").and_then(Value::as_str).map(String::from),
                 tools: item.get("capabilities").and_then(|c| c["trained_for_tool_use"].as_bool()),
-                vision: item.get("capabilities").and_then(|c| c["vision"].as_bool()),
+                vision: item.get("capabilities").and_then(|c| c["vision"].as_bool()).or_else(|| item.get("has_vision_adapter").and_then(Value::as_bool)),
                 context,
+                decision: str_of(item, "type") == "decision",
             }
         }
         Kind::Ollama => {
@@ -246,6 +250,7 @@ fn model(kind: Kind, item: &Value) -> LocalModel {
                 tools: has(show.get("capabilities"), "tools"),
                 vision: has(show.get("capabilities"), "vision"),
                 context,
+                decision: false,
             }
         }
         Kind::Vllm => LocalModel { id: str_of(item, "id").to_string(), context: item["max_model_len"].as_f64(), ..Default::default() },
@@ -262,13 +267,15 @@ fn sort_by_key(items: &mut [Value], key: &str) {
 struct Client<'a> {
     http: &'a reqwest::Client,
     source: &'a Source,
+    /// The key sent (the active connection's, else the configured one).
+    api_key: Option<&'a str>,
 }
 
 impl Client<'_> {
     fn request(&self, method: reqwest::Method, path: &str) -> Result<reqwest::RequestBuilder, String> {
         let url = self.source.endpoint(path).ok_or_else(|| "no endpoint".to_string())?;
         let mut request = self.http.request(method, url).header("accept", "application/json");
-        if let Some(key) = self.source.api_key.as_deref().filter(|k| !k.is_empty()) {
+        if let Some(key) = self.api_key.filter(|k| !k.is_empty()) {
             request = request.header("authorization", format!("Bearer {key}"));
         }
         for (name, value) in oc_util::trace::headers() {
@@ -320,7 +327,8 @@ struct Shows {
 /// What one plugin shares across its locations (module state in upstream).
 #[derive(Default)]
 struct Shared {
-    lock: tokio::sync::Mutex<()>,
+    /// One lock per server root, so an unresponsive host does not delay discovery of another.
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     discovery: Mutex<HashMap<String, Cached>>,
     shows: Mutex<HashMap<String, Shows>>,
 }
@@ -330,8 +338,18 @@ struct Shared {
 /// One plugin at one location.
 struct Slot {
     source: RwLock<Arc<Source>>,
-    /// The last inventory: the decoded items (compared to detect a change) and their models.
-    loaded: RwLock<(Vec<Value>, Vec<LocalModel>)>,
+    /// The last inventory: the decoded items and whether they were discovered through the integration's connection
+    /// (compared to detect a change), and their models.
+    loaded: RwLock<Loaded>,
+    /// The current outage was reported.
+    failing: AtomicBool,
+}
+
+#[derive(Default, Clone)]
+struct Loaded {
+    items: Vec<Value>,
+    connected: bool,
+    models: Vec<LocalModel>,
 }
 
 struct Location {
@@ -370,6 +388,10 @@ pub struct LocalProviders {
     origins: RwLock<[Option<String>; 3]>,
     shared: [Shared; 3],
     locations: Mutex<HashMap<String, Arc<Location>>>,
+    /// Each location's integration registry, where the active connection is read.
+    integrations: Mutex<HashMap<String, Arc<oc_ai::credentials::Integrations>>>,
+    /// models.dev, for the env variables of an integration the location's registry doesn't hold yet.
+    models_dev: RwLock<Option<Arc<oc_ai::catalog::models_dev::ModelsDev>>>,
     subscribed: std::sync::Once,
     me: Weak<LocalProviders>,
 }
@@ -402,6 +424,8 @@ impl LocalProviders {
             origins: RwLock::new(default_origins(std::env::var(ORIGIN_OVERRIDE).ok().as_deref())),
             shared: Default::default(),
             locations: Mutex::new(HashMap::new()),
+            integrations: Mutex::new(HashMap::new()),
+            models_dev: RwLock::new(None),
             subscribed: std::sync::Once::new(),
             me: me.clone(),
         })
@@ -427,6 +451,63 @@ impl LocalProviders {
         self.origins.write()[index(kind)] = origin;
     }
 
+    /// The integration registry of location `key` (set by [`crate::models::Models`]).
+    pub fn register(&self, key: &str, integrations: Arc<oc_ai::credentials::Integrations>) {
+        self.integrations.lock().insert(key.to_string(), integrations);
+    }
+
+    pub fn unregister(&self, key: &str) {
+        self.integrations.lock().remove(key);
+    }
+
+    pub fn set_models_dev(&self, models_dev: Arc<oc_ai::catalog::models_dev::ModelsDev>) {
+        *self.models_dev.write() = Some(models_dev);
+    }
+
+    /// Test-only: whether the plugin of `kind` at location `key` reported its current outage.
+    pub fn failing(&self, key: &str, kind: Kind) -> bool {
+        self.location(key).is_some_and(|l| l.slots[index(kind)].failing.load(Ordering::SeqCst))
+    }
+
+    /// `activeCredential(ctx, providerID)`: whether the integration has an active connection, and its key when the
+    /// connection resolves to one. The integration exists unless the plugin removed it (models loaded without a
+    /// connection); the location's registry only learns that at its next catalog build, so its env variables are
+    /// read from models.dev while the registry doesn't hold it.
+    async fn active_credential(&self, key: &str, kind: Kind, slot: &Slot) -> (bool, Option<String>) {
+        use oc_ai::credentials::CredentialValue;
+        let id = kind.provider_id();
+        let integrations = self.integrations.lock().get(key).cloned();
+        if let Some(integrations) = &integrations
+            && let Some(connection) = integrations.active(id).await.ok().flatten()
+        {
+            let key = match integrations.resolve(&connection).await.ok().flatten() {
+                Some(CredentialValue::Key { key, .. }) => Some(key),
+                _ => None,
+            };
+            return (true, key);
+        }
+        let exists = {
+            let loaded = slot.loaded.read();
+            loaded.models.is_empty() || loaded.connected
+        };
+        let registered = integrations.as_ref().is_some_and(|i| i.refs().iter().any(|r| r.id == id));
+        if !exists || registered {
+            return (false, None);
+        }
+        let models_dev = self.models_dev.read().clone();
+        let Some(snapshots) = (match models_dev {
+            Some(m) => m.get().await.ok(),
+            None => None,
+        }) else {
+            return (false, None);
+        };
+        let names = snapshots.iter().find(|s| s.info.id == id).map(|s| s.environment.clone()).unwrap_or_default();
+        match names.iter().find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty())) {
+            Some(value) => (true, Some(value)),
+            None => (false, None),
+        }
+    }
+
     fn source(&self, kind: Kind, entries: &[Entry]) -> Source {
         let origin = self.origins.read()[index(kind)].clone();
         configured(kind, settings_of(entries, kind.provider_id()).as_ref(), origin.as_deref())
@@ -443,7 +524,11 @@ impl LocalProviders {
             *location.entries.write() = entries.to_vec();
             return;
         }
-        let slot = |kind: Kind| Slot { source: RwLock::new(Arc::new(self.source(kind, entries))), loaded: RwLock::new((vec![], vec![])) };
+        let slot = |kind: Kind| Slot {
+            source: RwLock::new(Arc::new(self.source(kind, entries))),
+            loaded: RwLock::new(Loaded::default()),
+            failing: AtomicBool::new(false),
+        };
         locations.insert(
             key.to_string(),
             Arc::new(Location {
@@ -542,12 +627,18 @@ impl LocalProviders {
             .into_iter()
             .zip(&location.slots)
             .filter_map(|(kind, slot)| {
-                let models = slot.loaded.read().1.clone();
-                if models.is_empty() {
+                let loaded = slot.loaded.read().clone();
+                if loaded.models.is_empty() {
                     return None;
                 }
                 let source = slot.source.read().clone();
-                Some(Discovered { kind, base_url: source.base_url.clone(), api_key: source.api_key.clone(), models })
+                Some(Discovered {
+                    kind,
+                    base_url: source.base_url.clone(),
+                    api_key: source.api_key.clone(),
+                    connected: loaded.connected,
+                    models: loaded.models,
+                })
             })
             .collect()
     }
@@ -572,63 +663,80 @@ impl LocalProviders {
         }
     }
 
-    /// `refresh()`: asks the server (or the cache) and reloads when the inventory changed.
+    /// The `attempt` of every round: `refresh()`, and a failure reported once per outage, only for a configured
+    /// endpoint and only while its source is current (a reload doesn't wait for the attempt in flight).
     async fn refresh(&self, location: &Location, kind: Kind) {
         if !self.enabled_at(&location.key, kind) {
             return;
         }
         let slot = &location.slots[index(kind)];
         let source = slot.source.read().clone();
-        let models = match self.discover(kind, &source).await {
-            Ok(Some(models)) => models,
-            Ok(None) => return,
+        let (connected, models) = match self.discover(&location.key, kind, slot, &source).await {
+            Ok(found) => {
+                slot.failing.store(false, Ordering::SeqCst);
+                match found {
+                    Some(found) => found,
+                    None => return,
+                }
+            }
             Err(cause) => {
-                tracing::debug!(provider = kind.provider_id(), %cause, "local model discovery failed");
+                if Arc::ptr_eq(&source, &slot.source.read()) && source.explicit && !slot.failing.swap(true, Ordering::SeqCst) {
+                    tracing::warn!(baseURL = %source.base_url, cause = %cause, "failed to discover {} models", kind.name());
+                }
                 return;
             }
         };
         let _applying = location.applying.lock().await;
-        if !Arc::ptr_eq(&source, &slot.source.read()) || slot.loaded.read().0 == models {
-            return;
+        {
+            let loaded = slot.loaded.read();
+            if !Arc::ptr_eq(&source, &slot.source.read()) || (loaded.items == models && loaded.connected == connected) {
+                return;
+            }
         }
         let booting = location.booting.load(Ordering::SeqCst);
         if !booting {
             self.before_reload(&location.key).await;
         }
         let mapped = models.iter().map(|item| model(kind, item)).collect();
-        *slot.loaded.write() = (models, mapped);
+        *slot.loaded.write() = Loaded { items: models, connected, models: mapped };
         if !booting {
             self.reload(&location.key).await;
         }
     }
 
     /// `discover()`: the cached answer for the source's root when it is recent and for the same key, else a new
-    /// request (one at a time per plugin). `Ok(None)`: nothing to discover, or no answer yet.
-    async fn discover(&self, kind: Kind, source: &Source) -> Result<Option<Vec<Value>>, String> {
+    /// request (one at a time per root). The key is the active connection's, else the configured one. `Ok(None)`:
+    /// nothing to discover, or no answer yet.
+    async fn discover(&self, key: &str, kind: Kind, slot: &Slot, source: &Source) -> Result<Option<(bool, Vec<Value>)>, String> {
         let Some(root) = source.root.clone() else { return Ok(None) };
         let shared = &self.shared[index(kind)];
-        let _permit = shared.lock.lock().await;
+        let lock = shared.locks.lock().entry(root.clone()).or_default().clone();
+        let _permit = lock.lock().await;
+        // A key saved with /connect or set in the integration's env variable wins over config, as it does for
+        // requests.
+        let (connected, active) = self.active_credential(key, kind, slot).await;
+        let api_key = active.or_else(|| source.api_key.clone());
         let interval = *self.interval.read();
         {
             let mut discovery = shared.discovery.lock();
             let cached = discovery.get(&root);
             if let Some(cached) = cached
-                && cached.api_key == source.api_key
+                && cached.api_key == api_key
                 && cached.checked.elapsed() < interval
             {
-                return Ok(cached.models.clone());
+                return Ok(cached.models.clone().map(|m| (connected, m)));
             }
-            let models = cached.filter(|c| c.api_key == source.api_key).and_then(|c| c.models.clone());
-            discovery.insert(root.clone(), Cached { checked: Instant::now(), api_key: source.api_key.clone(), models });
+            let models = cached.filter(|c| c.api_key == api_key).and_then(|c| c.models.clone());
+            discovery.insert(root.clone(), Cached { checked: Instant::now(), api_key: api_key.clone(), models });
         }
-        let client = Client { http: &self.http, source };
+        let client = Client { http: &self.http, source, api_key: api_key.as_deref() };
         let models = match kind {
             Kind::LmStudio => lmstudio(&client).await?,
             Kind::Ollama => self.ollama(&client, &root).await?,
             Kind::Vllm => vllm(&client).await?,
         };
-        shared.discovery.lock().insert(root, Cached { checked: Instant::now(), api_key: source.api_key.clone(), models: Some(models.clone()) });
-        Ok(Some(models))
+        shared.discovery.lock().insert(root, Cached { checked: Instant::now(), api_key: api_key.clone(), models: Some(models.clone()) });
+        Ok(Some((connected, models)))
     }
 
     /// Ollama: the tags, then each model's `/api/show` answer unless its digest is unchanged; models whose answer
@@ -637,8 +745,9 @@ impl LocalProviders {
         let shows = &self.shared[index(Kind::Ollama)].shows;
         let previous = {
             let mut shows = shows.lock();
-            let previous = shows.get(root).filter(|s| s.api_key == client.source.api_key).map(|s| s.entries.clone()).unwrap_or_default();
-            shows.insert(root.to_string(), Shows { api_key: client.source.api_key.clone(), entries: previous.clone() });
+            let api_key = client.api_key.map(String::from);
+            let previous = shows.get(root).filter(|s| s.api_key == api_key).map(|s| s.entries.clone()).unwrap_or_default();
+            shows.insert(root.to_string(), Shows { api_key, entries: previous.clone() });
             previous
         };
         let response = client.get_json("/api/tags", &ollama_tags()).await?;
@@ -671,8 +780,19 @@ impl LocalProviders {
                 models.push(item);
             }
         }
-        shows.lock().insert(root.to_string(), Shows { api_key: client.source.api_key.clone(), entries });
+        shows.lock().insert(root.to_string(), Shows { api_key: client.api_key.map(String::from), entries });
         Ok(models)
+    }
+
+    /// `ProviderRefresh.onSwitch`: the integration's active credential switched, so each started location's plugin
+    /// asks again in the background (a slow endpoint doesn't hold up the next event).
+    fn switched(&self, kind: Kind) {
+        let Some(me) = self.me.upgrade() else { return };
+        let targets: Vec<Arc<Location>> = self.locations.lock().values().filter(|l| l.started.load(Ordering::SeqCst)).cloned().collect();
+        for location in targets {
+            let me = me.clone();
+            tokio::spawn(async move { me.refresh(&location, kind).await });
+        }
     }
 
     /// `config.updated`: each plugin whose endpoint or key changed forgets its inventory, reloads, and asks again.
@@ -688,6 +808,12 @@ impl LocalProviders {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => return,
                     };
+                    if event.kind == "credential.switched" {
+                        let Some(me) = me.upgrade() else { return };
+                        let Some(kind) = event.data.get("integrationID").and_then(Value::as_str).and_then(Kind::from_provider_id) else { continue };
+                        me.switched(kind);
+                        continue;
+                    }
                     if event.kind != "config.updated" {
                         continue;
                     }
@@ -731,14 +857,15 @@ impl LocalProviders {
             }
             self.before_reload(&location.key).await;
             *slot.source.write() = Arc::new(next);
-            *slot.loaded.write() = (vec![], vec![]);
+            *slot.loaded.write() = Loaded::default();
+            slot.failing.store(false, Ordering::SeqCst);
             self.reload(&location.key).await;
         }
         self.refresh(location, kind).await;
     }
 }
 
-/// LM Studio: the `llm` models with a key, by key.
+/// LM Studio: the `llm` and `decision` models with a key, by key.
 async fn lmstudio(client: &Client<'_>) -> Result<Vec<Value>, String> {
     let response = client.get_json("/api/v1/models", &lmstudio_response()).await?;
     let mut models: Vec<Value> = response["models"]
@@ -746,7 +873,7 @@ async fn lmstudio(client: &Client<'_>) -> Result<Vec<Value>, String> {
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|m| str_of(m, "type") == "llm" && !str_of(m, "key").is_empty())
+        .filter(|m| matches!(str_of(m, "type"), "llm" | "decision") && !str_of(m, "key").is_empty())
         .collect();
     sort_by_key(&mut models, "key");
     Ok(models)
@@ -788,8 +915,13 @@ mod tests {
         let ok = json!({"models": [{"type": "llm", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 4096, "extra": 1}]});
         let decoded = decode(&lmstudio_response(), &ok).unwrap();
         assert_eq!(decoded, json!({"models": [{"type": "llm", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 4096}]}));
-        let bad = json!({"models": [{"type": "vision", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 1}]});
+        // Any type decodes (only `llm` and `decision` are kept); a decision model's context may be null.
+        let other = json!({"models": [{"type": "vision", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": null, "has_vision_adapter": true}]});
+        assert!(decode(&lmstudio_response(), &other).is_ok());
+        let bad = json!({"models": [{"type": 1, "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 1}]});
         assert!(decode(&lmstudio_response(), &bad).is_err());
+        let missing = json!({"models": [{"type": "llm", "key": "k", "display_name": "K", "loaded_instances": []}]});
+        assert!(decode(&lmstudio_response(), &missing).is_err());
         let fraction = json!({"models": [{"type": "llm", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 1.5}]});
         assert!(decode(&lmstudio_response(), &fraction).is_err());
         // Optional keys may be absent, not null; `NullOr` keys must be present.
@@ -804,13 +936,21 @@ mod tests {
         let lm = json!({"type": "llm", "key": "g", "display_name": "", "architecture": null, "loaded_instances": [{"config": {"context_length": 32768}}, {"config": {"context_length": 16384}}], "max_context_length": 262144, "capabilities": {"vision": true, "trained_for_tool_use": false}});
         assert_eq!(
             model(Kind::LmStudio, &lm),
-            LocalModel { id: "g".into(), name: Some("g".into()), family: None, tools: Some(false), vision: Some(true), context: Some(16384.0) }
+            LocalModel { id: "g".into(), name: Some("g".into()), family: None, tools: Some(false), vision: Some(true), context: Some(16384.0), decision: false }
         );
         let ollama = json!({"name": "gemma3:4b", "model": "gemma3:4b", "details": {"family": "gemma3"}, "show": {"capabilities": ["completion", "tools", "vision"], "model_info": {"general.architecture": "gemma3", "gemma3.context_length": 131072}}});
         assert_eq!(
             model(Kind::Ollama, &ollama),
-            LocalModel { id: "gemma3:4b".into(), name: Some("gemma3:4b".into()), family: Some("gemma3".into()), tools: Some(true), vision: Some(true), context: Some(131072.0) }
+            LocalModel { id: "gemma3:4b".into(), name: Some("gemma3:4b".into()), family: Some("gemma3".into()), tools: Some(true), vision: Some(true), context: Some(131072.0), decision: false }
         );
+        // provider-lmstudio.test.ts: a decision model with an unknown context and a vision adapter.
+        let decision = json!({"type": "decision", "key": "clef-flash", "display_name": "Clef Flash", "loaded_instances": [], "max_context_length": null, "has_vision_adapter": true});
+        assert_eq!(
+            model(Kind::LmStudio, &decision),
+            LocalModel { id: "clef-flash".into(), name: Some("Clef Flash".into()), vision: Some(true), decision: true, ..Default::default() }
+        );
+        let stated = json!({"type": "llm", "key": "k", "display_name": "K", "loaded_instances": [], "max_context_length": 8, "capabilities": {"vision": false, "trained_for_tool_use": true}, "has_vision_adapter": true});
+        assert_eq!(model(Kind::LmStudio, &stated).vision, Some(false));
         let vllm = json!({"id": "Qwen/Qwen3-Coder", "owned_by": "vllm", "max_model_len": null});
         assert_eq!(model(Kind::Vllm, &vllm), LocalModel { id: "Qwen/Qwen3-Coder".into(), ..Default::default() });
     }

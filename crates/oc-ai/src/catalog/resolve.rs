@@ -462,6 +462,7 @@ pub fn uses_api_key_auth(package: Option<&str>) -> bool {
             | "@opencode/ai/providers/deepseek"
             | "@opencode/ai/providers/fireworks"
             | "@opencode/ai/providers/openai-compatible"
+            | "@opencode/ai/providers/openai-compatible/decisions"
             | "@opencode/ai/providers/google"
             | "@opencode/ai/providers/google/interactions"
             | "@opencode/ai/providers/groq"
@@ -630,6 +631,15 @@ pub fn resolve_media(
         provider.and_then(|p| p.settings.as_ref()),
         model_settings(selected_variant.settings.as_ref()).as_ref(),
     );
+    // Same no-key rule as chat in `resolve_model`. A built image or decision model can't have its auth swapped like
+    // chat, so the package gets `apiKey: false` up front and builds the model without auth.
+    let keyless = provider.map(|p| p.activation == Activation::Enabled).unwrap_or(false)
+        && credential.is_none()
+        && !has_configured_auth(&runtime_info)
+        && uses_api_key_auth(runtime_info.package.as_deref());
+    if keyless {
+        runtime_info.settings.get_or_insert_with(Object::new).insert("apiKey".into(), Value::Bool(false));
+    }
     from_catalog_media(&runtime_info, kind, credential, options)
 }
 

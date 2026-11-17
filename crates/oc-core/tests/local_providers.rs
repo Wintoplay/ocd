@@ -30,6 +30,8 @@ type Handler = Arc<dyn Fn(&Seen) -> (u16, Option<Value>) + Send + Sync>;
 struct Server {
     origin: String,
     seen: Arc<Mutex<Vec<Seen>>>,
+    /// How long every answer waits.
+    delay: Arc<Mutex<Duration>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -38,8 +40,10 @@ impl Server {
         let handler: Handler = Arc::new(handler);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
+        let delay = Arc::new(Mutex::new(Duration::ZERO));
+        let waits = delay.clone();
         let app = axum::Router::new().fallback(move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
-            let (handler, recorded) = (handler.clone(), recorded.clone());
+            let (handler, recorded, waits) = (handler.clone(), recorded.clone(), waits.clone());
             async move {
                 let request = Seen {
                     method: method.to_string(),
@@ -48,6 +52,8 @@ impl Server {
                     body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                 };
                 recorded.lock().push(request.clone());
+                let wait = *waits.lock();
+                tokio::time::sleep(wait).await;
                 let (status, body) = handler(&request);
                 let status = StatusCode::from_u16(status).unwrap();
                 match body {
@@ -64,7 +70,11 @@ impl Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Server { origin, seen, task }
+        Server { origin, seen, delay, task }
+    }
+
+    fn set_delay(&self, delay: Duration) {
+        *self.delay.lock() = delay;
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -160,13 +170,13 @@ impl Ctx {
     }
 }
 
-/// Polls `f` until `pred` holds (5 s).
+/// Polls `f` until `pred` holds (15 s: the first catalog parses models.dev, slow in a loaded debug build).
 async fn eventually<T, F, Fut>(mut f: F, pred: impl Fn(&T) -> bool) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = T>,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let value = f().await;
         if pred(&value) || tokio::time::Instant::now() > deadline {
@@ -684,4 +694,173 @@ async fn reload_events_follow_inventory_changes() {
     }
     // One reload for the one change (no projector here: the integration notify is not gated).
     assert_eq!(kinds, ["integration.updated", "provider.updated", "model.updated"]);
+}
+
+// ------------------------------------------------------------------------------------------------ 2.3.0
+
+/// provider-lmstudio.test.ts (#56214, #63198, #63200): decision models are listed with an unknown (`null`) context
+/// and a vision adapter, as decision models on the OpenAI-compatible System One route, and answer without a key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lmstudio_discovers_decision_models_and_decides_through_system_one() {
+    let server = Server::start(|seen| match seen.path.as_str() {
+        "/api/v1/models" => (200, Some(json!({"models": [
+            lm("chat-model", "Chat", 8192),
+            {"type": "decision", "key": "clef-flash", "display_name": "Clef Flash", "loaded_instances": [], "max_context_length": null, "has_vision_adapter": true}
+        ]}))),
+        _ => (200, Some(json!({"model": "clef-flash", "answers": {"refund": {"type": "noul", "noul": 0.9}}, "usage": {"input_tokens": 3, "output_tokens": 1}}))),
+    })
+    .await;
+    let c = ctx(Kind::LmStudio, Some(&server.origin), HOUR);
+    c.boot("/loc", &[]);
+    eventually(|| c.model("/loc", &[], "lmstudio", "chat-model"), Option::is_some).await;
+    let catalog = c.catalog("/loc", &[]).await;
+    // Only chat models are offered as session models.
+    assert!(catalog.model("lmstudio", "clef-flash").is_none());
+    let decision = catalog
+        .available_models_of(&["decision".to_string()])
+        .into_iter()
+        .find(|m| m.provider_id == "lmstudio")
+        .cloned()
+        .expect("the decision model is available");
+    assert_eq!((decision.id.as_str(), decision.kind.as_deref(), decision.name.as_str()), ("clef-flash", Some("decision"), "Clef Flash"));
+    assert_eq!(decision.package.as_deref(), Some("@opencode/ai/providers/openai-compatible/decisions"));
+    assert_eq!(
+        (decision.capabilities.tools, decision.capabilities.input.clone(), decision.capabilities.output.clone()),
+        (false, vec!["text".to_string(), "image".into()], vec!["decision".to_string()])
+    );
+    assert_eq!(decision.limit.context, 200_000);
+
+    // The provider has no key and no credential: the decision model is built without auth.
+    let credential = c.models.credential(Some("/loc"), &catalog, "lmstudio").await;
+    assert!(credential.is_none());
+    let built = oc_ai::catalog::resolve::resolve_media(
+        catalog.provider("lmstudio"),
+        &decision,
+        oc_ai::catalog::resolve::MediaType::Decision,
+        None,
+        None,
+        &c.models.resolve_options(Some("/loc")),
+    )
+    .unwrap();
+    let oc_ai::catalog::resolve::MediaModel::Decision(model) = built else { panic!("a decision model") };
+    let questions = vec![json!({"name": "refund", "type": "predicate", "instructions": "Refund?"}).as_object().unwrap().clone()];
+    let request = oc_ai::decision::DecisionRequest {
+        model,
+        input: vec![oc_ai::decision::DecisionPart::Text("Please refund.".into()), oc_ai::decision::DecisionPart::Media { media: oc_ai::MediaAsset::base64("AQID", "image/png"), filename: None }],
+        questions,
+        provider_options: None,
+        http: None,
+    };
+    let response = oc_ai::decision::generate(&reqwest::Client::new(), request).await.unwrap();
+    assert_eq!(response.answers.len(), 1);
+    let sent = server.seen().into_iter().find(|s| s.path == "/v1/systemone").expect("a System One request");
+    assert_eq!(sent.authorization, None);
+    assert_eq!(sent.body["model"], "clef-flash");
+    // Compatible hosts take inline media in root `images`.
+    assert!(sent.body.get("images").is_some(), "{}", sent.body);
+    assert!(sent.body.get("assets").is_none());
+}
+
+/// provider-lmstudio.test.ts (#63266): a key saved with /connect is sent as soon as it is saved
+/// (`credential.switched`), and the integration stays so /connect can still manage it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lmstudio_discovers_with_a_key_saved_through_connect() {
+    let server = Server::start(|seen| {
+        if seen.authorization.as_deref() != Some("Bearer saved-key") {
+            return (401, Some(json!({"error": {"code": "invalid_api_key"}})));
+        }
+        (200, Some(json!({"models": [lm("secured-model", "Secured", 8192)]})))
+    })
+    .await;
+    let c = ctx(Kind::LmStudio, Some(&server.origin), HOUR);
+    // The location's registry knows the integration from its first catalog.
+    c.catalog("/loc", &[]).await;
+    c.boot("/loc", &[]);
+    eventually(|| async { server.seen().len() }, |n| *n > 0).await;
+    assert_eq!(server.seen()[0].authorization, None);
+
+    let integrations = c.models.integrations_for(Some("/loc"));
+    integrations
+        .store()
+        .create(oc_ai::credentials::CreateCredential::new("lmstudio", oc_ai::credentials::CredentialValue::key("saved-key")))
+        .await
+        .unwrap();
+    eventually(|| c.model("/loc", &[], "lmstudio", "secured-model"), Option::is_some).await;
+    assert_eq!(server.seen().last().unwrap().authorization.as_deref(), Some("Bearer saved-key"));
+    assert!(c.discovered("/loc", Kind::LmStudio).unwrap().connected);
+    let catalog = c.catalog("/loc", &[]).await;
+    assert!(integrations.get("lmstudio").await.unwrap().is_some(), "the integration stays");
+    assert_eq!(catalog.provider("lmstudio").unwrap().integration_id.as_deref(), Some("lmstudio"));
+    // The provider settings keep the configured key; requests use the credential through the integration.
+    assert_eq!(catalog.provider("lmstudio").unwrap().settings.clone().map(Value::Object).unwrap()["apiKey"], "");
+}
+
+/// provider-vllm.test.ts (#63700): a request that takes longer than a second still lists the models.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vllm_waits_for_a_slow_endpoint_instead_of_dropping_its_models() {
+    let server = Server::start(|seen| match seen.path.as_str() {
+        "/health" => (200, None),
+        _ => (200, Some(json!({"object": "list", "data": [remote("slow-model", json!(4096), "vllm")]}))),
+    })
+    .await;
+    server.set_delay(Duration::from_millis(1500));
+    let c = ctx(Kind::Vllm, Some(&server.origin), HOUR);
+    c.boot("/loc", &[]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while c.model("/loc", &[], "vllm", "slow-model").await.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "the slow endpoint's models never appeared");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// provider-vllm.test.ts (#63700): a configured endpoint's failure is reported once per outage; a default origin's
+/// is not; a replaced endpoint's failure is never reported against the new one, and a slow host doesn't delay
+/// discovery at another one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failures_are_reported_once_per_outage_for_configured_endpoints() {
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let state = down.clone();
+    let server = Server::start(move |seen| {
+        if state.load(std::sync::atomic::Ordering::SeqCst) {
+            return (503, None);
+        }
+        match seen.path.as_str() {
+            "/health" => (200, None),
+            _ => (200, Some(json!({"object": "list", "data": [remote("back", json!(4096), "vllm")]}))),
+        }
+    })
+    .await;
+    // The default origin is not expected to answer.
+    let c = ctx(Kind::Vllm, Some(&server.origin), FAST);
+    c.boot("/default", &[]);
+    eventually(|| async { server.count("/health") }, |n| *n >= 3).await;
+    assert!(!c.plugins.local.failing("/default", Kind::Vllm));
+
+    let entries = vec![config(json!({"vllm": {"settings": {"baseURL": format!("{}/v1", server.origin)}}}))];
+    c.boot("/configured", &entries);
+    eventually(|| async { c.plugins.local.failing("/configured", Kind::Vllm) }, |f| *f).await;
+    // The endpoint comes back: the outage is over.
+    down.store(false, std::sync::atomic::Ordering::SeqCst);
+    eventually(|| c.model("/configured", &entries, "vllm", "back"), Option::is_some).await;
+    assert!(!c.plugins.local.failing("/configured", Kind::Vllm));
+
+    // A request to a slow endpoint is replaced by a healthy one before it fails.
+    let slow = Server::start(|_| (503, None)).await;
+    slow.set_delay(Duration::from_secs(2));
+    let healthy = Server::start(|seen| match seen.path.as_str() {
+        "/health" => (200, None),
+        _ => (200, Some(json!({"object": "list", "data": [remote("healthy-model", json!(4096), "vllm")]}))),
+    })
+    .await;
+    let c = ctx(Kind::Vllm, None, HOUR);
+    let entries = vec![config(json!({"vllm": {"settings": {"baseURL": format!("{}/v1", slow.origin)}}}))];
+    c.boot("/loc", &entries);
+    eventually(|| async { slow.count("/health") }, |n| *n >= 1).await;
+    let entries = vec![config(json!({"vllm": {"settings": {"baseURL": format!("{}/v1", healthy.origin)}}}))];
+    c.reconfigure("/loc", &entries);
+    eventually(|| c.model("/loc", &entries, "vllm", "healthy-model"), Option::is_some).await;
+    // The replaced endpoint's request fails afterwards: nothing is reported against the new one.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!c.plugins.local.failing("/loc", Kind::Vllm));
+    assert!(c.model("/loc", &entries, "vllm", "healthy-model").await.is_some());
 }

@@ -37,6 +37,9 @@ impl Settings {
     pub fn new(settings: &Object) -> Self {
         Self { rest: settings.clone() }
     }
+    pub fn peek(&self, key: &str) -> Option<&Value> {
+        self.rest.get(key)
+    }
     pub fn take(&mut self, key: &str) -> Option<Value> {
         self.rest.shift_remove(key).filter(|v| !v.is_null())
     }

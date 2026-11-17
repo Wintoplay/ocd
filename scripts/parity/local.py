@@ -43,6 +43,8 @@ class LocalServer:
         self.kind = kind
         self.models = models
         self.down = False
+        # Only this bearer key is accepted (401 otherwise), when set.
+        self.key = None
         self.requests = []
         self.lock = threading.Lock()
         outer = self
@@ -70,6 +72,8 @@ class LocalServer:
                     outer.requests.append({"method": method, "path": self.path,
                                            "authorization": self.headers.get("authorization"),
                                            "accept": self.headers.get("accept"), "body": body})
+                if outer.key is not None and self.headers.get("authorization") != f"Bearer {outer.key}":
+                    return self._answer(401, {"error": {"code": "invalid_api_key"}})
                 status, out, ctype = outer.route(method, self.path, body)
                 self._answer(status, out, ctype)
 
@@ -98,6 +102,9 @@ class LocalServer:
         path = path.split("?")[0]
         if path.endswith("/chat/completions"):
             return 200, chat_stream(body), "text/event-stream"
+        if path.endswith("/systemone"):
+            return 200, {"model": (body or {}).get("model"), "answers": {"refund": {"type": "noul", "noul": 0.9}},
+                         "usage": {"input_tokens": 12, "output_tokens": 1}}, "application/json"
         if self.kind == "lmstudio" and path.endswith("/api/v1/models"):
             return 200, {"models": self.models}, "application/json"
         if self.kind == "ollama" and path.endswith("/api/tags"):
@@ -120,13 +127,15 @@ class LocalServer:
             reqs = list(self.requests)
         out = []
         for r in reqs:
-            is_chat = r["path"].endswith("/chat/completions")
+            is_chat = r["path"].endswith("/chat/completions") or r["path"].endswith("/systemone")
             if is_chat != chat:
                 continue
             item = {"method": r["method"], "path": r["path"], "authorization": r["authorization"], "accept": r["accept"]}
             if r["method"] == "POST" and not is_chat:
                 item["body"] = r["body"]
-            if is_chat and isinstance(r["body"], dict):
+            if is_chat and isinstance(r["body"], dict) and r["path"].endswith("/systemone"):
+                item["body"] = r["body"]
+            elif is_chat and isinstance(r["body"], dict):
                 item["model"] = r["body"].get("model")
                 item["stream"] = r["body"].get("stream")
             key = json.dumps(item, sort_keys=True)
@@ -402,4 +411,79 @@ def local_config_reload(ctx):
         updates(ctx, mark, "reload.updates")
     finally:
         other.close()
+        close(servers)
+
+
+# ---- 2.3.0 ----------------------------------------------------------------------------------------------------
+DECISION = {"type": "decision", "key": "clef-flash", "display_name": "Clef Flash", "loaded_instances": [],
+            "max_context_length": None, "has_vision_adapter": True}
+
+
+@scenario("local", hold_for_title=0, timeout=240)
+def local_decision(ctx):
+    """LM Studio decision models (#56214, #63198, #63200): a decision model with an unknown context and a vision
+    adapter is listed as a decision model and answers through the host's System One endpoint without a key."""
+    servers = start_servers({"lmstudio": LMSTUDIO + [DECISION]})
+    try:
+        # The generate routes run at the global location: OPENCODE_CONFIG configures the endpoints there too, over
+        # the harness's dead-port global config.
+        os.makedirs(ctx.state, exist_ok=True)
+        path = os.path.join(ctx.state, "local-providers.json")
+        with open(path, "w") as f:
+            json.dump({"providers": providers_config(servers)}, f)
+        ctx.env_extra["OPENCODE_CONFIG"] = path
+        boot(ctx, servers)
+        ctx.rec("discovered", ids(wait_models(ctx, lambda m: ids(m) == EXPECTED)))
+        time.sleep(0.5)
+        record_lists(ctx, "lists")
+        _, _, data = ctx.server.request("GET", "/api/model?type=decision", headers={"x-opencode-directory": ctx.project})
+        items = data.get("data", data) if isinstance(data, dict) else data
+        ctx.rec("decision.models", sorted([m for m in items if m.get("providerID") in PROVIDERS],
+                                          key=lambda m: m["id"]) if isinstance(items, list) else items)
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        ctx.call("decide", "POST", "/api/experimental/generate/decisions", {
+            "model": {"providerID": "lmstudio", "id": "clef-flash"},
+            "input": [{"type": "text", "text": "Please refund the duplicate charge."},
+                      {"type": "file", "data": png, "mime": "image/png", "name": "receipt.png"}],
+            "questions": [{"name": "refund", "type": "predicate", "instructions": "Refund asked?"}]})
+        ctx.rec("decide.requests", servers["lmstudio"].seen(chat=True))
+    finally:
+        close(servers)
+
+
+@scenario("local", hold_for_title=0, timeout=240)
+def local_saved_key(ctx):
+    """a key saved with /connect is sent on discovery as soon as it is saved (#63266): the server refuses requests
+    without it, the models appear after the save, and the integration stays."""
+    servers = start_servers()
+    servers["lmstudio"].key = "saved-key"
+    try:
+        boot(ctx, servers)
+        wait_models(ctx, lambda m: [i for i in ids(m) if not i.startswith("lmstudio/")] == EXPECTED[3:])
+        time.sleep(0.5)
+        ctx.rec("before", ids(local_models(ctx)))
+        ctx.call("credential.create", "POST", "/api/credential",
+                 {"integrationID": "lmstudio", "label": "LM Studio", "value": {"type": "key", "key": "saved-key"}})
+        ctx.rec("discovered", ids(wait_models(ctx, lambda m: ids(m) == EXPECTED)))
+        time.sleep(1)
+        record_lists(ctx, "lists")
+        record_requests(ctx, servers, "requests")
+    finally:
+        close(servers)
+
+
+@scenario("local", hold_for_title=0, timeout=240)
+def local_env_key(ctx):
+    """the integration's env variable (LMSTUDIO_API_KEY) is sent on discovery, also after the models loaded, and the
+    integration stays (#63266)."""
+    servers = start_servers()
+    servers["lmstudio"].key = "env-key"
+    ctx.env_extra["LMSTUDIO_API_KEY"] = "env-key"
+    try:
+        boot(ctx, servers)
+        ctx.rec("discovered", ids(wait_models(ctx, lambda m: ids(m) == EXPECTED)))
+        time.sleep(1)
+        record_lists(ctx, "lists")
+        record_requests(ctx, servers, "requests")
+    finally:
         close(servers)

@@ -5,8 +5,11 @@
 //!
 //! Once a server answered with at least one model, its provider becomes `enabled`, uses the OpenAI-compatible
 //! package with `{baseURL, provider, apiKey}` (the configured or default endpoint, `apiKey` `""` when none is
-//! configured), loses its integration (the plugin's integration transform removes it, so no credential is needed)
-//! and lists exactly the discovered models; until then, and after an empty answer, the models.dev definition stays.
+//! configured), loses its integration unless the discovery was made with a key from the integration's active
+//! connection (a key saved with `/connect` or the integration's env variable, which then stays with it), and lists
+//! exactly the discovered models; until then, and after an empty answer, the models.dev definition stays. Decision
+//! models (LM Studio `type: "decision"`) answer through the OpenAI-compatible System One route
+//! (`@opencode/ai/providers/openai-compatible/decisions`).
 
 use super::registry::{CatalogPlugin, ProviderEditor};
 use super::types::{merge_overlay, Activation, Capabilities};
@@ -15,6 +18,9 @@ use serde_json::Value;
 
 /// The package every discovered provider uses.
 pub const PACKAGE: &str = "@opencode/ai/providers/openai-compatible";
+
+/// The package of discovered decision models.
+pub const DECISION_PACKAGE: &str = "@opencode/ai/providers/openai-compatible/decisions";
 
 /// One of the three local discovery plugins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +92,9 @@ pub struct Source {
     pub base_url: String,
     /// The configured `apiKey` when it is a string.
     pub api_key: Option<String>,
+    /// `baseURL` is configured (a string): only such an endpoint is expected to answer, so only its failures are
+    /// reported.
+    pub explicit: bool,
     /// The server root (`endpoint("")`), when `base_url` is an http(s) URL: the discovery cache key.
     pub root: Option<String>,
     /// The parsed base URL and the path prefix the endpoints go under.
@@ -121,7 +130,8 @@ pub fn configured(kind: Kind, settings: Option<&Object>, origin: Option<&str>) -
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     };
-    let mut source = Source { base_url, api_key, root: None, endpoint: None };
+    let explicit = matches!(settings.and_then(|s| s.get("baseURL")), Some(Value::String(_)));
+    let mut source = Source { base_url, api_key, explicit, root: None, endpoint: None };
     let Ok(url) = url::Url::parse(&source.base_url) else { return source };
     if url.scheme() != "http" && url.scheme() != "https" {
         return source;
@@ -142,6 +152,8 @@ pub struct LocalModel {
     pub tools: Option<bool>,
     pub vision: Option<bool>,
     pub context: Option<f64>,
+    /// A decision model: it answers typed questions through the host's System One endpoint (`/v1/systemone`).
+    pub decision: bool,
 }
 
 /// A location's discovered provider: the source it was discovered at and its models (never empty).
@@ -150,6 +162,8 @@ pub struct Discovered {
     pub kind: Kind,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// The discovery used the integration's active connection, so the integration stays.
+    pub connected: bool,
     pub models: Vec<LocalModel>,
 }
 
@@ -177,7 +191,9 @@ pub fn apply(editor: &mut ProviderEditor, discovered: &Discovered) {
         settings.insert("provider".into(), Value::String(id.to_string()));
         settings.insert("apiKey".into(), Value::String(discovered.api_key.clone().unwrap_or_default()));
         provider.settings = Some(settings);
-        provider.integration_id = None;
+        if !discovered.connected {
+            provider.integration_id = None;
+        }
     });
     for spec in &discovered.models {
         editor.update_model(id, &spec.id, |model| {
@@ -191,6 +207,11 @@ pub fn apply(editor: &mut ProviderEditor, discovered: &Discovered) {
             model.capabilities = Capabilities { tools: spec.tools.unwrap_or(false), freeform: None, input, output: vec!["text".into()], temperature: None };
             if let Some(context) = spec.context.filter(|c| *c > 0.0) {
                 model.limit.context = context as i64;
+            }
+            if spec.decision {
+                model.kind = Some("decision".into());
+                model.package = Some(DECISION_PACKAGE.into());
+                model.capabilities.output = vec!["decision".into()];
             }
         });
     }
@@ -280,6 +301,7 @@ mod tests {
             kind: Kind::LmStudio,
             base_url: "http://127.0.0.1:5/v1".into(),
             api_key: None,
+            connected: false,
             models: vec![
                 LocalModel {
                     id: "google/gemma".into(),
@@ -288,6 +310,7 @@ mod tests {
                     tools: Some(true),
                     vision: Some(true),
                     context: Some(16_384.0),
+                    decision: false,
                 },
                 LocalModel { id: "unknown-context".into(), family: Some(String::new()), context: Some(0.0), ..Default::default() },
             ],
@@ -316,5 +339,41 @@ mod tests {
         let mut editor = ProviderEditor::new();
         apply(&mut editor, &Discovered { models: vec![], ..discovered });
         assert!(editor.get("lmstudio").is_none());
+    }
+
+    /// provider-lmstudio.test.ts: a decision model with an unknown context and a vision adapter; a discovery made
+    /// with the integration's key keeps the integration.
+    #[test]
+    fn decision_models_and_connected_discovery() {
+        let mut editor = ProviderEditor::new();
+        let mut info = ProviderInfo::empty("lmstudio");
+        info.integration_id = Some("lmstudio".into());
+        editor.add(info, vec![], None);
+        let discovered = Discovered {
+            kind: Kind::LmStudio,
+            base_url: "http://127.0.0.1:5/v1".into(),
+            api_key: None,
+            connected: true,
+            models: vec![LocalModel { id: "clef-flash".into(), name: Some("Clef Flash".into()), vision: Some(true), decision: true, ..Default::default() }],
+        };
+        apply(&mut editor, &discovered);
+        let record = editor.get("lmstudio").unwrap();
+        assert_eq!(record.provider.integration_id.as_deref(), Some("lmstudio"));
+        let model = &record.models["clef-flash"];
+        assert_eq!(model.kind.as_deref(), Some("decision"));
+        assert_eq!(model.package.as_deref(), Some(DECISION_PACKAGE));
+        assert_eq!(model.capabilities, Capabilities { tools: false, freeform: None, input: vec!["text".into(), "image".into()], output: vec!["decision".into()], temperature: None });
+        assert_eq!(model.limit.context, 200_000);
+    }
+
+    #[test]
+    fn explicit_endpoints() {
+        assert!(!configured(Kind::Vllm, None, Some("http://127.0.0.1:8000")).explicit);
+        let settings = obj(json!({"baseURL": "http://h:9/v1"}));
+        assert!(configured(Kind::Vllm, Some(&settings), None).explicit);
+        let settings = obj(json!({"baseURL": "not a url"}));
+        assert!(configured(Kind::Vllm, Some(&settings), None).explicit);
+        let settings = obj(json!({"apiKey": "k"}));
+        assert!(!configured(Kind::Vllm, Some(&settings), Some("http://127.0.0.1:8000")).explicit);
     }
 }
