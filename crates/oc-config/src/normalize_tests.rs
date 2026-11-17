@@ -1114,27 +1114,66 @@ fn accepts_the_2_1_provider_and_model_fields() {
     }
 }
 
-/// 2.2.7 `experimental` keys (`normalization.test.ts`): every registered flag as a boolean, `all_flags`,
-/// `part_rows`, the `codemodeVm` alias, in the schema's key order.
+/// 2.3.0 provider and model fields: `settings.tls` (`Provider.Tls`, extra keys dropped, a wrong shape invalidates the
+/// provider) after `encoding`, and `capabilities.freeform` after `tools` (`provider.test.ts`).
 #[test]
-fn v2_2_7_experimental_keys() {
+fn v2_3_0_provider_tls_and_freeform() {
+    let (encoded, d) = normalized(json!({ "providers": { "custom": {
+        "settings": { "baseURL": "https://x", "tls": { "key": "K", "passphrase": "p", "cert": "C", "extra": 1 }, "encoding": "gzip" },
+        "models": { "m": {
+            "capabilities": { "freeform": ["lark", "text"], "tools": true, "temperature": false },
+            "settings": { "tls": { "cert": "a", "key": "b" } },
+        } },
+    } } }));
+    assert!(d.is_empty(), "{d:?}");
+    let custom = &encoded["providers"]["custom"];
+    assert_eq!(
+        serde_json::to_string(&custom["settings"]).unwrap(),
+        r#"{"encoding":"gzip","tls":{"cert":"C","key":"K","passphrase":"p"},"baseURL":"https://x"}"#
+    );
+    let m = &custom["models"]["m"];
+    assert_eq!(serde_json::to_string(&m["capabilities"]).unwrap(), r#"{"tools":true,"freeform":["lark","text"],"temperature":false}"#);
+    // `Model.Settings` has no `tls`: on a model it is just another provider option.
+    assert_eq!(m["settings"], json!({ "tls": { "cert": "a", "key": "b" } }));
+    // `[]` turns freeform off for a proxy that rejects it.
+    let (encoded, d) = normalized(json!({ "providers": { "p": { "models": { "m": { "capabilities": { "freeform": [] } } } } } }));
+    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(encoded["providers"]["p"]["models"]["m"]["capabilities"], json!({ "freeform": [] }));
+    for invalid in [
+        json!({ "providers": { "bad": { "settings": { "tls": { "cert": 1, "key": "k" } } } } }),
+        json!({ "providers": { "bad": { "settings": { "tls": { "cert": "c" } } } } }),
+        json!({ "providers": { "bad": { "settings": { "tls": "pem" } } } }),
+        json!({ "providers": { "bad": { "settings": { "tls": { "cert": "c", "key": "k", "passphrase": 1 } } } } }),
+        json!({ "providers": { "bad": { "models": { "m": { "capabilities": { "freeform": ["json"] } } } } } }),
+        json!({ "providers": { "bad": { "models": { "m": { "capabilities": { "freeform": "text" } } } } } }),
+    ] {
+        let (encoded, d) = normalized(invalid.clone());
+        assert!(encoded["providers"].get("bad").is_none(), "{invalid}");
+        assert_eq!(paths(&d, DiagnosticKind::Invalid), pv(&[&["providers", "bad"]]), "{invalid}");
+    }
+}
+
+/// 2.3.0 `experimental` keys (`normalization.test.ts`): every registered flag as a boolean, `all_flags`,
+/// `part_rows`, the deprecated `codemode_vm` (the retired `codemodeVm` alias is ignored), in the schema's key order.
+#[test]
+fn v2_3_0_experimental_keys() {
     let (encoded, d) = normalized(json!({ "experimental": {
         "subagent_depth": 0, "image_generate": { "model": "openai/gpt-image-2" }, "part_rows": true, "codemodeVm": true,
-        "console_watches": false, "artifacts": true, "media_blob": true, "all_flags": true, "portable_shell_scanner": true,
+        "mcp_events": true, "console_watches": false, "shell_timeout_background": true, "artifacts": true, "media_blob": true,
+        "all_flags": true, "codemode_vm": false, "portable_shell_scanner": true,
     } }));
     assert!(d.is_empty(), "{d:?}");
-    assert_eq!(
-        serde_json::to_string(&encoded["experimental"]).unwrap(),
-        r#"{"portable_shell_scanner":true,"all_flags":true,"media_blob":true,"artifacts":true,"console_watches":false,"part_rows":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-2"}},"subagent_depth":0,"codemode_vm":true}"#
-    );
+    let expected = r#"{"portable_shell_scanner":true,"codemode_vm":false,"all_flags":true,"media_blob":true,"artifacts":true,"shell_timeout_background":true,"console_watches":false,"mcp_events":true,"part_rows":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-2"}},"subagent_depth":0}"#;
+    assert_eq!(serde_json::to_string(&encoded["experimental"]).unwrap(), expected);
     let info = Info::decode(&encoded).unwrap();
-    assert_eq!(
-        serde_json::to_string(&info.experimental).unwrap(),
-        r#"{"portable_shell_scanner":true,"all_flags":true,"media_blob":true,"artifacts":true,"codemode_vm":true,"console_watches":false,"part_rows":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-2"}},"subagent_depth":0}"#
-    );
-    // `codemode_vm` wins over the alias.
-    let (encoded, _) = normalized(json!({ "experimental": { "codemodeVm": true, "codemode_vm": false } }));
-    assert_eq!(encoded["experimental"], json!({ "codemode_vm": false }));
+    assert_eq!(serde_json::to_string(&info.experimental).unwrap(), expected);
+    // "accepts deprecated codemode_vm and ignores retired codemodeVm without diagnostics".
+    let (encoded, d) = normalized(json!({ "experimental": { "codemode_vm": true, "codemodeVm": false } }));
+    assert_eq!(encoded["experimental"], json!({ "codemode_vm": true }));
+    assert!(d.is_empty(), "{d:?}");
+    let (encoded, d) = normalized(json!({ "experimental": { "codemodeVm": true } }));
+    assert!(encoded.get("experimental").is_none());
+    assert!(d.is_empty(), "{d:?}");
 
     let (encoded, d) = normalized(json!({ "experimental": { "todo": true, "media_blob": false, "schedules": "yes" } }));
     assert_eq!(encoded["experimental"], json!({ "todo": true, "media_blob": false }));

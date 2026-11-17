@@ -82,6 +82,10 @@ literal_enum!(
     Encoding { Zstd = "zstd", Gzip = "gzip", None = "none" }
 );
 literal_enum!(
+    /// `Tool.FreeformFormat`: a freeform tool input format (`text`, `regex` or `lark`).
+    FreeformFormat { Text = "text", Regex = "regex", Lark = "lark" }
+);
+literal_enum!(
     /// `Model.CacheFormat`: prompt-cache marker syntax the endpoint accepts.
     CacheFormat { Anthropic = "anthropic", Alibaba = "alibaba" }
 );
@@ -1139,8 +1143,32 @@ pub struct Settings {
     pub transport: Option<Transport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<Encoding>,
+    /// Client certificate for gateways that require mutual TLS (`Provider.Tls`). Accepted and echoed; never a
+    /// provider option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<Tls>,
     #[serde(flatten)]
     pub rest: JsonRecord,
+}
+
+/// `Provider.Tls`: client certificate for gateways that require mutual TLS. Values are PEM text; use `{file:...}`
+/// to read a file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+pub struct Tls {
+    /// PEM client certificate, usually `{file:/path/to/client.pem}`.
+    pub cert: String,
+    /// PEM private key, usually `{file:/path/to/client.key}`.
+    pub key: String,
+    /// Passphrase for an encrypted private key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+impl Decode for Tls {
+    fn decode(value: &Value) -> Option<Self> {
+        let o = record(value)?;
+        Some(Tls { cert: req(o, "cert")?, key: req(o, "key")?, passphrase: opt(o, "passphrase")? })
+    }
 }
 
 /// `Provider.Cache`: `ttl` is sent to the provider as given; each provider accepts its own set.
@@ -1193,7 +1221,7 @@ impl Decode for Cache {
     }
 }
 
-const SETTINGS_FIELDS: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding"];
+const SETTINGS_FIELDS: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding", "tls"];
 
 fn rest_of(o: &crate::decode::Object, known: &[&str]) -> JsonRecord {
     o.iter().filter(|(k, _)| !known.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -1210,6 +1238,7 @@ impl Decode for Settings {
             cache: opt(o, "cache")?,
             transport: opt(o, "transport")?,
             encoding: opt(o, "encoding")?,
+            tls: opt(o, "tls")?,
             rest: rest_of(o, SETTINGS_FIELDS),
         })
     }
@@ -1350,6 +1379,9 @@ impl Compatibility {
 pub struct Capabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    /// Freeform tool input formats; unset falls back to the base model's, `[]` turns freeform off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Vec<FreeformFormat>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1366,6 +1398,7 @@ impl Decode for Capabilities {
         let o = record(value)?;
         Some(Capabilities {
             tools: opt(o, "tools")?,
+            freeform: opt(o, "freeform")?,
             input: opt(o, "input")?,
             output: opt(o, "output")?,
             temperature: opt(o, "temperature")?,
@@ -1698,6 +1731,9 @@ pub struct Experimental {
     /// Deprecated: the built-in shell permission scanner is now always enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub portable_shell_scanner: Option<bool>,
+    /// Deprecated: ignored because Code Mode always runs on the VM.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codemode_vm: Option<bool>,
     /// Turn every feature flag on regardless of the build channel, like `OPENCODE_FLAGS=all` (see [`crate::flag`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_flags: Option<bool>,
@@ -1716,12 +1752,15 @@ pub struct Experimental {
     /// Flag: experimental artifacts backed by pluggable providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<bool>,
-    /// Flag: Code Mode on the bytecode VM (accepted; ocd runs its interpreter either way).
+    /// Flag: move foreground shell commands to the background when their timeout expires (accepted; not ported).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub codemode_vm: Option<bool>,
+    pub shell_timeout_background: Option<bool>,
     /// Flag: OpenCode Console watches (accepted; not ported).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub console_watches: Option<bool>,
+    /// Flag: experimental MCP Events, a draft MCP extension (accepted; not ported).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_events: Option<bool>,
     /// Each assistant part as its own `session_part` row (accepted; not ported, ocd writes whole messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part_rows: Option<bool>,
@@ -1750,8 +1789,9 @@ impl Experimental {
             "media_blob" => self.media_blob,
             "schedules" => self.schedules,
             "artifacts" => self.artifacts,
-            "codemode_vm" => self.codemode_vm,
+            "shell_timeout_background" => self.shell_timeout_background,
             "console_watches" => self.console_watches,
+            "mcp_events" => self.mcp_events,
             _ => None,
         }
     }
@@ -1762,14 +1802,16 @@ impl Decode for Experimental {
         let o = record(value)?;
         Some(Experimental {
             portable_shell_scanner: opt(o, "portable_shell_scanner")?,
+            codemode_vm: opt(o, "codemode_vm")?,
             all_flags: opt(o, "all_flags")?,
             todo: opt(o, "todo")?,
             background_compaction: opt(o, "background_compaction")?,
             media_blob: opt(o, "media_blob")?,
             schedules: opt(o, "schedules")?,
             artifacts: opt(o, "artifacts")?,
-            codemode_vm: opt(o, "codemode_vm")?,
+            shell_timeout_background: opt(o, "shell_timeout_background")?,
             console_watches: opt(o, "console_watches")?,
+            mcp_events: opt(o, "mcp_events")?,
             part_rows: opt(o, "part_rows")?,
             image_generate: opt(o, "image_generate")?,
             subagent_depth: opt_with(o, "subagent_depth", non_negative_int)?,

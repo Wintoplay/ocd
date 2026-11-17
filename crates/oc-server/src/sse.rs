@@ -60,6 +60,7 @@ pub const PUBLIC_EVENT_TYPES: &[&str] = &[
     "session.shell.started",
     "session.shell.ended",
     "session.step.started",
+    "session.step.first-token",
     "session.step.streamed",
     "session.step.ended",
     "session.step.failed",
@@ -121,6 +122,7 @@ pub const PUBLIC_EVENT_TYPES: &[&str] = &[
     "vcs.branch.updated",
     "mcp.status.changed",
     "mcp.resources.changed",
+    "experimental.mcp.event",
 ];
 
 /// `isOpenCodeEvent`.
@@ -282,6 +284,31 @@ mod tests {
         assert!(!is_public_event("mcp.tools.changed"));
         assert!(!is_public_event("session.compacted"));
         assert!(!is_public_event("session.usage.recorded"));
+        // 2.3.0: the first-token step event and the MCP Events event are public; the subscription change is not.
+        assert!(is_public_event("session.step.first-token"));
+        assert!(is_public_event("experimental.mcp.event"));
+        assert!(!is_public_event("experimental.mcp.subscription.changed"));
+    }
+
+    /// The hand-kept list is the `types` enum of `GET /api/event` in the API document, in its order.
+    #[test]
+    fn public_types_match_the_api_document() {
+        let spec: Value = serde_json::from_str(crate::OPENAPI_JSON).unwrap();
+        let params = spec["paths"]["/api/event"]["get"]["parameters"].as_array().unwrap();
+        let types = params.iter().find(|p| p["name"] == "types").unwrap();
+        fn find_enum(v: &Value) -> Option<Vec<String>> {
+            match v {
+                Value::Object(m) => match m.get("enum") {
+                    Some(Value::Array(items)) if items.len() > 1 => {
+                        Some(items.iter().filter_map(Value::as_str).map(String::from).collect())
+                    }
+                    _ => m.values().find_map(find_enum),
+                },
+                Value::Array(items) => items.iter().find_map(find_enum),
+                _ => None,
+            }
+        }
+        assert_eq!(find_enum(&types["schema"]).unwrap(), PUBLIC_EVENT_TYPES);
     }
 
     #[test]

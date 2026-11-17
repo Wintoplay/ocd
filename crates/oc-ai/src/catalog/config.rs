@@ -677,7 +677,7 @@ fn put(out: &mut Object, key: &str, value: Option<Value>) {
     }
 }
 
-const SETTINGS_KNOWN: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "compaction", "transport", "encoding"];
+const SETTINGS_KNOWN: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "compaction", "transport", "encoding", "tls"];
 const MODEL_SETTINGS_KNOWN: &[&str] = &["compaction", "encoding"];
 
 /// Model options read before the request is built; v1's `@ai-sdk/openai-compatible` sent every other

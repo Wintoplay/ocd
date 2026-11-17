@@ -140,6 +140,7 @@ crate::lit_str!(LitCommandUpdated, "command.updated");
 crate::lit_str!(LitConfigUpdated, "config.updated");
 crate::lit_str!(LitCredentialSwitched, "credential.switched");
 crate::lit_str!(LitCredentialUpdated, "credential.updated");
+crate::lit_str!(LitExperimentalMcpEvent, "experimental.mcp.event");
 crate::lit_str!(LitFilesystemChanged, "filesystem.changed");
 crate::lit_str!(LitFormCancelled, "form.cancelled");
 crate::lit_str!(LitFormCreated, "form.created");
@@ -204,6 +205,7 @@ crate::lit_str!(LitSessionSkillActivated, "session.skill.activated");
 crate::lit_str!(LitSessionStepEnded, "session.step.ended");
 crate::lit_str!(LitSessionStepFailed, "session.step.failed");
 crate::lit_str!(LitContentFilter, "content-filter");
+crate::lit_str!(LitSessionStepFirstToken, "session.step.first-token");
 crate::lit_str!(LitSessionStepStarted, "session.step.started");
 crate::lit_str!(LitSessionStepStreamed, "session.step.streamed");
 crate::lit_str!(LitSessionSynthetic, "session.synthetic");
@@ -997,6 +999,8 @@ pub struct ConfigInfoEncodedExperimental {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_shell_scanner: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codemode_vm: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_flags: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<bool>,
@@ -1009,9 +1013,11 @@ pub struct ConfigInfoEncodedExperimental {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codemode_vm: Option<bool>,
+    pub shell_timeout_background: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_watches: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_events: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_rows: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1158,6 +1164,8 @@ pub struct ConfigLSPServerEncoded {
 pub struct ConfigModelCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Vec<ToolFreeformFormat>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1367,6 +1375,8 @@ pub struct ConfigProviderSettings {
     pub transport: Option<ProviderTransport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<ProviderEncoding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ProviderTls>,
     /// Additional properties.
     #[serde(flatten)]
     pub extra: indexmap::IndexMap<String, serde_json::Value>,
@@ -3951,6 +3961,8 @@ impl ModelCacheFormat {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     pub tools: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<Vec<ToolFreeformFormat>>,
     pub input: Vec<String>,
     pub output: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5033,6 +5045,8 @@ pub struct ProviderSettings {
     pub transport: Option<ProviderTransport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<ProviderEncoding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ProviderTls>,
     /// Additional properties.
     #[serde(flatten)]
     pub extra: indexmap::IndexMap<String, serde_json::Value>,
@@ -5075,6 +5089,17 @@ impl From<LitFalse> for ProviderSettingsChunkTimeout {
     fn from(value: LitFalse) -> Self {
         Self::Literal(value)
     }
+}
+
+/// Component schema `Provider.Tls`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProviderTls {
+    /// PEM client certificate, usually `{file:/path/to/client.pem}`
+    pub cert: String,
+    /// PEM private key, usually `{file:/path/to/client.key}`
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
 }
 
 /// Component schema `Provider.Transport`.
@@ -5780,6 +5805,7 @@ pub enum SessionEventDurable {
     SessionShellStarted(SessionShellStarted),
     SessionShellEnded(SessionShellEnded),
     SessionStepStarted(SessionStepStarted),
+    SessionStepFirstToken(SessionStepFirstToken),
     SessionStepStreamed(SessionStepStreamed),
     SessionStepEnded(SessionStepEnded),
     SessionStepFailed(SessionStepFailed),
@@ -5956,6 +5982,12 @@ impl From<SessionShellEnded> for SessionEventDurable {
 impl From<SessionStepStarted> for SessionEventDurable {
     fn from(value: SessionStepStarted) -> Self {
         Self::SessionStepStarted(value)
+    }
+}
+
+impl From<SessionStepFirstToken> for SessionEventDurable {
+    fn from(value: SessionStepFirstToken) -> Self {
+        Self::SessionStepFirstToken(value)
     }
 }
 
@@ -6485,6 +6517,8 @@ pub struct SessionMessageAssistant {
 pub struct SessionMessageAssistantTime {
     #[serde(serialize_with = "crate::support::ser_f64")]
     pub created: f64,
+    #[serde(rename = "firstToken", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
+    pub first_token: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
     pub streamed: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
@@ -7663,6 +7697,28 @@ pub struct ToolFileContent {
     pub name: Option<String>,
 }
 
+/// Component schema `Tool.FreeformFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ToolFreeformFormat {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "regex")]
+    Regex,
+    #[serde(rename = "lark")]
+    Lark,
+}
+
+impl ToolFreeformFormat {
+    /// Wire value of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Regex => "regex",
+            Self::Lark => "lark",
+        }
+    }
+}
+
 /// Component schema `Tool.TextContent`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ToolTextContent {
@@ -7865,6 +7921,7 @@ pub enum V2Event {
     SessionShellStarted(SessionShellStarted),
     SessionShellEnded(SessionShellEnded),
     SessionStepStarted(SessionStepStarted),
+    SessionStepFirstToken(SessionStepFirstToken),
     SessionStepStreamed(SessionStepStreamed),
     SessionStepEnded(SessionStepEnded),
     SessionStepFailed(SessionStepFailed),
@@ -7926,6 +7983,7 @@ pub enum V2Event {
     VcsBranchUpdated(VcsBranchUpdated),
     McpStatusChanged(McpStatusChanged),
     McpResourcesChanged(McpResourcesChanged),
+    ExperimentalMcpEvent(ExperimentalMcpEvent),
     Rpc(V2EventRpc),
     ServerConnected(V2EventServerConnected),
 }
@@ -8137,6 +8195,12 @@ impl From<SessionShellEnded> for V2Event {
 impl From<SessionStepStarted> for V2Event {
     fn from(value: SessionStepStarted) -> Self {
         Self::SessionStepStarted(value)
+    }
+}
+
+impl From<SessionStepFirstToken> for V2Event {
+    fn from(value: SessionStepFirstToken) -> Self {
+        Self::SessionStepFirstToken(value)
     }
 }
 
@@ -8503,6 +8567,12 @@ impl From<McpStatusChanged> for V2Event {
 impl From<McpResourcesChanged> for V2Event {
     fn from(value: McpResourcesChanged) -> Self {
         Self::McpResourcesChanged(value)
+    }
+}
+
+impl From<ExperimentalMcpEvent> for V2Event {
+    fn from(value: ExperimentalMcpEvent) -> Self {
+        Self::ExperimentalMcpEvent(value)
     }
 }
 
@@ -8990,6 +9060,35 @@ pub struct CredentialUpdatedData {
     pub integration_id: IntegrationID,
     #[serde(rename = "credentialID")]
     pub credential_id: CredentialID,
+}
+
+/// Component schema `experimental.mcp.event`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExperimentalMcpEvent {
+    pub id: EventID,
+    #[serde(serialize_with = "crate::support::ser_f64")]
+    pub created: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonObject>,
+    pub r#type: LitExperimentalMcpEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationRef>,
+    pub data: ExperimentalMcpEventData,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExperimentalMcpEventData {
+    pub id: String,
+    pub server: String,
+    pub name: String,
+    #[serde(rename = "eventId")]
+    pub event_id: String,
+    pub timestamp: String,
+    pub data: serde_json::Value,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 /// Component schema `filesystem.changed`.
@@ -10815,6 +10914,37 @@ pub struct SessionStepFailedData {
     pub files: Option<Vec<RelativePath>>,
 }
 
+/// Component schema `session.step.first-token`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SessionStepFirstToken {
+    pub id: EventID,
+    #[serde(serialize_with = "crate::support::ser_f64")]
+    pub created: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonObject>,
+    pub r#type: LitSessionStepFirstToken,
+    pub durable: SessionStepFirstTokenDurable,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationRef>,
+    pub data: SessionStepFirstTokenData,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SessionStepFirstTokenDurable {
+    #[serde(rename = "aggregateID")]
+    pub aggregate_id: String,
+    pub seq: EventSeq,
+    pub version: EventVersionEncodedC77c5abcb68d,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SessionStepFirstTokenData {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionID,
+    #[serde(rename = "assistantMessageID")]
+    pub assistant_message_id: SessionMessageID,
+}
+
 /// Component schema `session.step.started`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SessionStepStarted {
@@ -11788,6 +11918,7 @@ impl From<LitNull> for SessionListParentID {
 pub struct SessionCreateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<SessionID>,
+    /// Set parentID to create a subagent session at the parent's location; set agent to choose its agent (otherwise it uses the default) and start it with session.prompt. After each completed round, the child sends a `<subagent>` report to the parent's inbox and wakes the parent unless it has a staged revert.
     #[serde(rename = "parentID", default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<SessionID>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12299,6 +12430,8 @@ pub enum EventSubscribeTypesItemEnum {
     SessionShellEnded,
     #[serde(rename = "session.step.started")]
     SessionStepStarted,
+    #[serde(rename = "session.step.first-token")]
+    SessionStepFirstToken,
     #[serde(rename = "session.step.streamed")]
     SessionStepStreamed,
     #[serde(rename = "session.step.ended")]
@@ -12421,6 +12554,8 @@ pub enum EventSubscribeTypesItemEnum {
     McpStatusChanged,
     #[serde(rename = "mcp.resources.changed")]
     McpResourcesChanged,
+    #[serde(rename = "experimental.mcp.event")]
+    ExperimentalMcpEvent,
 }
 
 impl EventSubscribeTypesItemEnum {
@@ -12462,6 +12597,7 @@ impl EventSubscribeTypesItemEnum {
             Self::SessionShellStarted => "session.shell.started",
             Self::SessionShellEnded => "session.shell.ended",
             Self::SessionStepStarted => "session.step.started",
+            Self::SessionStepFirstToken => "session.step.first-token",
             Self::SessionStepStreamed => "session.step.streamed",
             Self::SessionStepEnded => "session.step.ended",
             Self::SessionStepFailed => "session.step.failed",
@@ -12523,6 +12659,7 @@ impl EventSubscribeTypesItemEnum {
             Self::VcsBranchUpdated => "vcs.branch.updated",
             Self::McpStatusChanged => "mcp.status.changed",
             Self::McpResourcesChanged => "mcp.resources.changed",
+            Self::ExperimentalMcpEvent => "experimental.mcp.event",
         }
     }
 }

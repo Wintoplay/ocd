@@ -94,6 +94,16 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-17: 2.3.0 CATCH-UP, API/CONFIG FOUNDATION (first batch; ocd still reports 2.2.7 until the catch-up ends):
+  `assets/openapi.json` is v2.3.0's (170 operations, 501 schemas: `session.step.first-token`,
+  `experimental.mcp.event`, `Tool.FreeformFormat`, `Provider.Tls`), `generated.rs` regenerated with `gen.py`
+  unchanged. The new fields exist but stay unset until their batches: `time.firstToken` and the first-token event
+  (step lifecycle), `capabilities.freeform` on `/api/model` (freeform tools), the client certificate itself (P10), MCP
+  Events (deferred). `PUBLIC_EVENT_TYPES` gains both new types (a test checks it against the document). Config: flag
+  registry `shell_timeout_background` and `mcp_events`, `codemode_vm` a deprecated ignored key (the `codemodeVm` alias
+  is ignored), provider `settings.tls` (`oc_config::schema::Tls`; in `SETTINGS_KEYS`/`PROVIDER_ONLY_KEYS`, so never a
+  provider option or a model setting), model `capabilities.freeform`. `plugin.list` lists `opencode.tools.mcp-events`
+  (a no-op without the flag). Parity group `api230`.
 - 2026-11-13: LOCAL MODEL DISCOVERY (2.2.7's `opencode.provider.{lmstudio,ollama,vllm}`): `oc_core::local_providers`
   (discovery per location from its boot, every 30 s and on `config.updated`; 1 s requests; answers cached per root and
   key across locations; Ollama's `/api/show` cached by digest) and `oc_ai::catalog::local` (endpoint rules and the

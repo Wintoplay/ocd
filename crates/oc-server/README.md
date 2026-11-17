@@ -1,7 +1,7 @@
 # oc-server
 
 The opencode v2 HTTP API server, wire-compatible with `assets/openapi.json` (OpenAPI 3.1,
-170 operations, 497 component schemas; v2.2.7's document) so the upstream TypeScript client/SDK/TUI and the Rust
+170 operations, 501 component schemas; v2.3.0's document) so the upstream TypeScript client/SDK/TUI and the Rust
 TUI work unchanged. Behaviour follows `docs/spec/06-http-api.md`.
 
 The engine is **not** a dependency: everything it must do is expressed by the generated

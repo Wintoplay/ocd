@@ -651,9 +651,11 @@ pub fn merge_headers(base: Option<&HeaderMap>, overlay: Option<&HeaderMap>) -> O
 }
 
 /// The `Provider.Settings` fields OpenCode reads itself; every other key is a provider option for the package.
-pub const SETTINGS_KEYS: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding"];
+/// `tls` (the client certificate, 2.3.0) is one of them, so it is never sent as a provider option.
+pub const SETTINGS_KEYS: &[&str] =
+    &["timeout", "headerTimeout", "chunkTimeout", "compaction", "cache", "transport", "encoding", "tls"];
 /// Provider-only settings that models do not inherit (the `Provider.Settings` fields `Model.Settings` lacks).
-pub const PROVIDER_ONLY_KEYS: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "transport"];
+pub const PROVIDER_ONLY_KEYS: &[&str] = &["timeout", "headerTimeout", "chunkTimeout", "transport", "tls"];
 
 pub(crate) fn omit(settings: &Object, keys: &[&str]) -> Object {
     settings.iter().filter(|(k, _)| !keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -762,6 +764,10 @@ mod tests {
         assert_eq!(Value::Object(native_settings(&s)), json!({"apiKey":"secret","reasoningEffort":"high"}));
         let s = obj(json!({"timeout":60000,"chunkTimeout":30000,"transport":"websocket","compaction":{"type":"native"},"reasoningEffort":"high"}));
         assert_eq!(Value::Object(model_settings(Some(&s)).unwrap()), json!({"compaction":{"type":"native"},"reasoningEffort":"high"}));
+        // 2.3.0: the client certificate is a provider-only setting, never a provider option.
+        let s = obj(json!({"apiKey":"secret","tls":{"cert":"C","key":"K"},"encoding":"gzip"}));
+        assert_eq!(Value::Object(native_settings(&s)), json!({"apiKey":"secret"}));
+        assert_eq!(Value::Object(model_settings(Some(&s)).unwrap()), json!({"apiKey":"secret","encoding":"gzip"}));
     }
 
     #[test]

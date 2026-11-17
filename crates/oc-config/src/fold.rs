@@ -700,6 +700,7 @@ pub fn overlay_model(model: &mut ProviderModel, config: &ProviderModel) {
         let base = model.capabilities.clone().unwrap_or_default();
         model.capabilities = Some(Capabilities {
             tools: c.tools.or(base.tools),
+            freeform: c.freeform.clone().or(base.freeform),
             input: c.input.clone().or(base.input),
             output: c.output.clone().or(base.output),
             temperature: c.temperature.or(base.temperature),

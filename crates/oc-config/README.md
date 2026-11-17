@@ -21,12 +21,17 @@ agent/provider registries. It uses the functions below to do that work.
   `schedules` (scheduled prompts, `oc_core::schedule`) and 2.2.5's `artifacts`, accepted and normalized; `image_generate`
   drives the image tool, see `fold::image_generate`)/`Policy`, `UpdatePolicy`,
   `Share`, `Patch`; `Info.timezone`.
-- 2.2.7 keys, accepted, normalized and echoed in upstream's key order: `experimental.all_flags`, `codemode_vm`
-  (also from the `codemodeVm` alias), `console_watches`, `part_rows`; MCP `pool` on local and remote servers;
+- 2.2.7 keys, accepted, normalized and echoed in upstream's key order: `experimental.all_flags`,
+  `console_watches`, `part_rows`; MCP `pool` on local and remote servers;
   `warming.interval: "auto"` (`WarmingInterval`); provider and model `cache.warming` (`CacheWarming`:
-  `boolean | {interval?, duration?}` with raw strings). The features behind `codemode_vm`, `console_watches`,
-  `part_rows`, `pool` and warming are opt-in upstream and not ported: ocd keeps its interpreter, has no Console
+  `boolean | {interval?, duration?}` with raw strings). The features behind `console_watches`,
+  `part_rows`, `pool` and warming are opt-in upstream and not ported: ocd has no Console
   watches, writes whole messages, connects MCP servers per location and sends no keep-alive requests.
+- 2.3.0 keys: the flags `experimental.shell_timeout_background` and `mcp_events` (accepted and echoed; their features
+  are not ported); `experimental.codemode_vm` is a deprecated, ignored key right after `portable_shell_scanner`, and
+  the retired `codemodeVm` alias is ignored without a diagnostic; provider `settings.tls` (`Tls`:
+  `{cert, key, passphrase?}`, after `encoding`; a wrong shape invalidates the provider, extra keys are dropped);
+  model `capabilities.freeform` (`FreeformFormat[]`: `text`, `regex`, `lark`, after `tools`).
 - `Compaction.buffer` is a `CompactionBuffer`: `Tokens(u64)` or `Percent(String)` (`Config.Compaction.Percent`,
   `^([1-9]\d?(\.\d+)?)%$`, kept as written); `tokens(window)` is `Math.round(window * pct / 100)`. The legacy
   `reserved` key stays a token count.
@@ -105,9 +110,9 @@ agent/provider registries. It uses the functions below to do that work.
 - `update_shell(dir, Option<&str>)` implements `PATCH /api/experimental/config`. It edits the
   JSONC text while preserving comments.
 
-### `flag`: the 2.2.7 flag registry (`core/src/flag.ts`)
-- `REGISTRY` (`todo`, `background_compaction`, `media_blob`, `schedules`, `artifacts`, `codemode_vm`,
-  `console_watches`), `resolve(entries, channel, overrides)` → per key `{enabled, source}`: `OPENCODE_FLAGS`
+### `flag`: the 2.3.0 flag registry (`core/src/flag.ts`)
+- `REGISTRY` (`todo`, `background_compaction`, `media_blob`, `schedules`, `artifacts`, `shell_timeout_background`,
+  `console_watches`, `mcp_events`), `resolve(entries, channel, overrides)` → per key `{enabled, source}`: `OPENCODE_FLAGS`
   (`key`, `-key`, `all`), then `experimental.<key>` of the latest `experimental` document, then `all_flags: true`
   of the latest document that sets it, then on only for the `local` and `dev` channels.
 - `enabled(entries, key)` with this build's channel and the process's `OPENCODE_FLAGS`; every gate in oc-core reads

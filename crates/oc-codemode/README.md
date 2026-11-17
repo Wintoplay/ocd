@@ -145,9 +145,8 @@ execution is interrupted.
   counted), the `search` note when the catalog becomes partial, changed listings the model saw, and removed tools and
   namespaces — or the whole catalog when that is shorter, or `None` when nothing the model was told changed.
   `catalog::{EMPTY_CATALOG, REMOVED_CATALOG}`.
-- The `experimental.codemode_vm` flag (#62358, upstream's bytecode VM) is accepted by core's config but changes
-  nothing here: both upstream engines run the same programs with the same results, and this interpreter is tested
-  against them.
+- `experimental.codemode_vm` (#62358) was a flag for upstream's bytecode VM. Since 2.3.0 upstream always runs the VM
+  and the key is deprecated and ignored; ocd accepts it and runs this interpreter, which is tested against the VM.
 
 ### OpenAPI (`openapi`)
 

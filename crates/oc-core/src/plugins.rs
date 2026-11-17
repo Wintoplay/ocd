@@ -37,7 +37,7 @@ use crate::location::Location;
 
 /// Built-in (internal) plugin ids in activation order (`core/src/plugin/internal.ts` `pre`, the
 /// provider and web-search plugins, `post`), as `plugin.list` reports them.
-pub const BUILTIN_PLUGINS: [&str; 92] = [
+pub const BUILTIN_PLUGINS: [&str; 93] = [
     "opencode.tool.input.repair",
     "opencode.config.worktree",
     "opencode.config.mcp",
@@ -99,6 +99,8 @@ pub const BUILTIN_PLUGINS: [&str; 92] = [
     "opencode.tool.grep",
     "opencode.tool.image-generate",
     "opencode.tools",
+    // 2.3.0: adds `watch_mcp_event` only with the `mcp_events` flag, which ocd does not port; listed like upstream.
+    "opencode.tools.mcp-events",
     "opencode.tools.mcp-resources",
     "opencode.tool.question",
     "opencode.tool.read",
@@ -134,7 +136,7 @@ pub const BUILTIN_PLUGINS: [&str; 92] = [
 ];
 
 /// Index of the first `post` internal plugin in [`BUILTIN_PLUGINS`].
-const POST_START: usize = 74;
+const POST_START: usize = 75;
 
 /// The ocd-native internal plugins in upstream order.
 pub fn internal_plugins() -> InternalPlugins {

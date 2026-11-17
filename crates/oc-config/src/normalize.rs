@@ -701,9 +701,10 @@ fn normalize_experimental(input: &Obj, encoded: &mut Obj, d: &mut Diags) {
                 for key in UNSUPPORTED_EXPERIMENTAL {
                     unsupported_if_present(e, key, p(&["experimental", key]), d);
                 }
-                // 2.2.7: every `ConfigExperimental.Info` field in schema order (`policies` merges into top-level
-                // `policies` in normalize_policies).
-                let booleans = ["portable_shell_scanner", "all_flags"]
+                // 2.3.0: every `ConfigExperimental.Info` field in schema order (`policies` merges into top-level
+                // `policies` in normalize_policies). `codemode_vm` is a deprecated, ignored key; the retired
+                // `codemodeVm` alias is no longer read.
+                let booleans = ["portable_shell_scanner", "codemode_vm", "all_flags"]
                     .into_iter()
                     .chain(crate::flag::REGISTRY.iter().map(|(key, _)| *key))
                     .chain(["part_rows"]);
@@ -730,12 +731,6 @@ fn normalize_experimental(input: &Obj, encoded: &mut Obj, d: &mut Diags) {
                         decode_encoded::<IdleTimeout>(v, p(&["experimental", "location_idle_timeout"]), d)
                 {
                     result.insert("location_idle_timeout".into(), value);
-                }
-                if !e.contains_key("codemode_vm")
-                    && let Some(v) = e.get("codemodeVm")
-                    && let Some(value) = decode_encoded::<bool>(v, p(&["experimental", "codemodeVm"]), d)
-                {
-                    result.insert("codemode_vm".into(), value);
                 }
             }
         }

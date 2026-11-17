@@ -363,5 +363,15 @@ async fn event_feed_filters_by_types() {
         assert_eq!(v["_tag"], "InvalidRequestError");
         assert_eq!(v["kind"], "Query");
     }
+    // 2.3.0's new public types are accepted.
+    for good in ["session.step.first-token", "experimental.mcp.event&types=session.step.first-token"] {
+        let res = client
+            .get(format!("{}/api/event?types={good}", server.url()))
+            .header("authorization", basic(PASSWORD))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200, "{good}");
+    }
     server.shutdown().await;
 }

@@ -1,4 +1,4 @@
-//! Feature flags (`schema/src/config/flag.ts`, `core/src/flag.ts`, 2.2.7): one registry of opt-in features, each
+//! Feature flags (`schema/src/config/flag.ts`, `core/src/flag.ts`, 2.3.0): one registry of opt-in features, each
 //! read with [`enabled`]. A flag is on in local and dev builds and off in released ones; `experimental.<key>` in
 //! config and `OPENCODE_FLAGS` override that, and `OPENCODE_FLAGS=all` or `experimental.all_flags: true` turn every
 //! flag on.
@@ -20,10 +20,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ("media_blob", "Store new session media once in a deduplicated blob table instead of inline in every message row."),
     ("schedules", "Enable experimental scheduled tasks that wake a session with a prompt."),
     ("artifacts", "Enable experimental artifacts backed by pluggable providers."),
-    ("codemode_vm", "Run the Code Mode execute tool on the experimental bytecode VM instead of the legacy interpreter."),
+    ("shell_timeout_background", "Move foreground shell commands to the background when their timeout expires."),
     (
         "console_watches",
         "Watch Slack threads, GitHub pull requests, issues, commits and Actions runs, and the workspace's MCP servers' events through OpenCode Console, and wake sessions when they change.",
+    ),
+    (
+        "mcp_events",
+        "Enable experimental MCP Events, a draft MCP extension: declare support to MCP servers and read the events of servers that offer them.",
     ),
 ];
 
@@ -155,8 +159,15 @@ mod tests {
         for (channel, on) in [("local", true), ("dev", true), ("beta", false), ("latest", false), ("my-branch", false), ("unknown", false)] {
             assert_eq!(resolve(&[], channel, None)["todo"].enabled, on, "{channel}");
         }
+        // Every registered flag is off in a latest release build.
         assert_eq!(resolve(&[], "latest", None), every(false, Source::Default));
-        assert!(resolve(&[], "dev", None)["codemode_vm"].enabled);
+        // `codemode_vm` is no longer a flag (2.3.0): a deprecated, ignored config key.
+        assert!(!resolve(&[], "dev", None).contains_key("codemode_vm"));
+        assert!(!resolve(&[doc(json!({"codemode_vm": true}))], "latest", Some("codemode_vm")).contains_key("codemode_vm"));
+        assert_eq!(
+            REGISTRY.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            ["todo", "background_compaction", "media_blob", "schedules", "artifacts", "shell_timeout_background", "console_watches", "mcp_events"]
+        );
 
         let flags = resolve(&[doc(json!({"todo": true, "schedules": false}))], "dev", Some(" media_blob , -todo,unknown_flag"));
         assert_eq!(
