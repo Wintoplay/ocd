@@ -746,7 +746,10 @@ impl Client {
                     Err(_) => Outcome::Closed,
                 },
                 Ok(error) = err_rx => match error {
-                    McpError::Unauthorized(_) => Outcome::Auth(error),
+                    // Errors from the auth seam escape the probe as they are (`markAuthSeamEscape`).
+                    McpError::Unauthorized(_) | McpError::InsufficientScope(_) | McpError::OAuth { .. } => {
+                        Outcome::Auth(error)
+                    }
                     McpError::Http { status, text, status_text, .. } => Outcome::Http(status, text, status_text),
                     other => Outcome::Network(other),
                 },

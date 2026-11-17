@@ -8,6 +8,7 @@ use crate::credentials::http::{FlowContext, request_json, str_field, transport};
 use crate::credentials::integration::{AuthorizeResult, FlowError, FlowResult, OAuthMethod, OAuthMethodInfo};
 use crate::credentials::page::{self, CallbackPageOptions};
 use crate::credentials::pkce::{self, Pkce};
+use crate::credentials::redirect;
 use crate::credentials::{Metadata, OAuthValue, now_ms};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -121,6 +122,7 @@ impl OAuthMethod for CodexBrowser {
         let pkce = pkce::openai_pkce();
         let state = pkce::random_state();
         let (once, rx) = Once::<FlowResult<String>>::new();
+        let submit = redirect::submit(state.clone(), once.clone(), |code, _| code);
         let expected = state.clone();
         let handler = sync_handler(move |request| {
             if request.path != "/auth/callback" {
@@ -156,7 +158,7 @@ impl OAuthMethod for CodexBrowser {
             let tokens = exchange(&ctx, &issuer, &code, &redirect, &pkce.verifier).await?;
             credential(BROWSER_METHOD_ID, &tokens)
         };
-        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback))
+        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback).with_submit(submit))
     }
 
     fn can_refresh(&self) -> bool {

@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::config::{ServerConfig, TimeoutConfig};
 use crate::error::McpError;
-use crate::oauth::Provider;
+use crate::oauth::ConnectAuth;
 use crate::oauth::fetch::Fetcher;
 use crate::protocol::{Client, ClientConfig, ElicitationHandler, RequestOptions};
 use crate::transport::http::{HttpOptions, HttpTransport};
@@ -185,7 +185,7 @@ impl Connection {
         server: &str,
         config: &ServerConfig,
         directory: &Path,
-        auth_provider: Option<Arc<Provider>>,
+        auth_provider: Option<Arc<ConnectAuth>>,
         elicitation: Option<Arc<dyn ElicitationHandler>>,
         client_info: &ClientInfo,
     ) -> Result<Connection, ConnectError> {
@@ -218,8 +218,7 @@ impl Connection {
                         message: format!("Invalid MCP server URL: {}", remote.url),
                     });
                 };
-                let fetch = Fetcher::new(server.to_string())
-                    .with_refresh(auth_provider.as_ref().and_then(|provider| provider.locked_refresh()));
+                let fetch = Fetcher::new(server.to_string());
                 // Servers that bundle their own Code Mode expose raw tools with ?codemode=false.
                 let mut url = configured.clone();
                 let added_codemode = remote.codemode != Some(false)
@@ -268,7 +267,7 @@ impl Connection {
             Ok(opened) => opened,
             Err(error) => {
                 return Err(match &error {
-                    McpError::Unauthorized(message) => {
+                    McpError::Unauthorized(message) | McpError::InsufficientScope(message) => {
                         ConnectError::NeedsAuth { server: server.to_string(), message: message.clone() }
                     }
                     McpError::UnsupportedProtocolVersion { message, supported, .. } => ConnectError::Connect {

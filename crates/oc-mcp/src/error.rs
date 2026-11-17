@@ -89,6 +89,9 @@ pub enum McpError {
     /// SDK `UnauthorizedError` (default message `Unauthorized`).
     #[error("{0}")]
     Unauthorized(String),
+    /// SDK `InsufficientScopeError`: a 403 `insufficient_scope` on a connection, whose provider cannot step up.
+    #[error("{0}")]
+    InsufficientScope(String),
     /// `OAuthError` (code is the OAuth `error` value).
     #[error("{message}")]
     OAuth { code: String, message: String },
@@ -141,6 +144,7 @@ impl McpError {
             Self::Http { .. } => "SdkHttpError",
             Self::Protocol { .. } | Self::UnsupportedProtocolVersion { .. } => "ProtocolError",
             Self::Unauthorized(_) => "UnauthorizedError",
+            Self::InsufficientScope(_) => "InsufficientScopeError",
             Self::OAuth { .. } => "OAuthError",
             Self::Network { .. } => "TypeError",
             Self::SessionExpired { .. } => "MCP.SessionExpiredError",

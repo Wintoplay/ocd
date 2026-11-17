@@ -1,7 +1,8 @@
 //! Streamable HTTP client transport (SDK `StreamableHTTPClientTransport`): JSON-RPC over POST
 //! with JSON or SSE responses, `Mcp-Session-Id` / `Mcp-Protocol-Version` headers, the
-//! standalone GET SSE stream for server notifications, SSE resumption/reconnection, OAuth on
-//! 401 (and 403 `insufficient_scope` step-up) and session termination via DELETE.
+//! standalone GET SSE stream for server notifications, SSE resumption/reconnection, the auth
+//! provider's `onUnauthorized` on 401 (a 403 `insufficient_scope` needs a new login, since a
+//! connection's provider cannot step up) and session termination via DELETE.
 //! There is no legacy HTTP+SSE fallback (v2 removed it).
 
 use std::sync::{Arc, Weak};
@@ -21,9 +22,9 @@ use url::Url;
 use super::{EventSink, SendOptions, Transport, TransportEvent, TransportKind};
 use crate::error::{McpError, SdkErrorCode};
 use crate::jsonrpc;
+use crate::oauth::ConnectAuth;
 use crate::oauth::discovery::parse_www_authenticate;
 use crate::oauth::fetch::{Body, Fetcher, HttpRequest};
-use crate::oauth::{AuthOptions, AuthResult, Provider, auth};
 
 const PROTOCOL_VERSION_META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 const RESERVED_HEADERS: [&str; 6] =
@@ -32,13 +33,12 @@ const INITIAL_RECONNECTION_DELAY_MS: f64 = 1000.0;
 const MAX_RECONNECTION_DELAY_MS: f64 = 30000.0;
 const RECONNECTION_GROW_FACTOR: f64 = 1.5;
 const MAX_RECONNECTION_RETRIES: u32 = 2;
-const MAX_STEP_UP_RETRIES: u32 = 1;
 
 pub struct HttpOptions {
     pub url: Url,
     /// Configured request headers (`requestInit.headers`).
     pub headers: Option<IndexMap<String, String>>,
-    pub auth_provider: Option<Arc<Provider>>,
+    pub auth_provider: Option<Arc<ConnectAuth>>,
     pub fetch: Fetcher,
 }
 
@@ -71,23 +71,17 @@ fn merge_accept(headers: &mut Headers, extra: &[&str]) {
     header_set(headers, "accept", &seen.join(", "));
 }
 
-/// `computeScopeUnion`.
-pub fn scope_union(scopes: &[Option<&str>]) -> Option<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for scope in scopes.iter().flatten() {
-        for token in scope.split_whitespace() {
-            if !seen.iter().any(|s| s == token) {
-                seen.push(token.to_string());
-            }
-        }
+/// A 403 `insufficient_scope`: the SDK steps up only with an `OAuthClientProvider`, and a connection's provider is
+/// not one, so the SDK throws `InsufficientScopeError` and the server needs a new login.
+fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> Result<(), McpError> {
+    let challenge = parse_www_authenticate(headers);
+    if challenge.error.as_deref() != Some("insufficient_scope") {
+        return Ok(());
     }
-    (!seen.is_empty()).then(|| seen.join(" "))
-}
-
-fn is_strict_scope_superset(union: Option<&str>, current: Option<&str>) -> bool {
-    let Some(union) = union else { return false };
-    let current: Vec<&str> = current.unwrap_or("").split_whitespace().collect();
-    union.split_whitespace().any(|t| !current.contains(&t))
+    Err(McpError::InsufficientScope(format!(
+        "Insufficient scope{}",
+        challenge.scope.map(|s| format!(": required \"{s}\"")).unwrap_or_default()
+    )))
 }
 
 /// `encodeMcpParamValue`.
@@ -121,34 +115,27 @@ struct SseOptions {
 pub struct HttpTransport {
     url: Url,
     headers: Option<IndexMap<String, String>>,
-    provider: Option<Arc<Provider>>,
+    provider: Option<Arc<ConnectAuth>>,
     fetch: Fetcher,
-    auth_fetch: Fetcher,
     events: EventSink,
     session_id: Mutex<Option<String>>,
     protocol_version: Mutex<Option<String>>,
     abort: Mutex<Option<CancellationToken>>,
-    resource_metadata_url: Mutex<Option<Url>>,
-    scope: Mutex<Option<String>>,
     server_retry_ms: Mutex<Option<u64>>,
     this: Weak<HttpTransport>,
 }
 
 impl HttpTransport {
     pub fn new(options: HttpOptions, events: EventSink) -> Arc<Self> {
-        let auth_fetch = options.fetch.clone().with_base_headers(options.headers.clone());
         Arc::new_cyclic(|this| Self {
             url: options.url,
             headers: options.headers,
             provider: options.auth_provider,
             fetch: options.fetch,
-            auth_fetch,
             events,
             session_id: Mutex::new(None),
             protocol_version: Mutex::new(None),
             abort: Mutex::new(None),
-            resource_metadata_url: Mutex::new(None),
-            scope: Mutex::new(None),
             server_retry_ms: Mutex::new(None),
             this: this.clone(),
         })
@@ -189,7 +176,7 @@ impl HttpTransport {
     async fn common_headers(&self) -> Result<Headers, McpError> {
         let mut headers: Headers = Vec::new();
         if let Some(provider) = &self.provider {
-            if let Some(token) = provider.tokens().await?.map(|t| t.access_token).filter(|t| !t.is_empty()) {
+            if let Some(token) = provider.token().await? {
                 headers.push(("Authorization".into(), format!("Bearer {token}")));
             }
         }
@@ -205,74 +192,23 @@ impl HttpTransport {
         Ok(headers)
     }
 
-    /// `onUnauthorized` for OAuth providers: run `auth()` with the challenge's parameters.
-    async fn on_unauthorized(&self, provider: &Provider, scope: Option<String>, rm: Option<Url>) -> Result<(), McpError> {
-        let result = auth(
-            provider,
-            &AuthOptions { server_url: Some(self.url.clone()), resource_metadata_url: rm, scope, ..Default::default() },
-            &self.auth_fetch,
-        )
-        .await?;
-        if result != AuthResult::Authorized {
-            return Err(McpError::Unauthorized("Unauthorized".into()));
+    /// The 401 path: `onUnauthorized` and one retry when the provider has it, else `UnauthorizedError`; a 401 on the
+    /// retry is final.
+    async fn unauthorized(&self, headers: &reqwest::header::HeaderMap, is_auth_retry: bool, status_text: String) -> Result<(), McpError> {
+        let Some(provider) = &self.provider else { return Err(McpError::Unauthorized("Unauthorized".into())) };
+        if provider.handles_unauthorized() && !is_auth_retry {
+            return provider.on_unauthorized(headers).await;
         }
-        Ok(())
-    }
-
-    async fn step_up(&self, scope: Option<String>, rm: Option<Url>, status_text: &str, text: &str, retries: u32) -> Result<(), McpError> {
-        let Some(provider) = &self.provider else {
-            return Err(McpError::other(format!(
-                "Insufficient scope{}",
-                scope.as_ref().map(|s| format!(": required \"{s}\"")).unwrap_or_default()
-            )));
-        };
-        if retries >= MAX_STEP_UP_RETRIES {
+        if is_auth_retry {
             return Err(McpError::Http {
-                code: SdkErrorCode::ClientHttpForbidden,
-                message: format!(
-                    "Server returned 403 insufficient_scope after step-up re-authorization (retry limit {MAX_STEP_UP_RETRIES} reached)"
-                ),
-                status: 403,
-                status_text: if status_text.is_empty() { "Forbidden".into() } else { status_text.into() },
-                text: Some(text.into()),
+                code: SdkErrorCode::ClientHttpAuthentication,
+                message: "Server returned 401 after re-authentication".into(),
+                status: 401,
+                status_text,
+                text: None,
             });
         }
-        if rm.is_some() {
-            *self.resource_metadata_url.lock() = rm.clone();
-        }
-        let tokens = provider.tokens().await?;
-        let current = tokens.as_ref().and_then(|t| t.scope.clone());
-        let previous = self.scope.lock().clone();
-        let union = scope_union(&[previous.as_deref(), current.as_deref(), scope.as_deref()]);
-        *self.scope.lock() = union.clone();
-        let force = is_strict_scope_superset(union.as_deref(), current.as_deref());
-        let resource_metadata_url = self.resource_metadata_url.lock().clone();
-        let result = auth(
-            provider,
-            &AuthOptions {
-                server_url: Some(self.url.clone()),
-                resource_metadata_url,
-                scope: union,
-                force_reauthorization: force,
-                ..Default::default()
-            },
-            &self.auth_fetch,
-        )
-        .await?;
-        if result != AuthResult::Authorized {
-            return Err(McpError::Unauthorized("Unauthorized".into()));
-        }
-        Ok(())
-    }
-
-    fn note_challenge(&self, headers: &reqwest::header::HeaderMap) -> (Option<String>, Option<Url>) {
-        let challenge = parse_www_authenticate(headers);
-        if headers.contains_key("www-authenticate") {
-            *self.resource_metadata_url.lock() = challenge.resource_metadata_url.clone();
-            let previous = self.scope.lock().clone();
-            *self.scope.lock() = scope_union(&[previous.as_deref(), challenge.scope.as_deref()]);
-        }
-        (challenge.scope, challenge.resource_metadata_url)
+        Err(McpError::Unauthorized("Unauthorized".into()))
     }
 
     fn send_inner(
@@ -280,10 +216,9 @@ impl HttpTransport {
         message: Value,
         options: SendOptions,
         is_auth_retry: bool,
-        step_up: u32,
     ) -> BoxFuture<'static, Result<(), McpError>> {
         Box::pin(async move {
-            let result = self.clone().send_attempt(message, options.clone(), is_auth_retry, step_up).await;
+            let result = self.clone().send_attempt(message, options.clone(), is_auth_retry).await;
             if let Err(error) = &result {
                 if !options.request_cancel.as_ref().is_some_and(|t| t.is_cancelled()) && !matches!(error, McpError::Aborted(_)) {
                     self.emit(TransportEvent::Error(error.clone()));
@@ -298,7 +233,6 @@ impl HttpTransport {
         message: Value,
         options: SendOptions,
         is_auth_retry: bool,
-        step_up: u32,
     ) -> Result<(), McpError> {
         let mut headers = self.common_headers().await?;
         // Body-derived headers for modern enveloped requests.
@@ -355,32 +289,16 @@ impl HttpTransport {
                 .map(String::from);
         }
         if !ok {
-            if status == 401 {
-                if let Some(provider) = self.provider.clone() {
-                    let (scope, rm) = self.note_challenge(response.headers());
-                    if !is_auth_retry {
-                        self.on_unauthorized(&provider, scope, rm).await?;
-                        drop(response);
-                        return self.clone().send_inner(message, options, true, step_up).await;
-                    }
-                    drop(response);
-                    return Err(McpError::Http {
-                        code: SdkErrorCode::ClientHttpAuthentication,
-                        message: "Server returned 401 after re-authentication".into(),
-                        status: 401,
-                        status_text,
-                        text: None,
-                    });
-                }
+            if status == 401 && self.provider.is_some() {
+                let headers = response.headers().clone();
+                drop(response);
+                self.unauthorized(&headers, is_auth_retry, status_text).await?;
+                return self.clone().send_inner(message, options, true).await;
             }
             let response_headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
             if status == 403 {
-                let challenge = parse_www_authenticate(&response_headers);
-                if challenge.error.as_deref() == Some("insufficient_scope") {
-                    self.step_up(challenge.scope, challenge.resource_metadata_url, &status_text, &text, step_up).await?;
-                    return self.clone().send_inner(message, options, is_auth_retry, step_up + 1).await;
-                }
+                insufficient_scope(&response_headers)?;
             }
             if status == 400 && is_modern_enveloped(&message) {
                 if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
@@ -406,7 +324,7 @@ impl HttpTransport {
             if jsonrpc::is_initialized_notification(&message) {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = this.clone().start_or_auth_sse(SseOptions::default(), false, 0).await {
+                    if let Err(error) = this.clone().start_or_auth_sse(SseOptions::default(), false).await {
                         this.emit(TransportEvent::Error(error));
                     }
                 });
@@ -463,10 +381,9 @@ impl HttpTransport {
         self: Arc<Self>,
         options: SseOptions,
         is_auth_retry: bool,
-        step_up: u32,
     ) -> BoxFuture<'static, Result<(), McpError>> {
         Box::pin(async move {
-            let result = self.clone().sse_attempt(options.clone(), is_auth_retry, step_up).await;
+            let result = self.clone().sse_attempt(options.clone(), is_auth_retry).await;
             if let Err(error) = &result {
                 if !self.intentional_abort(options.request_cancel.as_ref()) && !matches!(error, McpError::Aborted(_)) {
                     self.emit(TransportEvent::Error(error.clone()));
@@ -476,7 +393,7 @@ impl HttpTransport {
         })
     }
 
-    async fn sse_attempt(self: Arc<Self>, options: SseOptions, is_auth_retry: bool, step_up: u32) -> Result<(), McpError> {
+    async fn sse_attempt(self: Arc<Self>, options: SseOptions, is_auth_retry: bool) -> Result<(), McpError> {
         let mut headers = self.common_headers().await?;
         merge_accept(&mut headers, &["text/event-stream"]);
         if let Some(token) = &options.resumption_token {
@@ -488,30 +405,14 @@ impl HttpTransport {
         let status = response.status().as_u16();
         let status_text = response.status().canonical_reason().unwrap_or("").to_string();
         if !response.status().is_success() {
-            if status == 401 {
-                if let Some(provider) = self.provider.clone() {
-                    let (scope, rm) = self.note_challenge(response.headers());
-                    drop(response);
-                    if !is_auth_retry {
-                        self.on_unauthorized(&provider, scope, rm).await?;
-                        return self.clone().start_or_auth_sse(options, true, step_up).await;
-                    }
-                    return Err(McpError::Http {
-                        code: SdkErrorCode::ClientHttpAuthentication,
-                        message: "Server returned 401 after re-authentication".into(),
-                        status: 401,
-                        status_text,
-                        text: None,
-                    });
-                }
+            if status == 401 && self.provider.is_some() {
+                let headers = response.headers().clone();
+                drop(response);
+                self.unauthorized(&headers, is_auth_retry, status_text).await?;
+                return self.clone().start_or_auth_sse(options, true).await;
             }
             if status == 403 {
-                let challenge = parse_www_authenticate(response.headers());
-                if challenge.error.as_deref() == Some("insufficient_scope") {
-                    let text = response.text().await.unwrap_or_default();
-                    self.step_up(challenge.scope, challenge.resource_metadata_url, &status_text, &text, step_up).await?;
-                    return self.clone().start_or_auth_sse(options, is_auth_retry, step_up + 1).await;
-                }
+                insufficient_scope(response.headers())?;
             }
             let _ = response.bytes().await;
             if status == 405 {
@@ -560,7 +461,7 @@ impl HttpTransport {
             if self.intentional_abort(options.request_cancel.as_ref()) {
                 return;
             }
-            if let Err(error) = self.clone().start_or_auth_sse(options.clone(), false, 0).await {
+            if let Err(error) = self.clone().start_or_auth_sse(options.clone(), false).await {
                 if self.intentional_abort(options.request_cancel.as_ref()) {
                     return;
                 }
@@ -665,7 +566,7 @@ impl Transport for HttpTransport {
 
     async fn send(&self, message: Value, options: SendOptions) -> Result<(), McpError> {
         let this = self.this.upgrade().ok_or_else(|| McpError::other("Not connected"))?;
-        this.send_inner(message, options, false, 0).await
+        this.send_inner(message, options, false).await
     }
 
     async fn close(&self) {
@@ -843,11 +744,21 @@ mod tests {
         let mut headers: Headers = vec![("Accept".into(), "Text/Plain, application/json".into())];
         merge_accept(&mut headers, &["application/json", "text/event-stream"]);
         assert_eq!(header_get(&headers, "accept"), Some("text/plain, application/json, text/event-stream"));
-        assert_eq!(scope_union(&[Some("a b"), None, Some("b c")]).as_deref(), Some("a b c"));
-        assert!(is_strict_scope_superset(Some("a b"), Some("a")));
-        assert!(!is_strict_scope_superset(Some("a"), Some("a b")));
         assert_eq!(encode_param_value("plain"), "plain");
         assert_eq!(encode_param_value(" x"), "=?base64?IHg=?=");
         assert_eq!(media_type(Some("Application/JSON; charset=utf-8")).as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn insufficient_scope_needs_a_login() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(insufficient_scope(&headers).is_ok());
+        headers.insert("www-authenticate", r#"Bearer error="insufficient_scope", scope="admin""#.parse().unwrap());
+        match insufficient_scope(&headers) {
+            Err(McpError::InsufficientScope(message)) => assert_eq!(message, r#"Insufficient scope: required "admin""#),
+            other => panic!("{other:?}"),
+        }
+        headers.insert("www-authenticate", r#"Bearer error="insufficient_scope""#.parse().unwrap());
+        assert_eq!(insufficient_scope(&headers).unwrap_err().to_string(), "Insufficient scope");
     }
 }

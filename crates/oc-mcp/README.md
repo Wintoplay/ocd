@@ -19,10 +19,11 @@ behaviour match the TS SDK exactly.
 | `protocol` | SDK `Protocol`/`Client` | request correlation, timeouts, cancellation, legacy handshake, `2026-07-28` negotiation (an unanswered or closed probe on stdio means a legacy server or the SDK's "probed in place" failure), server requests, pagination; results are not checked against a tool's `outputSchema` (2.2.7) |
 | `tool_check` | `mcp/client.ts` `tools()` (2.2.7) | per-tool checks of `tools/list`: a tool that is not an object, has no non-empty name, no object `inputSchema` or an `inputSchema.type` other than `"object"` is skipped with the warning "skipping invalid MCP tool" `{server, tool, reason}`; the rest are copied keeping only fields of the right type (`inputSchema` with `type:"object"`, `properties` if a record, `required` if all strings; `icons` dropped) |
 | `transport::stdio` | `mcp/stdio.ts` | process-group spawn, newline framing (no overall buffer cap; a line over 16 MiB reports `MCP server {server} wrote more than 16 MiB to stdout without a message boundary` and closes the transport; blank lines are skipped and invalid ones reported as `Invalid MCP stdio message from {server}: {cause}`), stderr tail, kill sequence |
-| `transport::http` | SDK `StreamableHTTPClientTransport` | POST JSON/SSE, `Mcp-Session-Id`, GET stream, SSE resumption/reconnect, 401/403 OAuth, DELETE |
-| `oauth` | `mcp/oauth.ts`, SDK `auth.ts` | provider, discovery (RFC 9728/8414/OIDC), DCR (with `logo_uri`), CIMD, PKCE, refresh, credential mapping, `McpCredentialStore`, pasted redirect URLs (`Submitter`) |
-| `oauth::refresh` | `credential.ts` `Credential.refresh`, `mcp/oauth.ts` `lockedRefreshes` | a stored credential's refresh runs under the in-process share plus the file lock `credential-refresh:<id>`, re-reads the row (a refresh token the row no longer holds gets the stored tokens), has a 30 s limit including the body, discards its result when the row changed meanwhile; 429/5xx/network failures answer `503 temporarily_unavailable` so the login stays |
-| `oauth::callback`, `oauth::page` | `mcp/oauth.ts` `authorize`, `oauth/page.ts` | loopback callback server and HTML pages |
+| `transport::http` | SDK `StreamableHTTPClientTransport` | POST JSON/SSE, `Mcp-Session-Id`, GET stream, SSE resumption/reconnect, the auth provider's `token()`/`onUnauthorized` on 401 (one retry; `Server returned 401 after re-authentication` after it), a 403 `insufficient_scope` as `InsufficientScopeError` (needs_auth, no step-up from a connection, 2.3.0), DELETE |
+| `oauth` | `mcp/oauth.ts`, SDK `auth.ts` | the login's provider, discovery (RFC 9728/8414/OIDC), DCR (with `logo_uri`), CIMD, PKCE, credential mapping (with the login's `metadata.discovery`), `McpCredentialStore`, pasted redirect URLs (`Submitter`) |
+| `oauth::connect` | `mcp/oauth.ts` `connectProvider` (2.3.0) | `ConnectAuth`, a connection's `AuthProvider` over the credential the manager selected (the integration's last row), or anonymous without one (a 401 is `Unauthorized`, no OAuth request). `token()` refreshes a token that expires within 30 s first when the login saved its discovery (on failure the current token goes out); `on_unauthorized` refreshes while the row still holds the refused token. A rejected refresh (`invalid_grant`, `invalid_client`, `unauthorized_client`, no client information) removes the credential and refuses with `MCP server "<url>" requires user authorization`; an issuer mismatch refuses and keeps it; anything else fails the attempt with `temporarily_unavailable` (`Could not refresh the OAuth token: <code or message>`, never the server's body) |
+| `oauth::refresh` | `credential.ts` `Credential.refresh`, `mcp/oauth.ts` `exchange` | a stored credential's refresh runs under the in-process share plus the file lock `credential-refresh:<id>`, re-reads the row (`stale` false: another caller refreshed it, its row is returned), has a 30 s limit including the body, discards its result when the row changed meanwhile. `exchange` refreshes with the saved discovery (`metadata.discovery`), else discovers as the login did (following the 401's `resource_metadata`) and saves it; a configured `auth_server_metadata_url` is read on every refresh and saves none. Discovery naming another issuer than `metadata.issuer` sends nothing; token-endpoint 429/5xx become `HTTP <status>` |
+| `oauth::callback`, `oauth::page` | `mcp/oauth.ts` `authorize`, `oauth/page.ts` | loopback callback server and HTML pages; both `http://127.0.0.1:<port><path>` and `http://localhost:<port><path>` are registered (unless `redirect_uri` is configured) and the code is redeemed with the one whose `Host` the browser came back on (#63403) |
 | `naming` | `tool/mcp.ts`, `plugin/command.ts`, `tool/plugin/mcp-resource.ts`, `mcp/instructions.ts` | `<server>_<tool>` naming, tool output mapping, prompt slash commands, resource-tool strings, `<mcp_instructions>` rendering |
 | `cli` | `cli/.../handlers/mcp/*.ts` | `mcp list/add/auth/logout` strings and `format_list` |
 
@@ -100,15 +101,16 @@ pub struct StoredCredential { pub id: String, pub integration_id: String, pub la
   "expires": 1730000000000,
   "metadata": { "serverUrl": "<config url>", "tokenType": "Bearer",
                 "scope": "...", "issuer": "...",
+                "discovery": { "authorizationServer": "...", "resource": "..." },
                 "client": { "client_id": "...", "client_secret": "...", "issuer": "...", "...": "..." } } }
 ```
 
-`expires` is epoch ms (`now + expires_in*1000`), `0` = non-expiring; `scope`, `issuer` and
-`client` are optional. Connect-time refreshes go through `oauth::refresh` (the file lock lives in
-`McpCredentialStore::lock_root()`, core's `<state>/locks`) and rewrite the row keeping `client` and `issuer`; saving tokens
-is skipped when the row's refresh token is neither the presented one nor the new one;
-`invalid_grant` deletes the row only while it still holds the refresh token this connection
-presented. `MemoryCredentialStore` is an in-memory implementation.
+`expires` is epoch ms (`now + expires_in*1000`), `0` = non-expiring; `scope`, `issuer`, `discovery` and
+`client` are optional. `discovery` is where the login found its authorization server and which resource it named
+(absent when `auth_server_metadata_url` is configured). Connect-time refreshes go through `oauth::connect` and
+`oauth::refresh` (the file lock lives in `McpCredentialStore::lock_root()`, core's `<state>/locks`) and rewrite the
+row with the refreshed tokens, the issuer discovery found, the discovery used and the stored `client`; a rejected
+refresh removes the row. `MemoryCredentialStore` is an in-memory implementation.
 
 ## ElicitationHandler
 

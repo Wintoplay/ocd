@@ -1,12 +1,15 @@
-//! Interactive OAuth authorization (`authorize`, `oauth.ts:330-532`) with its loopback callback
+//! Interactive OAuth authorization (`authorize`, `core/src/mcp/oauth.ts`) with its loopback callback
 //! server on 127.0.0.1.
+//!
+//! Some authorization servers (Clerk) rewrite a 127.0.0.1 redirect to localhost before sending the browser back,
+//! and issue the code for the rewritten URI. Both are registered, and the token exchange repeats the one used.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body as AxumBody;
 use axum::extract::State;
-use axum::http::{Response, StatusCode, Uri};
+use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use base64::Engine;
 use parking_lot::Mutex;
 use rand::RngCore;
@@ -19,8 +22,8 @@ use super::discovery::{self, DiscoveryState, LATEST_PROTOCOL_VERSION, WwwAuthent
 use super::fetch::{Body, Fetcher, HttpRequest};
 use super::page::{self, CallbackPageOptions};
 use super::{
-    AuthOptions, CLIENT_METADATA_URL, McpCredentialStore, MemoryStore, Provider, Redirect, TokenStore, auth,
-    client_from_credential, configured_discovery, to_credential,
+    AuthOptions, CLIENT_METADATA_URL, Discovery, McpCredentialStore, MemoryStore, Provider, Redirect, TokenStore, auth,
+    client_from_credential, configured_discovery, select_resource, to_credential,
 };
 use crate::config::RemoteConfig;
 use crate::error::McpError;
@@ -91,7 +94,8 @@ impl Submitter {
         if param("state").as_deref() != Some(state.state.as_str()) {
             return Err("This URL belongs to a different sign-in".into());
         }
-        if let Some(error) = param("error_description").or_else(|| param("error")) {
+        // `error_description ?? error`: an empty description is no error.
+        if let Some(error) = param("error_description").or_else(|| param("error")).filter(|e| !e.is_empty()) {
             if let Some(sender) = state.code.lock().take() {
                 let _ = sender.send(Err(error));
             }
@@ -102,7 +106,7 @@ impl Submitter {
         };
         tracing::info!(fields = %state.fields, "mcp oauth redirect pasted");
         if let Some(sender) = state.code.lock().take() {
-            let _ = sender.send(Ok(CodeMessage { code, iss: param("iss"), respond: None }));
+            let _ = sender.send(Ok(CodeMessage { code, iss: param("iss"), host: None, respond: None }));
         }
         Ok(())
     }
@@ -111,6 +115,8 @@ impl Submitter {
 struct CodeMessage {
     code: String,
     iss: Option<String>,
+    /// The `Host` the browser's redirect reached; absent for a pasted URL.
+    host: Option<String>,
     /// The browser's held callback response; absent for a pasted URL.
     respond: Option<oneshot::Sender<(u16, String)>>,
 }
@@ -131,7 +137,7 @@ fn html_response(status: u16, html: String) -> Response<AxumBody> {
         .unwrap()
 }
 
-async fn handle_callback(State(state): State<Arc<CallbackState>>, uri: Uri) -> Response<AxumBody> {
+async fn handle_callback(State(state): State<Arc<CallbackState>>, uri: Uri, headers: HeaderMap) -> Response<AxumBody> {
     let url = Url::parse("http://127.0.0.1").unwrap().join(&uri.to_string()).unwrap_or_else(|_| Url::parse("http://127.0.0.1/").unwrap());
     if url.path() != state.path {
         return Response::builder().status(StatusCode::NOT_FOUND).body(AxumBody::from("Not found")).unwrap();
@@ -145,7 +151,7 @@ async fn handle_callback(State(state): State<Arc<CallbackState>>, uri: Uri) -> R
         }
         html_response(400, page::error(&reason, &options))
     };
-    if let Some(error) = param("error_description").or_else(|| param("error")) {
+    if let Some(error) = param("error_description").or_else(|| param("error")).filter(|e| !e.is_empty()) {
         return fail(error, "authorization_error");
     }
     let returned = param("state");
@@ -168,7 +174,8 @@ async fn handle_callback(State(state): State<Arc<CallbackState>>, uri: Uri) -> R
     };
     // The page waits for the token exchange so the browser never reports success for a rejected code.
     let (respond, response) = oneshot::channel();
-    if sender.send(Ok(CodeMessage { code, iss: param("iss"), respond: Some(respond) })).is_err() {
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).map(String::from);
+    if sender.send(Ok(CodeMessage { code, iss: param("iss"), host, respond: Some(respond) })).is_err() {
         return Response::builder()
             .status(StatusCode::CONFLICT)
             .body(AxumBody::from("OAuth callback already received"))
@@ -289,15 +296,29 @@ async fn authorize_inner(input: AuthorizeOptions, fields: String) -> Result<Auth
     let authorization_url: Arc<Mutex<Option<Url>>> = Arc::new(Mutex::new(None));
     let captured = authorization_url.clone();
     let open_fields = fields.clone();
-    let redirect_url = oauth
-        .as_ref()
-        .and_then(|o| o.redirect_uri.clone())
-        .unwrap_or_else(|| format!("http://127.0.0.1:{port}{redirect_path}"));
+    // Where the login found its authorization server and which resource it named, saved with the credential so a
+    // refresh need not discover them. A configured metadata URL is read on every refresh instead.
+    let saved_discovery = match oauth.as_ref().and_then(|o| o.auth_server_metadata_url.as_ref()) {
+        Some(_) => None,
+        None => Some((
+            discovered.authorization_server_url.clone(),
+            select_resource(&input.config, discovered.resource_metadata.as_ref().map(|r| r.resource()))
+                .map(|u| u.to_string()),
+        )),
+    };
+    let loopback = move |host: &str| format!("http://{host}:{port}{redirect_path}");
+    let configured_redirect = oauth.as_ref().and_then(|o| o.redirect_uri.clone());
+    let registered = match &configured_redirect {
+        Some(uri) => vec![uri.clone()],
+        None => vec![loopback("127.0.0.1"), loopback("localhost")],
+    };
+    let redirect_url = Arc::new(Mutex::new(configured_redirect.clone().unwrap_or_else(|| loopback("127.0.0.1"))));
     let provider = Provider::new(
         input.config.clone(),
         store.clone(),
         Some(Redirect {
-            url: redirect_url,
+            url: redirect_url.clone(),
+            registered,
             state,
             open: Box::new(move |url| {
                 *captured.lock() = Some(url);
@@ -330,6 +351,9 @@ async fn authorize_inner(input: AuthorizeOptions, fields: String) -> Result<Auth
         let outcome = match received {
             Err(reason) => Err(reason),
             Ok(message) => {
+                if configured_redirect.is_none() && message.host.as_deref() == Some(format!("localhost:{port}").as_str()) {
+                    *redirect_url.lock() = loopback("localhost");
+                }
                 let exchange = async {
                     auth(
                         &provider,
@@ -348,7 +372,11 @@ async fn authorize_inner(input: AuthorizeOptions, fields: String) -> Result<Auth
                     };
                     let client = store.client_information().await?;
                     tracing::info!(fields = %fields, hasRefreshToken = tokens.refresh_token.is_some(), expiresIn = ?tokens.expires_in, "mcp oauth authorization completed");
-                    Ok(to_credential(&method_id, &config_url, &tokens, client.as_ref()))
+                    let discovery = match saved_discovery {
+                        Some((authorization_server, resource)) => Some(Discovery { authorization_server, resource: resource? }),
+                        None => None,
+                    };
+                    Ok(to_credential(&method_id, &config_url, &tokens, client.as_ref(), discovery.as_ref()))
                 }
                 .await;
                 let options = CallbackPageOptions::provider(name.clone());

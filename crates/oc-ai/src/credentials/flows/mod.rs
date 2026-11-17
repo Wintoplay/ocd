@@ -49,10 +49,24 @@ pub(crate) async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
-/// A redirect received by a loopback server whose HTTP response is sent after the token exchange.
+/// A redirect received by a loopback server whose HTTP response is sent after the token exchange. A pasted redirect
+/// has no pending browser request to answer.
 pub(crate) struct Received<T> {
     pub value: T,
-    pub responder: oneshot::Sender<Response>,
+    pub responder: Option<oneshot::Sender<Response>>,
+}
+
+impl<T> Received<T> {
+    pub fn pasted(value: T) -> Self {
+        Self { value, responder: None }
+    }
+
+    /// Answers the browser's pending callback request, if there is one.
+    pub fn respond(responder: Option<oneshot::Sender<Response>>, response: Response) {
+        if let Some(responder) = responder {
+            let _ = responder.send(response);
+        }
+    }
 }
 
 /// Awaits a deferred loopback result; a closed server (cancelled scope) fails the attempt.

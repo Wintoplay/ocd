@@ -94,6 +94,17 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-17: 2.3.0 CATCH-UP, MCP OAUTH AND PASTED PROVIDER SIGN-IN (#63028, #63403, #63315): a connection's auth is
+  `oc_mcp::oauth::ConnectAuth` (upstream's `AuthProvider`: `token()` + `onUnauthorized`) over the credential the
+  manager selected; the SDK provider (`oauth::Provider`, `auth()`) is used only by `authorize`. `oauth::refresh::exchange`
+  refreshes with the login's `metadata.discovery` (saved by `authorize` and by the first refresh), 30 s ahead of
+  expiry from `token()`, refuses another issuer, removes rejected credentials; the transport turns 403
+  `insufficient_scope` into `McpError::InsufficientScope` (needs_auth). The fetch-level refresh share
+  (`LockedRefresh`, `REFRESHES`) is gone with upstream's. Logins register both loopback redirects and redeem with the
+  `Host` the browser came back on. `oc_ai::credentials::redirect` is `OauthRedirect`; ChatGPT, Codex browser,
+  GitLab, Poe and Snowflake sign-ins have `submit` (`paste: true`); `Received.responder` is optional. Plugin OAuth
+  passes a `submit` handle through (promise plugins need the sidecar rebuilt on 2.3.0's plugin package). Parity group
+  `auth230`.
 - 2026-11-17: 2.3.0 CATCH-UP, API/CONFIG FOUNDATION (first batch; ocd still reports 2.2.7 until the catch-up ends):
   `assets/openapi.json` is v2.3.0's (170 operations, 501 schemas: `session.step.first-token`,
   `experimental.mcp.event`, `Tool.FreeformFormat`, `Provider.Tls`), `generated.rs` regenerated with `gen.py`

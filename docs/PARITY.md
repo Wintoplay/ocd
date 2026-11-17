@@ -17,7 +17,7 @@ export PATH=$HOME/.cargo/bin:$PATH
 cargo build -p ocd                          # debug build is enough
 python3 scripts/parity.py --list            # scenarios and groups
 python3 scripts/parity.py -q                # everything (about 25 minutes with a debug build)
-python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230
+python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230 auth230
 python3 scripts/parity.py 'loop_*' cli_run  # by name or glob
 ```
 
@@ -106,7 +106,7 @@ find VM differences: the VM's standard library is partly program code, so some e
 imports changed. ocd follows them (`crates/oc-codemode/tests/upstream_2_3_0.rs`) except the VM's lazy check of an
 iterator's `next`.
 
-## Scenarios (221)
+## Scenarios (226)
 
 | group | scenarios |
 |---|---|
@@ -146,9 +146,19 @@ iterator's `next`.
 | acp | `opencode acp` over stdio (`scripts/parity/acp227.py`, a minimal ACP client with the child-session capability that answers permission requests `once`): a background subagent outliving the root turn, outliving a cancelled turn with its `read: ask` permission request, and a session closed while it runs. Every JSON-RPC message the client received is compared in three ordered lists (the root's updates with responses and requests, the child updates, everything after the prompt response), plus the root's and the child's model requests each in order: the server publishes a background child's start concurrently with the root's tool result, so how those interleave during the turn is a race in both binaries |
 | local | the LM Studio, Ollama and vLLM discovery plugins against mock servers (`scripts/parity/local.py`, ephemeral ports shared by both runs, configured `baseURL`s only): the discovery requests (paths, bearer keys, Ollama's `/api/show` bodies), the provider, model and integration lists they produce (embedding, foreign and failing models left out, contexts, families, capabilities), `apiKey` and `/api`/`/api/v1` base URLs, a chat through a discovered vLLM model (path, key, model), a 30 s outage keeping the inventory and the next answer replacing it, a config change moving LM Studio to another server and key and dropping vLLM's endpoint; the `*.updated` counts of the boot and of each change |
 | api230 | 2.3.0's config keys: the flags `shell_timeout_background` and `mcp_events`, the deprecated `codemode_vm` and the retired `codemodeVm` alias, provider `settings.tls` (echoed by `/api/config` and `/api/provider`, never a model setting; malformed ones invalidate the provider), model `capabilities.freeform` in config (and on the listed model), and the event filter with the new public types |
+| auth230 | 2.3.0 MCP OAuth and provider sign-in (`scripts/parity/auth230.py`, on mcp227's fake server): a token due within 30 s refreshed with the login's saved discovery before it is sent, a login whose issuer discovery no longer names (no refresh sent, login kept), a 403 `insufficient_scope` (needs_auth, no step-up), both loopback redirects registered and the code redeemed with the localhost one the browser came back on (the saved discovery included); the Poe, Snowflake, Codex browser and ChatGPT sign-ins with `paste: true` and their pasted-URL checks (Poe's issuer and state-echo rules), using only pastes that end or keep the attempt before any token request |
 | freeform230 | 2.3.0 freeform tool input against the mock's Responses and Chat endpoints (`scripts/parity/freeform230.py`; the mock streams `custom_tool_call` items): `execute` and `patch` as custom tools (free text, and the Lark patch grammar) on a model configured with `capabilities.freeform`, custom calls run with their object input, the stored parts, the files the patch wrote, and the replay of the calls as `custom_tool_call`/`custom_tool_call_output` in later requests; the formats a model lists (`["text"]`, `[]`, unset) deciding which tools go out custom; `openai/gpt-5.4-mini` freeform from the bundled models.dev catalog (and its `/api/model` capabilities); Chat Completions custom tools and a streamed `custom` call. Every request body (custom tools in full, function tools as one digest each, input/messages in full) is compared |
 
 ## Results
+
+**MCP OAuth and pasted provider sign-in (debug build, 2026-11-17):** groups `mcp227` and the new `auth230` against
+the local v2.3.0 build (`up-dist-2.3.0`): `auth230` **5 of 5 identical** (refresh ahead of expiry, issuer mismatch,
+insufficient scope, the localhost redirect, the provider pastes) and `mcp227` 4 of 5 identical, the logins now saving
+`metadata.discovery` as upstream's do; `mcp227_slow_server_misses_the_first_step` differs only by `time.firstToken`
+and `session.step.first-token` (P3). `mcp227_oauth_refresh_unavailable` now records the status after the
+`credential.switched` reconnect settles: before it, upstream sometimes still showed the refused attempt's message.
+In one run of four, upstream's `auth230_oauth_refresh_ahead` listed the login unrefreshed (`old`/`ref-1`) half a
+second after connecting with the refreshed token; the scenario now waits 1.5 s.
 
 **Freeform tool input (debug build, 2026-11-17):** the new group `freeform230` against the local v2.3.0 build
 (`up-dist-2.3.0`), with `api230` now comparing the listed models' `capabilities`: `api230_config_keys` identical; in

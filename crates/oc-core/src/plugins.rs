@@ -2766,6 +2766,24 @@ impl oc_ai::credentials::OAuthMethod for PluginOAuth {
         let url = out.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
         let instructions = out.get("instructions").and_then(Value::as_str).unwrap_or_default().to_string();
         let expires_at = out.get("expiresAt").and_then(Value::as_u64);
+        // An `auto` authorization may accept the redirect URL a user pasted (`submit`, #63315); a rejected paste keeps
+        // its own error and the attempt waiting.
+        let submit = match out.get("submit").and_then(oc_plugin::protocol::function_handle) {
+            Some(handle) if out.get("mode").and_then(Value::as_str) != Some("code") => {
+                let (host, location, attempt, handle) = (host.clone(), location.clone(), attempt.clone(), handle.to_string());
+                let submit: oc_ai::credentials::integration::SubmitFn = Arc::new(move |pasted: String| {
+                    let (host, location, attempt, handle) = (host.clone(), location.clone(), attempt.clone(), handle.clone());
+                    Box::pin(async move {
+                        host.invoke(&location, &handle, vec![Value::String(pasted)], Some(&attempt))
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| flow_error(e).message)
+                    })
+                });
+                Some(submit)
+            }
+            _ => None,
+        };
         let callback = if out.get("mode").and_then(Value::as_str) == Some("code") {
             oc_ai::credentials::OAuthCallback::Code(Box::new(move |code: String| {
                 Box::pin(async move { oauth_value(host.invoke(&location, &callback, vec![Value::String(code)], Some(&attempt)).await.map_err(flow_error)?) })
@@ -2775,7 +2793,7 @@ impl oc_ai::credentials::OAuthMethod for PluginOAuth {
                 oauth_value(host.invoke(&location, &callback, vec![], Some(&attempt)).await.map_err(flow_error)?)
             }))
         };
-        Ok(oc_ai::credentials::AuthorizeResult { url, instructions, expires_at, callback, submit: None })
+        Ok(oc_ai::credentials::AuthorizeResult { url, instructions, expires_at, callback, submit })
     }
 
     fn can_refresh(&self) -> bool {

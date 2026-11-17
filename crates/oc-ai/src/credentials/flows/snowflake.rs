@@ -8,6 +8,7 @@ use crate::credentials::http::{FlowContext, str_field, transport};
 use crate::credentials::integration::{AuthorizeResult, FlowError, FlowResult, OAuthMethod, OAuthMethodInfo};
 use crate::credentials::page::{self, CallbackPageOptions};
 use crate::credentials::pkce;
+use crate::credentials::redirect;
 use crate::credentials::{EnvSource, Metadata, OAuthValue, now_ms};
 use async_trait::async_trait;
 use base64::Engine;
@@ -156,6 +157,7 @@ impl OAuthMethod for SnowflakeBrowser {
         let pkce = pkce::base64_pkce(48);
         let state = pkce::random_state();
         let (once, rx) = Once::<FlowResult<String>>::new();
+        let submit = redirect::submit(state.clone(), once.clone(), |code, _| code);
         let expected = state.clone();
         let handler = sync_handler(move |request| {
             if request.path != "/" {
@@ -218,7 +220,7 @@ impl OAuthMethod for SnowflakeBrowser {
             )
             .await
         };
-        Ok(AuthorizeResult::auto(url, "Complete Snowflake sign-in in your browser.", callback))
+        Ok(AuthorizeResult::auto(url, "Complete Snowflake sign-in in your browser.", callback).with_submit(submit))
     }
 
     fn can_refresh(&self) -> bool {

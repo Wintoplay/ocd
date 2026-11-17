@@ -2,6 +2,7 @@
 //! orchestrator it relies on).
 
 pub mod callback;
+pub mod connect;
 pub mod discovery;
 pub mod fetch;
 pub mod page;
@@ -21,6 +22,7 @@ use url::Url;
 use crate::config::RemoteConfig;
 use crate::error::McpError;
 pub use callback::{AuthorizeHandle, AuthorizeOptions, Submitter, authorize};
+pub use connect::{ConnectAuth, connect_provider};
 use discovery::{AuthServerMetadata, DiscoveryState, ResourceMetadata};
 use fetch::{Body, Fetcher, HttpRequest};
 
@@ -49,11 +51,14 @@ pub struct StoredCredential {
 ///   "metadata": { "serverUrl": "<config url>", "tokenType": "Bearer",
 ///                 "scope": "...",          // optional
 ///                 "issuer": "...",         // optional, the authorization server issuer
+///                 "discovery": { "authorizationServer": "...", "resource": "..." },  // optional
 ///                 "client": { "client_id": "...", "client_secret": "...", "issuer": "...", ... } } }
 /// ```
 ///
 /// `metadata.client` is the (dynamically registered / CIMD) client information as returned by
-/// the authorization server, stamped with `issuer`.
+/// the authorization server, stamped with `issuer`. `metadata.discovery` is where the login found its
+/// authorization server and which resource it named, so a refresh need not discover them (absent when
+/// `oauth.auth_server_metadata_url` is configured: that document is read on every refresh).
 #[async_trait]
 pub trait McpCredentialStore: Send + Sync {
     /// All credentials of an integration in list order; MCP uses the last one (`list().at(-1)`).
@@ -158,8 +163,36 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// `toCredential` (`oauth.ts:238-258`).
-pub fn to_credential(method_id: &str, server_url: &str, tokens: &Tokens, client: Option<&Map<String, Value>>) -> Value {
+/// Where the login found its authorization server and which resource it named (`metadata.discovery`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovery {
+    pub authorization_server: String,
+    pub resource: String,
+}
+
+impl Discovery {
+    fn to_json(&self) -> Value {
+        json!({"authorizationServer": self.authorization_server, "resource": self.resource})
+    }
+}
+
+/// `discoveryFromCredential`: both fields must be strings, else there is none.
+pub fn discovery_from_credential(credential: &Value) -> Option<Discovery> {
+    let discovery = credential.get("metadata")?.get("discovery")?;
+    Some(Discovery {
+        authorization_server: discovery.get("authorizationServer")?.as_str()?.to_string(),
+        resource: discovery.get("resource")?.as_str()?.to_string(),
+    })
+}
+
+/// `toCredential`.
+pub fn to_credential(
+    method_id: &str,
+    server_url: &str,
+    tokens: &Tokens,
+    client: Option<&Map<String, Value>>,
+    discovery: Option<&Discovery>,
+) -> Value {
     let mut metadata = Map::new();
     metadata.insert("serverUrl".into(), json!(server_url));
     metadata.insert("tokenType".into(), json!(tokens.token_type));
@@ -168,6 +201,9 @@ pub fn to_credential(method_id: &str, server_url: &str, tokens: &Tokens, client:
     }
     if let Some(issuer) = tokens.issuer.as_ref().filter(|s| !s.is_empty()) {
         metadata.insert("issuer".into(), json!(issuer));
+    }
+    if let Some(discovery) = discovery {
+        metadata.insert("discovery".into(), discovery.to_json());
     }
     if let Some(client) = client {
         metadata.insert("client".into(), Value::Object(client.clone()));
@@ -255,86 +291,13 @@ impl TokenStore for MemoryStore {
     }
 }
 
-fn store_error(error: anyhow::Error) -> McpError {
-    McpError::other(error.to_string())
-}
-
-/// The connect-time store over the latest credential row (`connectProvider`, `oauth.ts:272-328`).
-pub struct CredentialStore {
-    credentials: Arc<dyn McpCredentialStore>,
-    id: String,
-    method_id: String,
-    server_url: String,
-    presented: Mutex<String>,
-}
-
-impl CredentialStore {
-    async fn read(&self) -> Result<Option<Value>, McpError> {
-        let row = self.credentials.get(&self.id).await.map_err(store_error)?;
-        Ok(row.map(|r| r.value).filter(|v| v.get("type").and_then(Value::as_str) == Some("oauth")))
-    }
-}
-
-#[async_trait]
-impl TokenStore for CredentialStore {
-    async fn tokens(&self) -> Result<Option<Tokens>, McpError> {
-        let Some(oauth) = self.read().await? else { return Ok(None) };
-        *self.presented.lock() = oauth.get("refresh").and_then(Value::as_str).unwrap_or("").to_string();
-        Ok(Some(to_tokens(&oauth)))
-    }
-    async fn save_tokens(&self, tokens: Tokens) -> Result<(), McpError> {
-        let previous = self.read().await?;
-        // Another connection rotated past the token this one presented; its tokens win.
-        if let Some(previous) = &previous {
-            let stored = previous.get("refresh").and_then(Value::as_str).unwrap_or("");
-            if stored != *self.presented.lock() && stored != tokens.refresh_token.as_deref().unwrap_or("") {
-                return Ok(());
-            }
-        }
-        let client = previous.as_ref().and_then(client_from_credential);
-        let value = to_credential(&self.method_id, &self.server_url, &tokens, client.as_ref());
-        *self.presented.lock() = value["refresh"].as_str().unwrap_or("").to_string();
-        self.credentials.update(&self.id, value).await.map_err(store_error)
-    }
-    async fn client_information(&self) -> Result<Option<Map<String, Value>>, McpError> {
-        Ok(self.read().await?.as_ref().and_then(client_from_credential))
-    }
-    async fn save_client_information(&self, info: Map<String, Value>) -> Result<(), McpError> {
-        let Some(mut oauth) = self.read().await? else { return Ok(()) };
-        let mut metadata = oauth.get("metadata").and_then(Value::as_object).cloned().unwrap_or_default();
-        metadata.insert("client".into(), Value::Object(info));
-        oauth["metadata"] = Value::Object(metadata);
-        self.credentials.update(&self.id, oauth).await.map_err(store_error)
-    }
-    async fn code_verifier(&self) -> Result<Option<String>, McpError> {
-        Ok(None)
-    }
-    async fn save_code_verifier(&self, _verifier: String) -> Result<(), McpError> {
-        Ok(())
-    }
-    async fn invalidate(&self, scope: &str) -> Option<Result<(), McpError>> {
-        if scope == "verifier" || scope == "discovery" {
-            return Some(Ok(()));
-        }
-        Some(
-            async {
-                let Some(oauth) = self.read().await? else { return Ok(()) };
-                // Refresh tokens rotate and the row is shared across connections: only drop it while
-                // it still holds ours.
-                if oauth.get("refresh").and_then(Value::as_str).unwrap_or("") != *self.presented.lock() {
-                    return Ok(());
-                }
-                tracing::warn!(credentialID = %self.id, scope = %scope, "mcp oauth credential invalidated");
-                self.credentials.remove(&self.id).await.map_err(store_error)
-            }
-            .await,
-        )
-    }
-}
 
 /// Redirect settings for an interactive authorization attempt.
 pub struct Redirect {
-    pub url: String,
+    /// The redirect URI the token exchange repeats: the loopback host the browser came back on.
+    pub url: Arc<Mutex<String>>,
+    /// The redirect URIs registered for the client (`redirect_uris`).
+    pub registered: Vec<String>,
     pub state: String,
     /// Captures the authorization URL (`open`).
     pub open: Box<dyn Fn(Url) + Send + Sync>,
@@ -347,7 +310,7 @@ pub struct Provider {
     redirect: Option<Redirect>,
     client_metadata_url: Option<String>,
     discovery: tokio::sync::Mutex<Option<DiscoveryState>>,
-    redirect_url: String,
+    redirect_url: Arc<Mutex<String>>,
     identity: Url,
     static_client: Option<Map<String, Value>>,
     fetch: Fetcher,
@@ -372,11 +335,14 @@ impl Provider {
             m
         });
         // A missing redirectUrl selects the client-credentials grant in the SDK, so connect still names one.
-        let redirect_url = redirect
-            .as_ref()
-            .map(|r| r.url.clone())
-            .or_else(|| oauth.as_ref().and_then(|o| o.redirect_uri.clone()))
-            .unwrap_or_else(|| "http://127.0.0.1/callback".to_string());
+        let redirect_url = redirect.as_ref().map(|r| r.url.clone()).unwrap_or_else(|| {
+            Arc::new(Mutex::new(
+                oauth
+                    .as_ref()
+                    .and_then(|o| o.redirect_uri.clone())
+                    .unwrap_or_else(|| "http://127.0.0.1/callback".to_string()),
+            ))
+        });
         let mut identity =
             Url::parse(&config.url).map_err(|_| McpError::other(format!("Invalid URL: {}", config.url)))?;
         identity.set_fragment(None);
@@ -393,17 +359,12 @@ impl Provider {
         })
     }
 
-    pub fn redirect_url(&self) -> &str {
-        &self.redirect_url
+    pub fn redirect_url(&self) -> String {
+        self.redirect_url.lock().clone()
     }
 
     pub fn store(&self) -> &Arc<dyn TokenStore> {
         &self.store
-    }
-
-    /// The locked refresh of a provider over a stored credential, for the connection's fetch (`lockedRefreshes`).
-    pub fn locked_refresh(&self) -> Option<refresh::LockedRefresh> {
-        self.fetch.refresh.clone()
     }
 
     fn refuse(&self, what: &str) -> McpError {
@@ -424,22 +385,18 @@ impl Provider {
 
     /// `validateResourceURL`.
     pub fn validate_resource_url(&self, resource: Option<&str>) -> Result<Url, McpError> {
-        let Some(resource) = resource else { return Ok(self.identity.clone()) };
-        let configured = Url::parse(resource).map_err(|_| McpError::other(format!("Invalid URL: {resource}")))?;
-        if !discovery::check_resource_allowed(&self.identity, &configured) {
-            return Err(McpError::other(format!("Protected resource {resource} does not cover {}", self.identity)));
-        }
-        if configured.origin() == self.identity.origin() && configured.path() == self.identity.path() {
-            return Ok(self.identity.clone());
-        }
-        Ok(configured)
+        select_resource_for(&self.identity, resource)
     }
 
     /// `clientMetadata` (RFC 7591 body before SDK defaults).
     pub fn client_metadata(&self) -> Map<String, Value> {
         let oauth = self.config.oauth_config();
         let mut m = Map::new();
-        m.insert("redirect_uris".into(), json!([self.redirect_url]));
+        let registered = match &self.redirect {
+            Some(redirect) => redirect.registered.clone(),
+            None => vec![self.redirect_url()],
+        };
+        m.insert("redirect_uris".into(), json!(registered));
         m.insert("client_name".into(), json!("opencode"));
         m.insert("client_uri".into(), json!("https://opencode.ai"));
         m.insert("logo_uri".into(), json!("https://opencode.ai/web-app-manifest-512x512.png"));
@@ -494,6 +451,29 @@ impl Provider {
     fn state(&self) -> Option<String> {
         self.redirect.as_ref().map(|r| r.state.clone())
     }
+}
+
+/// `selectResource`: the SDK sends no RFC 8707 resource when the server publishes no resource metadata; some
+/// authorization servers require one, so fall back to the configured URL.
+pub fn select_resource(config: &RemoteConfig, resource: Option<&str>) -> Result<Url, McpError> {
+    let mut identity = Url::parse(&config.url).map_err(|_| McpError::other(format!("Invalid URL: {}", config.url)))?;
+    identity.set_fragment(None);
+    select_resource_for(&identity, resource)
+}
+
+fn select_resource_for(identity: &Url, resource: Option<&str>) -> Result<Url, McpError> {
+    let Some(resource) = resource else { return Ok(identity.clone()) };
+    let canonical = Url::parse(resource).map_err(|_| McpError::other(format!("Invalid URL: {resource}")))?;
+    if !discovery::check_resource_allowed(identity, &canonical) {
+        return Err(McpError::other(format!("Protected resource {resource} does not cover {identity}")));
+    }
+    // The transport dials the configured URL with extra query parameters and some servers echo that back as the
+    // resource. Query is transport detail, not identity: the token stays bound to the configured URL so a later
+    // refresh names the same resource the login did.
+    if canonical.origin() == identity.origin() && canonical.path() == identity.path() {
+        return Ok(identity.clone());
+    }
+    Ok(canonical)
 }
 
 /// `configuredDiscovery`: a configured `auth_server_metadata_url` stands in for RFC 9728 discovery.
@@ -772,7 +752,7 @@ async fn auth_internal(provider: &Provider, options: &AuthOptions, fetch: &Fetch
             ("grant_type".to_string(), "authorization_code".to_string()),
             ("code".to_string(), code.clone()),
             ("code_verifier".to_string(), verifier),
-            ("redirect_uri".to_string(), provider.redirect_url.clone()),
+            ("redirect_uri".to_string(), provider.redirect_url()),
         ];
         let mut tokens = token_request(fetch, &authorization_server_url, metadata.as_ref(), params, &client_info, &resource).await?;
         tokens.issuer = Some(issuer.clone());
@@ -823,7 +803,7 @@ async fn auth_internal(provider: &Provider, options: &AuthOptions, fetch: &Fetch
         &authorization_server_url,
         metadata.as_ref(),
         &client,
-        &provider.redirect_url,
+        &provider.redirect_url(),
         scope.as_deref(),
         provider.state().as_deref(),
         &resource,
@@ -948,7 +928,7 @@ fn select_auth_method(client: &Map<String, Value>, supported: &[String]) -> &'st
 }
 
 /// `executeTokenRequest`.
-async fn token_request(
+pub(crate) async fn token_request(
     fetch: &Fetcher,
     authorization_server_url: &str,
     metadata: Option<&AuthServerMetadata>,
@@ -1052,42 +1032,6 @@ async fn register_client(
     }
 }
 
-/// `connectProvider`: the provider used when connecting. With no stored OAuth credential it is a
-/// provider over an empty memory store without a redirect, so a 401 ends in `needs_auth`. With one, its
-/// refreshes run under the credential lock ([`refresh::LockedRefresh`]): every process and Location sharing the
-/// database refreshes the row one at a time, and a caller holding a refresh token the row no longer has gets the
-/// stored tokens instead of spending it (servers that rotate refresh tokens revoke the grant on reuse).
-pub async fn connect_provider(
-    config: &RemoteConfig,
-    integration_id: &str,
-    credentials: Option<&Arc<dyn McpCredentialStore>>,
-    fetch: Fetcher,
-) -> Result<Provider, McpError> {
-    let found = match credentials {
-        Some(store) => store.list(integration_id).await.map_err(store_error)?.pop(),
-        None => None,
-    };
-    let Some(found) = found.filter(|f| f.value.get("type").and_then(Value::as_str) == Some("oauth")) else {
-        return Provider::new(config.clone(), Arc::new(MemoryStore::default()), None, None, None, fetch);
-    };
-    let credentials = credentials.unwrap().clone();
-    let method_id = found.value.get("methodID").and_then(Value::as_str).unwrap_or("").to_string();
-    let locked = refresh::LockedRefresh {
-        credentials: credentials.clone(),
-        id: found.id.clone(),
-        method_id: method_id.clone(),
-        server_url: config.url.clone(),
-    };
-    let store = CredentialStore {
-        credentials,
-        id: found.id.clone(),
-        method_id,
-        server_url: config.url.clone(),
-        presented: Mutex::new(found.value.get("refresh").and_then(Value::as_str).unwrap_or("").to_string()),
-    };
-    Provider::new(config.clone(), Arc::new(store), None, None, None, fetch.with_refresh(Some(locked)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,56 +1057,26 @@ mod tests {
         };
         let mut client = Map::new();
         client.insert("client_id".into(), json!("cid"));
-        let value = to_credential("mcp_x", "https://x.test", &tokens, Some(&client));
+        let discovery = Discovery { authorization_server: "https://as.test/".into(), resource: "https://x.test/".into() };
+        let value = to_credential("mcp_x", "https://x.test", &tokens, Some(&client), Some(&discovery));
         let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         assert_eq!(keys, vec!["type", "methodID", "access", "refresh", "expires", "metadata"]);
         let meta_keys: Vec<_> = value["metadata"].as_object().unwrap().keys().cloned().collect();
-        assert_eq!(meta_keys, vec!["serverUrl", "tokenType", "scope", "issuer", "client"]);
+        assert_eq!(meta_keys, vec!["serverUrl", "tokenType", "scope", "issuer", "discovery", "client"]);
+        assert_eq!(discovery_from_credential(&value), Some(discovery));
+        // A discovery without both fields is no discovery.
+        assert_eq!(discovery_from_credential(&json!({"metadata": {"discovery": {"authorizationServer": "x"}}})), None);
         assert!(value["expires"].as_u64().unwrap() > now_ms());
         let back = to_tokens(&value);
         assert_eq!(back.access_token, "a");
         assert_eq!(back.refresh_token.as_deref(), Some("r"));
         assert!(back.expires_in.unwrap() >= 3598.0);
         assert_eq!(client_from_credential(&value).unwrap()["client_id"], "cid");
-        let non_expiring = to_credential("m", "u", &Tokens { access_token: "x".into(), token_type: "bearer".into(), ..Default::default() }, None);
+        let non_expiring = to_credential("m", "u", &Tokens { access_token: "x".into(), token_type: "bearer".into(), ..Default::default() }, None, None);
         assert_eq!(non_expiring["expires"], 0);
         assert_eq!(non_expiring["refresh"], "");
         let t = to_tokens(&non_expiring);
         assert!(t.expires_in.is_none() && t.refresh_token.is_none());
-    }
-
-    /// `saveTokens` (#62827): another connection rotated past the refresh token this one presented, so its tokens win.
-    #[tokio::test]
-    async fn saving_tokens_skips_a_login_another_connection_rotated() {
-        let rows: Arc<dyn McpCredentialStore> = Arc::new(MemoryCredentialStore::default());
-        let id = rows
-            .create("mcp_x", "x", json!({"type": "oauth", "methodID": "mcp_x", "access": "a1", "refresh": "r1", "expires": 0, "metadata": {"client": {"client_id": "c"}}}))
-            .await
-            .unwrap();
-        let store = CredentialStore {
-            credentials: rows.clone(),
-            id: id.clone(),
-            method_id: "mcp_x".into(),
-            server_url: "https://x.test/mcp".into(),
-            presented: Mutex::new("r1".into()),
-        };
-        let tokens = |access: &str, refresh: &str| Tokens {
-            access_token: access.into(),
-            token_type: "Bearer".into(),
-            refresh_token: Some(refresh.into()),
-            ..Default::default()
-        };
-        // Another connection stores r2.
-        rows.update(&id, json!({"type": "oauth", "methodID": "mcp_x", "access": "a2", "refresh": "r2", "expires": 0})).await.unwrap();
-        store.save_tokens(tokens("a3", "r3")).await.unwrap();
-        assert_eq!(rows.get(&id).await.unwrap().unwrap().value["access"], "a2");
-        // Saving the stored refresh token's own tokens (a refresh another holder ran) goes through.
-        store.save_tokens(tokens("a2b", "r2")).await.unwrap();
-        assert_eq!(rows.get(&id).await.unwrap().unwrap().value["access"], "a2b");
-        // So does a save while the row still holds the token this connection presented.
-        store.save_tokens(tokens("a4", "r4")).await.unwrap();
-        let row = rows.get(&id).await.unwrap().unwrap().value;
-        assert_eq!((row["access"].as_str(), row["refresh"].as_str()), (Some("a4"), Some("r4")));
     }
 
     #[test]

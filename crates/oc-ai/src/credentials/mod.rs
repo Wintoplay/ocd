@@ -20,6 +20,7 @@ pub mod integration;
 pub mod kv;
 pub mod page;
 pub mod pkce;
+pub mod redirect;
 pub mod store;
 pub mod wellknown;
 

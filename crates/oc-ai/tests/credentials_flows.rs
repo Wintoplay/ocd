@@ -873,3 +873,167 @@ fn rewrites_the_retired_console_host() {
     assert_eq!(rewrite_legacy_server("https://opencode.ai/console"), "https://opencode.ai/console");
     assert_eq!(rewrite_legacy_server("http://console.opencode.ai"), "http://console.opencode.ai");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Pasted redirect URLs (#63315): the browser runs on another machine, so its redirect never reaches this
+// machine's callback listener. The sign-in takes the URL from the browser's address bar instead.
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chatgpt_sign_in_accepts_a_pasted_redirect_url() {
+    let id_token = Arc::new(Mutex::new(String::new()));
+    let served = id_token.clone();
+    let server = mock(move |request, _| match request.path.as_str() {
+        "/api/accounts/oauth/token" => json_response(
+            200,
+            json!({"access_token": "at", "refresh_token": "rt", "id_token": served.lock().clone(), "expires_in": 100,
+                   "scope": "openid chatgpt.tokens.use.direct"}),
+        ),
+        "/jwks" => json_response(200, jwks()),
+        _ => Response::not_found("nope"),
+    })
+    .await;
+    let mut flow =
+        ChatGptTokenSharing::new(ctx(), Arc::new(MemoryKv::new()), oc_ai::credentials::flows::chatgpt::no_saved_client_id());
+    flow.issuer = server.base.clone();
+    flow.jwks_url = format!("{}/jwks", server.base);
+    let scope = CancellationToken::new();
+    let result = flow.authorize(FormAnswer::new(), scope.clone()).await.unwrap();
+    let url = result.url.clone();
+    *id_token.lock() = sign(json!({"iss": server.base, "aud":"client_x", "exp": now_ms() / 1000 + 600, "sub":"u", "nonce": param(&url, "nonce")}));
+    let (redirect, state) = (param(&url, "redirect_uri"), param(&url, "state"));
+    let submit = result.submit.clone().expect("ChatGPT sign-in accepts a pasted redirect");
+    let finish = tokio::spawn(result.finish(None));
+    assert_eq!(
+        submit(format!("{redirect}?code=abc&state=another&client_id=client_x")).await.unwrap_err(),
+        "This URL belongs to a different sign-in"
+    );
+    // The client the redirect names is used, as the browser's redirect would.
+    submit(format!(" {redirect}?code=abc&state={state}&client_id=client_x\n")).await.unwrap();
+    let value = finish.await.unwrap().unwrap();
+    assert_eq!(value.access, "at");
+    assert_eq!(value.metadata.as_ref().unwrap()["clientID"], json!("client_x"));
+    let token = server.requests_to("/api/accounts/oauth/token").remove(0);
+    assert!(body_pairs(&token).contains(&("code".into(), "abc".into())));
+    scope.cancel();
+}
+
+#[tokio::test]
+async fn codex_browser_sign_in_accepts_a_pasted_redirect_url() {
+    let server = mock(|request, _| match request.path.as_str() {
+        "/oauth/token" => json_response(200, json!({"id_token": fake_jwt(json!({"chatgpt_account_id":"acct_9"})), "access_token":"at","refresh_token":"rt","expires_in":10})),
+        _ => Response::not_found("nope"),
+    })
+    .await;
+    let mut flow = CodexBrowser::new(ctx());
+    flow.issuer = server.base.clone();
+    flow.port = free_port();
+    flow.fallback_port = free_port();
+    let scope = CancellationToken::new();
+    let result = flow.authorize(FormAnswer::new(), scope.clone()).await.unwrap();
+    let (redirect, state) = (param(&result.url, "redirect_uri"), param(&result.url, "state"));
+    let submit = result.submit.clone().expect("Codex browser sign-in accepts a pasted redirect");
+    let finish = tokio::spawn(result.finish(None));
+    assert_eq!(submit("not a url".into()).await.unwrap_err(), "Paste the full URL from the browser's address bar");
+    assert_eq!(submit(format!("{redirect}?state={state}")).await.unwrap_err(), "The URL does not contain an authorization code");
+    submit(format!("{redirect}?code=c1&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap().access, "at");
+    assert!(body_pairs(&server.requests_to("/oauth/token")[0]).contains(&("code".into(), "c1".into())));
+    scope.cancel();
+}
+
+#[tokio::test]
+async fn gitlab_sign_in_accepts_a_pasted_redirect_url() {
+    let server = mock(|_, _| json_response(200, json!({"access_token":"glat","refresh_token":"glrt","expires_in":7200}))).await;
+    let mut flow = GitLabPkce::new(ctx(), map_env([("GITLAB_OAUTH_CLIENT_ID", "custom-app")]));
+    flow.callback_port = free_port();
+    let mut answer = FormAnswer::new();
+    answer.insert("instanceUrl".into(), json!(server.base));
+    let scope = CancellationToken::new();
+    let result = flow.authorize(answer, scope.clone()).await.unwrap();
+    let (redirect, state) = (param(&result.url, "redirect_uri"), param(&result.url, "state"));
+    let submit = result.submit.clone().expect("GitLab sign-in accepts a pasted redirect");
+    let finish = tokio::spawn(result.finish(None));
+    assert_eq!(submit(format!("{redirect}?code=c&state=x")).await.unwrap_err(), "This URL belongs to a different sign-in");
+    submit(format!("{redirect}?code=pasted&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap().access, "glat");
+    assert!(body_pairs(&server.requests_to("/oauth/token")[0]).contains(&("code".into(), "pasted".into())));
+    scope.cancel();
+}
+
+#[tokio::test]
+async fn poe_sign_in_accepts_a_pasted_redirect_url_with_its_issuer_check() {
+    let server = mock(|_, _| json_response(200, json!({"api_key":"poe-key","api_key_expires_in":3600}))).await;
+    let mut flow = PoeBrowser::new(ctx());
+    flow.token_url = format!("{}/token", server.base);
+    let start = || async {
+        let scope = CancellationToken::new();
+        let result = flow.authorize(FormAnswer::new(), scope.clone()).await.unwrap();
+        let (redirect, state) = (param(&result.url, "redirect_uri"), param(&result.url, "state"));
+        let submit = result.submit.clone().expect("Poe sign-in accepts a pasted redirect");
+        (scope, redirect, state, submit, tokio::spawn(result.finish(None)))
+    };
+
+    // provider-poe.test.ts: a wrong paste keeps the login waiting; the right one completes it.
+    let (scope, redirect, state, submit, finish) = start().await;
+    assert_eq!(
+        submit(format!("{redirect}?code=auth-code&state=another-login")).await.unwrap_err(),
+        "This URL belongs to a different sign-in"
+    );
+    assert!(!finish.is_finished());
+    submit(format!("{redirect}?code=auth-code&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap().access, "poe-key");
+    assert!(body_pairs(&server.requests_to("/token")[0]).contains(&("code".into(), "auth-code".into())));
+    scope.cancel();
+
+    // A pasted redirect from another issuer ends the login, as the browser's would.
+    let (scope, redirect, state, submit, finish) = start().await;
+    submit(format!("{redirect}?code=c&state={state}&iss=https://evil.example")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap_err().message, "Invalid OAuth issuer");
+    scope.cancel();
+
+    // An error that echoes the state is not shown.
+    let (scope, redirect, state, submit, finish) = start().await;
+    submit(format!("{redirect}?error=bad&error_description=state%20{state}%20rejected&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap_err().message, "Poe authorization failed");
+    scope.cancel();
+    assert_eq!(server.requests_to("/token").len(), 1);
+}
+
+#[tokio::test]
+async fn snowflake_sign_in_accepts_a_pasted_redirect_url() {
+    let server = mock(|_, _| json_response(200, json!({"access_token":"sf1","refresh_token":"sfr","expires_in":600}))).await;
+    let mut flow = SnowflakeBrowser::new(ctx(), map_env::<[(&str, &str); 0], &str, &str>([]));
+    flow.issuer_override = Some(server.base.clone());
+    let mut answer = FormAnswer::new();
+    answer.insert("account".into(), json!("myorg-acct"));
+    let scope = CancellationToken::new();
+    let result = flow.authorize(answer, scope.clone()).await.unwrap();
+    let (redirect, state) = (param(&result.url, "redirect_uri"), param(&result.url, "state"));
+    let submit = result.submit.clone().expect("Snowflake sign-in accepts a pasted redirect");
+    let finish = tokio::spawn(result.finish(None));
+    // An authorization error in the pasted URL ends the sign-in with its description.
+    submit(format!("{redirect}?error=access_denied&error_description=User%20said%20no&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap_err().message, "User said no");
+    scope.cancel();
+
+    let scope = CancellationToken::new();
+    let mut answer = FormAnswer::new();
+    answer.insert("account".into(), json!("myorg-acct"));
+    let result = flow.authorize(answer, scope.clone()).await.unwrap();
+    let (redirect, state) = (param(&result.url, "redirect_uri"), param(&result.url, "state"));
+    let submit = result.submit.clone().unwrap();
+    let finish = tokio::spawn(result.finish(None));
+    submit(format!("{redirect}?code=c1&state={state}")).await.unwrap();
+    assert_eq!(finish.await.unwrap().unwrap().access, "sf1");
+    scope.cancel();
+}
+
+#[tokio::test]
+async fn device_and_implicit_sign_ins_take_no_pasted_redirect() {
+    let flow = DigitalOceanImplicit { callback_port: free_port() };
+    let scope = CancellationToken::new();
+    let result = flow.authorize(FormAnswer::new(), scope.clone()).await.unwrap();
+    assert!(result.submit.is_none());
+    scope.cancel();
+}

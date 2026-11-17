@@ -1,22 +1,17 @@
-//! `loggedFetch` (`packages/core/src/mcp/oauth.ts:30-103`): every MCP HTTP request goes through
-//! here so OAuth token requests and authentication rejections are logged, and concurrent refreshes
-//! of the same (rotating) refresh token share one request.
+//! `loggedFetch` (`packages/core/src/mcp/oauth.ts`): every MCP HTTP request goes through here so OAuth token
+//! requests and authentication rejections are logged. Concurrent refreshes of a stored credential are serialized
+//! by the credential lock ([`super::refresh::refresh_credential`]), not here.
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use bytes::Bytes;
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use reqwest::Method;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::refresh::LockedRefresh;
 use crate::error::McpError;
 
 /// Request body.
@@ -84,12 +79,6 @@ impl HttpResponse {
     }
 }
 
-type SharedResponse = Shared<BoxFuture<'static, Result<HttpResponse, McpError>>>;
-
-// Refresh tokens rotate, so concurrent refreshes of the same token share one request or the
-// second gets invalid_grant.
-static REFRESHES: Lazy<Mutex<HashMap<String, SharedResponse>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     oc_util::http::client_builder().redirect(reqwest::redirect::Policy::limited(20)).build().expect("reqwest client")
 });
@@ -97,21 +86,6 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 /// The process-wide HTTP client.
 pub fn http_client() -> reqwest::Client {
     CLIENT.clone()
-}
-
-fn refresh_key(request: &HttpRequest) -> Option<String> {
-    let body = request.body.as_ref()?;
-    if body.form_value("grant_type") != Some("refresh_token") {
-        return None;
-    }
-    Some(
-        [
-            request.url.as_str(),
-            body.form_value("client_id").unwrap_or(""),
-            body.form_value("refresh_token").unwrap_or(""),
-        ]
-        .join("\u{0}"),
-    )
 }
 
 /// `application/x-www-form-urlencoded` serialization (`URLSearchParams.toString()`).
@@ -162,33 +136,6 @@ pub(crate) async fn send_buffered(request: HttpRequest) -> Result<HttpResponse, 
     })
 }
 
-/// `send`: refresh requests of a provider backed by a stored credential go through its locked refresh; the rest are
-/// de-duplicated process-wide by `url \0 client_id \0 refresh_token`.
-async fn send(request: HttpRequest, refresh: Option<&LockedRefresh>) -> Result<HttpResponse, McpError> {
-    let Some(key) = refresh_key(&request) else { return send_buffered(request).await };
-    if let Some(refresh) = refresh {
-        let token = request.body.as_ref().and_then(|b| b.form_value("refresh_token")).unwrap_or("").to_string();
-        return refresh.send(request, token).await;
-    }
-    let shared = {
-        let mut map = REFRESHES.lock();
-        if let Some(current) = map.get(&key) {
-            current.clone()
-        } else {
-            let fut: BoxFuture<'static, Result<HttpResponse, McpError>> = send_buffered(request).boxed();
-            let shared = fut.shared();
-            map.insert(key.clone(), shared.clone());
-            shared
-        }
-    };
-    let result = shared.clone().await;
-    let mut map = REFRESHES.lock();
-    if map.get(&key).is_some_and(|current| current.ptr_eq(&shared)) {
-        map.remove(&key);
-    }
-    result
-}
-
 /// Fetch used for MCP traffic of one server: logging, refresh de-duplication, and optional base
 /// headers merged into every request (`createFetchWithInit` with the configured headers).
 #[derive(Clone)]
@@ -198,18 +145,19 @@ pub struct Fetcher {
     pub base_headers: Option<IndexMap<String, String>>,
     /// Extra structured fields for logs (e.g. the OAuth attempt id).
     pub fields: Vec<(String, String)>,
-    /// Set for a connection whose provider holds a stored credential: its refreshes run under the credential lock.
-    pub refresh: Option<LockedRefresh>,
+    /// A POST answered 429 or 5xx fails with `HTTP <status>` (the refresh's token endpoint: a failing endpoint says
+    /// nothing about the login, so report its status, not its body).
+    pub server_errors_fail: bool,
 }
 
 impl Fetcher {
     pub fn new(server: impl Into<String>) -> Self {
-        Self { server: server.into(), directory: None, base_headers: None, fields: vec![], refresh: None }
+        Self { server: server.into(), directory: None, base_headers: None, fields: vec![], server_errors_fail: false }
     }
 
-    /// Pass the connection's provider's locked refresh so a stored credential's refresh runs under the credential lock.
-    pub fn with_refresh(mut self, refresh: Option<LockedRefresh>) -> Self {
-        self.refresh = refresh;
+    /// A copy whose POSTs answered 429 or 5xx fail with `HTTP <status>`.
+    pub fn failing_server_errors(mut self) -> Self {
+        self.server_errors_fail = true;
         self
     }
 
@@ -261,7 +209,8 @@ impl Fetcher {
             tracing::info!("mcp oauth request started");
         }
         drop(_guard);
-        let result = send(request, self.refresh.as_ref()).await;
+        let post = request.method == Method::POST;
+        let result = send_buffered(request).await;
         let _guard = span.enter();
         let duration_ms = started.elapsed().as_millis() as u64;
         match &result {
@@ -285,7 +234,12 @@ impl Fetcher {
                 tracing::warn!(errors = %error, durationMs = duration_ms, "mcp http request failed");
             }
         }
-        result
+        match result {
+            Ok(response) if self.server_errors_fail && post && (response.status == 429 || response.status >= 500) => {
+                Err(McpError::other(format!("HTTP {}", response.status)))
+            }
+            other => other,
+        }
     }
 
     /// Streaming fetch (MCP POST/GET); the caller reads the body. Cancelling `cancel` aborts.

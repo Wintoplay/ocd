@@ -438,16 +438,24 @@ impl McpManager {
             }
             let result = async {
                 let provider = match (&entry.config, &entry.integration_id) {
-                    (ServerConfig::Remote(remote), Some(integration_id)) => Some(Arc::new(
-                        oauth::connect_provider(
+                    (ServerConfig::Remote(remote), Some(integration_id)) => {
+                        // The credential is selected here, once per attempt; the provider never looks up another.
+                        let credentials = self.inner.options.credentials.as_ref();
+                        let credential = match credentials {
+                            Some(store) => store
+                                .list(integration_id)
+                                .await
+                                .map_err(|e| ConnectError::Connect { server: name.to_string(), message: e.to_string() })?
+                                .pop(),
+                            None => None,
+                        };
+                        Some(Arc::new(oauth::connect_provider(
                             remote,
-                            integration_id,
-                            self.inner.options.credentials.as_ref(),
+                            credential,
+                            credentials,
                             Fetcher::new(name.to_string()).with_base_headers(remote.headers.clone()),
-                        )
-                        .await
-                        .map_err(|e| ConnectError::Connect { server: name.to_string(), message: e.to_string() })?,
-                    )),
+                        )))
+                    }
                     _ => None,
                 };
                 let _endpoint = match &entry.config {

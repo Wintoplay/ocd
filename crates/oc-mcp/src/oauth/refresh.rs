@@ -1,25 +1,29 @@
 //! Refreshing a stored MCP OAuth credential one at a time (`Credential.refresh`, `core/src/credential.ts`) and the
-//! locked refresh `connectProvider` sends `refresh_token` requests through (`core/src/mcp/oauth.ts`).
+//! refresh itself (`exchange` in `core/src/mcp/oauth.ts`).
 //!
 //! Refresh tokens rotate and the row is shared by every connection, Location and process using the database, so a
 //! refresh runs under the in-process share plus the file lock `credential-refresh:<id>`, reads the row again and
-//! only spends the refresh token while the row still holds it. A temporary failure answers
-//! `503 temporarily_unavailable`, which the SDK surfaces as is, so the connection fails and the login stays.
+//! only spends the refresh token while the row still holds it. The refresh uses the discovery the login saved
+//! (`metadata.discovery`), or discovers as the login did and saves the result.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Map, Value, json};
+use url::Url;
 
-use super::fetch::{HttpRequest, HttpResponse, send_buffered};
-use super::{McpCredentialStore, Tokens, client_from_credential, to_credential};
+use super::discovery::{self, AuthServerMetadata, ResourceMetadata};
+use super::fetch::Fetcher;
+use super::{
+    Discovery, McpCredentialStore, client_from_credential, configured_discovery, discovery_from_credential,
+    select_resource, to_credential, token_request,
+};
+use crate::config::RemoteConfig;
 use crate::error::McpError;
 
 /// `Effect.timeout("30 seconds")` around the refresh, reading the body included.
@@ -28,12 +32,41 @@ pub const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a refresh produced no credential.
 #[derive(Debug, Clone)]
 pub enum RefreshError {
-    /// `RefreshRejected`: the authorization server answered with an error or a body that is not tokens.
-    Rejected { status: u16, status_text: String, headers: HeaderMap, body: Bytes },
-    /// A network failure, the time limit or the lock: the message becomes the `temporarily_unavailable` reason.
+    /// `RefreshRejected`: the authorization server refused the refresh token or the client (`invalid_grant`,
+    /// `invalid_client`, `unauthorized_client`), or there is no client information. Only a new login helps.
+    Rejected(String),
+    /// `IssuerChanged`: discovery named another authorization server than the one that issued the credential. Its
+    /// tokens are not sent there; the credential stays for its own server.
+    IssuerChanged(String),
+    /// Another `OAuthError` the token endpoint answered: only its code is reported, since its description can quote
+    /// the server's whole response.
+    OAuth { code: String, message: String },
+    /// A network failure, an `HTTP <status>` from the token endpoint, the time limit or the lock.
     Failed(String),
     /// Reading or writing the store failed (an upstream defect).
     Defect(String),
+}
+
+impl RefreshError {
+    /// The `temporarily_unavailable` reason: an OAuth error names only its code.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::OAuth { code, .. } => code.clone(),
+            Self::Rejected(message) | Self::IssuerChanged(message) | Self::Failed(message) | Self::Defect(message) => {
+                message.clone()
+            }
+        }
+    }
+}
+
+/// Like other MCP clients: refreshing this close to expiry leaves short-lived tokens alone until they are due.
+pub const REFRESH_AHEAD_MS: u64 = 30_000;
+
+/// `Credential.expiring(value, now, margin)`: whether an access token is due for a refresh. `expires` 0 means the
+/// issuer gave no lifetime.
+pub fn expiring(credential: &Value, now: u64, margin_ms: u64) -> bool {
+    let expires = credential.get("expires").and_then(Value::as_u64).unwrap_or(0);
+    expires != 0 && expires <= now + margin_ms
 }
 
 type Pending = Shared<BoxFuture<'static, Result<Option<Value>, RefreshError>>>;
@@ -132,103 +165,92 @@ where
     Ok(Some(value))
 }
 
-/// `toTokens` as the token endpoint's JSON body.
-pub fn tokens_json(credential: &Value) -> Value {
-    let tokens = super::to_tokens(credential);
-    let mut body = Map::new();
-    body.insert("access_token".into(), json!(tokens.access_token));
-    body.insert("token_type".into(), json!(tokens.token_type));
-    if let Some(refresh) = &tokens.refresh_token {
-        body.insert("refresh_token".into(), json!(refresh));
+const REJECTIONS: [&str; 3] = ["invalid_grant", "invalid_client", "unauthorized_client"];
+
+fn classify(error: McpError) -> RefreshError {
+    match error {
+        McpError::OAuth { code, message } if REJECTIONS.contains(&code.as_str()) => RefreshError::Rejected(message),
+        McpError::OAuth { code, message } => RefreshError::OAuth { code, message },
+        other => RefreshError::Failed(other.to_string()),
     }
-    if let Some(expires_in) = tokens.expires_in {
-        body.insert("expires_in".into(), json!(expires_in as u64));
-    }
-    if let Some(scope) = &tokens.scope {
-        body.insert("scope".into(), json!(scope));
-    }
-    if let Some(issuer) = &tokens.issuer {
-        body.insert("issuer".into(), json!(issuer));
-    }
-    Value::Object(body)
 }
 
-fn json_response(status: u16, status_text: &str, body: &Value) -> HttpResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    HttpResponse { status, status_text: status_text.into(), headers, body: Bytes::from(body.to_string()) }
-}
-
-/// `unavailable(reason)`: `temporarily_unavailable` is an OAuth error the SDK surfaces as is, so the attempt fails
-/// and the credential stays for the next one (the SDK takes a failure it cannot classify as a lost login).
-pub fn unavailable(reason: &str) -> HttpResponse {
-    json_response(
-        503,
-        "Service Unavailable",
-        &json!({"error": "temporarily_unavailable", "error_description": format!("Could not refresh the OAuth token: {reason}")}),
-    )
-}
-
-/// What the locked refresh needs to rebuild the credential (`connectProvider`).
-#[derive(Clone)]
-pub struct LockedRefresh {
-    pub credentials: Arc<dyn McpCredentialStore>,
-    pub id: String,
-    pub method_id: String,
-    pub server_url: String,
-}
-
-impl LockedRefresh {
-    /// Sends one refresh request whose body carries `token`, in place of the in-process share, and answers it the
-    /// way the token endpoint would: the stored tokens, `invalid_grant` when the credential was signed out
-    /// meanwhile, the server's own rejection, or `temporarily_unavailable` for a failure that may pass.
-    pub async fn send(&self, request: HttpRequest, token: String) -> Result<HttpResponse, McpError> {
-        let (method_id, server_url) = (self.method_id.clone(), self.server_url.clone());
-        let presented = token.clone();
-        let result = refresh_credential(
-            self.credentials.clone(),
-            &self.id,
-            move |current| text(current, "refresh") == presented,
-            move |current| {
-                async move {
-                    // The body is read here so the time limit also covers a server that stalls after its headers.
-                    let response = send_buffered(request).await.map_err(|e| RefreshError::Failed(e.to_string()))?;
-                    let parsed = if response.ok() {
-                        serde_json::from_slice::<Value>(&response.body).ok().and_then(|v| Tokens::parse(&v).ok())
-                    } else {
-                        None
-                    };
-                    let Some(mut tokens) = parsed else {
-                        return Err(RefreshError::Rejected {
-                            status: response.status,
-                            status_text: response.status_text,
-                            headers: response.headers,
-                            body: response.body,
-                        });
-                    };
-                    if tokens.refresh_token.is_none() {
-                        tokens.refresh_token = Some(token);
-                    }
-                    // The SDK ignores an issuer in the token response; keep the one this credential was stamped with.
-                    tokens.issuer = current.get("metadata").and_then(|m| m.get("issuer")).and_then(Value::as_str).map(String::from);
-                    Ok(to_credential(&method_id, &server_url, &tokens, client_from_credential(&current).as_ref()))
-                }
-                .boxed()
-            },
-        )
-        .await;
-        match result {
-            Ok(Some(value)) => Ok(json_response(200, "OK", &tokens_json(&value))),
-            // The credential was signed out meanwhile; the SDK drops it and reports needs_auth.
-            Ok(None) => Ok(json_response(400, "Bad Request", &json!({"error": "invalid_grant"}))),
-            Err(RefreshError::Rejected { status, .. }) if status == 429 || status >= 500 => {
-                Ok(unavailable(&format!("HTTP {status}")))
+/// `exchange`: refreshes `current` with the discovery its login saved, or discovers as the login did (following the
+/// 401's `resource_metadata` when given) and saves the result. A configured `auth_server_metadata_url` is read on
+/// every refresh, so changing it applies at once, and no discovery is saved then. `fetch` should fail token-endpoint
+/// answers 429/5xx ([`Fetcher::failing_server_errors`]).
+pub async fn exchange(
+    config: &RemoteConfig,
+    fetch: &Fetcher,
+    current: &Value,
+    resource_metadata_url: Option<&Url>,
+) -> Result<Value, RefreshError> {
+    let oauth = config.oauth_config();
+    let client = match oauth.and_then(|o| o.client_id.clone()) {
+        Some(id) => {
+            let mut client = Map::new();
+            client.insert("client_id".into(), json!(id));
+            if let Some(secret) = oauth.and_then(|o| o.client_secret.clone()) {
+                client.insert("client_secret".into(), json!(secret));
             }
-            Err(RefreshError::Rejected { status, status_text, headers, body }) => {
-                Ok(HttpResponse { status, status_text, headers, body })
-            }
-            Err(RefreshError::Failed(reason)) => Ok(unavailable(&reason)),
-            Err(RefreshError::Defect(message)) => Err(McpError::other(message)),
+            Some(client)
+        }
+        None => client_from_credential(current),
+    };
+    let Some(client) = client else { return Err(RefreshError::Rejected("no OAuth client information".into())) };
+    let saved = discovery_from_credential(current);
+    let configured = configured_discovery(config, fetch).await.map_err(classify)?;
+    let (authorization_server_url, metadata, resource_metadata): (
+        String,
+        Option<AuthServerMetadata>,
+        Option<ResourceMetadata>,
+    ) = match (&configured, &saved) {
+        (Some(state), _) => (
+            state.authorization_server_url.clone(),
+            state.authorization_server_metadata.clone(),
+            state.resource_metadata.clone(),
+        ),
+        (None, Some(saved)) => (
+            saved.authorization_server.clone(),
+            discovery::discover_authorization_server(fetch, &saved.authorization_server).await.map_err(classify)?,
+            None,
+        ),
+        (None, None) => {
+            let server_url =
+                Url::parse(&config.url).map_err(|_| RefreshError::Failed(format!("Invalid URL: {}", config.url)))?;
+            let info = discovery::discover_server_info(fetch, &server_url, resource_metadata_url)
+                .await
+                .map_err(classify)?;
+            (info.authorization_server_url, info.authorization_server_metadata, info.resource_metadata)
+        }
+    };
+    let found = metadata.as_ref().map(|m| m.issuer().to_string()).unwrap_or_else(|| authorization_server_url.clone());
+    let trim = |s: &str| s.strip_suffix('/').unwrap_or(s).to_string();
+    if let Some(issuer) = current.get("metadata").and_then(|m| m.get("issuer")).and_then(Value::as_str) {
+        if trim(&found) != trim(issuer) {
+            return Err(RefreshError::IssuerChanged(format!("issued by {issuer}, but discovery names {found}")));
         }
     }
+    let resource = match &saved {
+        Some(saved) => saved.resource.clone(),
+        None => select_resource(config, resource_metadata.as_ref().map(|r| r.resource()))
+            .map_err(classify)?
+            .to_string(),
+    };
+    let resource_url = Url::parse(&resource).map_err(|_| RefreshError::Failed(format!("Invalid URL: {resource}")))?;
+    let refresh = current.get("refresh").and_then(Value::as_str).unwrap_or("").to_string();
+    let params = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh.clone()),
+    ];
+    let mut tokens = token_request(fetch, &authorization_server_url, metadata.as_ref(), params, &client, &resource_url)
+        .await
+        .map_err(classify)?;
+    if tokens.refresh_token.is_none() {
+        tokens.refresh_token = Some(refresh);
+    }
+    tokens.issuer = Some(found);
+    let discovery = configured.is_none().then(|| Discovery { authorization_server: authorization_server_url, resource });
+    let method_id = current.get("methodID").and_then(Value::as_str).unwrap_or("");
+    Ok(to_credential(method_id, &config.url, &tokens, client_from_credential(current).as_ref(), discovery.as_ref()))
 }

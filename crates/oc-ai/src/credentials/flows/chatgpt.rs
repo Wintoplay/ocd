@@ -2,6 +2,7 @@
 
 use super::{Received, await_deferred, bind};
 use crate::credentials::callback::{Handler, Once, Request, Response};
+use crate::credentials::redirect::{self, Params};
 use crate::credentials::form::FormAnswer;
 use crate::credentials::http::{FlowContext, str_field};
 use crate::credentials::integration::{AuthorizeResult, FlowError, FlowResult, OAuthMethod, OAuthMethodInfo};
@@ -170,6 +171,9 @@ impl OAuthMethod for ChatGptTokenSharing {
         let nonce = pkce::random_state();
         let saved_id = (self.saved_client_id)().await;
         let (once, rx) = Once::<FlowResult<Received<Callback>>>::new();
+        let submit = redirect::submit(state.clone(), once.clone(), |code, params| {
+            Received::pasted(Callback { code, client_id: params.param("client_id") })
+        });
         let expected_state = state.clone();
         let handler: Handler = Arc::new(move |request: Request| {
             let once = once.clone();
@@ -198,7 +202,7 @@ impl OAuthMethod for ChatGptTokenSharing {
                 };
                 let (responder, response) = tokio::sync::oneshot::channel();
                 let callback = Callback { code, client_id: request.param("client_id") };
-                if !once.complete(Ok(Received { value: callback, responder })) {
+                if !once.complete(Ok(Received { value: callback, responder: Some(responder) })) {
                     return Some(Response::new(409, "OAuth callback already received"));
                 }
                 response.await.ok()
@@ -245,10 +249,10 @@ impl OAuthMethod for ChatGptTokenSharing {
                 Ok(_) => Response::html(200, page::success(&options())),
                 Err(error) => Response::html(400, page::error(&error.message, &options())),
             };
-            let _ = responder.send(page);
+            Received::<()>::respond(responder, page);
             result
         };
-        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback))
+        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback).with_submit(submit))
     }
 
     fn can_refresh(&self) -> bool {

@@ -8,6 +8,7 @@ use crate::credentials::integration::{
     AuthorizeResult, BoxFuture, FlowError, FlowResult, OAuthMethod, OAuthMethodInfo,
 };
 use crate::credentials::page::{self, CallbackPageOptions};
+use crate::credentials::redirect::{self, Params};
 use crate::credentials::pkce;
 use crate::credentials::{EnvSource, Metadata, OAuthValue, now_ms};
 use async_trait::async_trait;
@@ -122,7 +123,7 @@ pub fn describe_refresh_failure(detail: &str, client_id: &str) -> String {
 }
 
 /// `callbackError`.
-pub fn callback_error(request: &Request, state: &str) -> Option<String> {
+pub fn callback_error(request: &impl Params, state: &str) -> Option<String> {
     if request.param("state").as_deref() != Some(state) {
         return Some("Invalid OAuth state".into());
     }
@@ -250,6 +251,7 @@ impl OAuthMethod for GitLabPkce {
         let pkce = pkce::base64_pkce(32);
         let state = pkce::random_state();
         let (once, rx) = Once::<FlowResult<Received<String>>>::new();
+        let submit = redirect::submit(state.clone(), once.clone(), |code, _| Received::pasted(code));
         let expected = state.clone();
         let handler: Handler = Arc::new(move |request: Request| {
             let once = once.clone();
@@ -264,7 +266,7 @@ impl OAuthMethod for GitLabPkce {
                 }
                 let (responder, response) = tokio::sync::oneshot::channel();
                 let code = request.param("code").unwrap_or_default();
-                if !once.complete(Ok(Received { value: code, responder })) {
+                if !once.complete(Ok(Received { value: code, responder: Some(responder) })) {
                     return Some(Response::new(409, "OAuth callback already received"));
                 }
                 response.await.ok()
@@ -314,10 +316,10 @@ impl OAuthMethod for GitLabPkce {
                 Ok(_) => Response::html(200, page::success(&options())),
                 Err(error) => Response::html(400, page::error(&error.message, &options())),
             };
-            let _ = responder.send(page);
+            Received::<()>::respond(responder, page);
             result
         };
-        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback))
+        Ok(AuthorizeResult::auto(url, INSTRUCTIONS, callback).with_submit(submit))
     }
 
     fn can_refresh(&self) -> bool {

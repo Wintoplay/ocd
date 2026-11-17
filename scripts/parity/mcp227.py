@@ -78,6 +78,9 @@ class FakeRemote:
                 with fake.lock:
                     fake.bearers.append(auth)
                     ok = auth.removeprefix("Bearer ") in fake.valid
+                    forbid = fake.forbid
+                if forbid:
+                    return self.send(403, b"forbidden", {"www-authenticate": f'Bearer error="insufficient_scope", scope="{forbid}"'})
                 if not ok:
                     return self.send(401, b"unauthorized", {
                         "www-authenticate": f'Bearer resource_metadata="{fake.base}/.well-known/oauth-protected-resource/mcp"'})
@@ -100,6 +103,8 @@ class FakeRemote:
                 grant = form.get("grant_type")
                 with fake.lock:
                     fake.token_requests.append({k: form.get(k) for k in ("grant_type", "refresh_token", "code") if k in form})
+                    if "redirect_uri" in form:
+                        fake.redirects.append(form["redirect_uri"])
                     mode = fake.mode
                     if grant == "refresh_token" and mode in (503, 429):
                         return self.send(mode, b"try again later")
@@ -129,8 +134,8 @@ class FakeRemote:
     def reset(self):
         with self.lock:
             self.valid, self.spent, self.current, self.counter = set(), set(), "ref-1", 1
-            self.mode = None
-            self.token_requests, self.registrations, self.bearers = [], [], []
+            self.mode, self.forbid = None, None
+            self.token_requests, self.registrations, self.bearers, self.redirects = [], [], [], []
 
     @property
     def url(self):
@@ -234,8 +239,11 @@ def mcp227_oauth_refresh_unavailable(ctx):
         remote.valid.clear()
         remote.mode = 400
     ctx.call("connect.revoked", "POST", f"/api/experimental/mcp/{NAME}/connect?directory={ctx.project}")
-    # Dropping the login publishes `credential.switched`, which reconnects the server once more.
-    ctx.rec("revoked", _wait_status(ctx, "needs_auth"))
+    # Dropping the login publishes `credential.switched`, which reconnects the server once more, without a login now.
+    # The refused attempt's own status can show for a moment first, so the settled one is recorded.
+    _wait_status(ctx, "needs_auth")
+    time.sleep(2)
+    ctx.rec("revoked", _statuses(ctx).get(NAME))
     _credentials(ctx, "credentials.revoked", remote)
     with remote.lock:
         ctx.rec("token.requests", list(remote.token_requests))

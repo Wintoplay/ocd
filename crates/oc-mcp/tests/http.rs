@@ -332,10 +332,9 @@ async fn http_oauth_flow() {
     let manager = manager(Some(store.clone()));
     load(&manager, "secure", remote(port, None)).await;
     let url = format!("http://127.0.0.1:{port}/mcp");
-    assert_eq!(
-        manager.status("secure"),
-        Some(Status::needs_auth(format!("MCP server \"{url}\" requires a login before it can register a client")))
-    );
+    // Without a credential the connection is anonymous: the 401 needs a login, and no OAuth request is made.
+    assert_eq!(manager.status("secure"), Some(Status::needs_auth("Unauthorized")));
+    assert!(fake.lock().registrations.is_empty() && fake.lock().token_requests.is_empty());
     let error = manager.call_tool("secure", "hello", None, None).await.unwrap_err();
     assert!(error.to_string().starts_with("MCP server \"secure\" needs authentication: "));
 
@@ -357,7 +356,9 @@ async fn http_oauth_flow() {
 
     // DCR body.
     let registration = fake.lock().registrations[0].clone();
-    assert_eq!(registration["redirect_uris"], json!([redirect]));
+    // Both loopback hosts are registered (#63403); the authorization URL names 127.0.0.1.
+    let localhost = redirect.replace("127.0.0.1", "localhost");
+    assert_eq!(registration["redirect_uris"], json!([redirect, localhost]));
     assert_eq!(registration["client_name"], "opencode");
     assert_eq!(registration["client_uri"], "https://opencode.ai");
     assert_eq!(registration["grant_types"], json!(["authorization_code", "refresh_token"]));
@@ -396,6 +397,13 @@ async fn http_oauth_flow() {
     assert_eq!(credential["metadata"]["scope"], "mcp.read");
     assert_eq!(credential["metadata"]["issuer"], format!("http://127.0.0.1:{port}"));
     assert_eq!(credential["metadata"]["client"]["client_id"], "dyn-client");
+    // The discovery the login found is saved for refreshes.
+    assert_eq!(
+        credential["metadata"]["discovery"],
+        json!({"authorizationServer": format!("http://127.0.0.1:{port}"), "resource": url})
+    );
+    let keys: Vec<&String> = credential["metadata"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["serverUrl", "tokenType", "scope", "issuer", "discovery", "client"]);
 
     // Token request carried PKCE, the redirect and the resource.
     let form = fake.lock().token_requests[0].clone();
@@ -444,6 +452,11 @@ async fn http_oauth_refresh_on_401() {
     assert_eq!(rows[0].value["access"], "tok-2");
     assert_eq!(rows[0].value["refresh"], "ref-2");
     assert_eq!(rows[0].value["metadata"]["client"]["client_id"], "dyn-client");
+    // A login saved without discovery follows the 401 to it, and saves what it found.
+    assert_eq!(
+        rows[0].value["metadata"]["discovery"],
+        json!({"authorizationServer": format!("http://127.0.0.1:{port}"), "resource": url})
+    );
     let form = fake.lock().token_requests[0].clone();
     assert!(form.contains(&("grant_type".to_string(), "refresh_token".to_string())));
     // The refresh used the configured headers too (createFetchWithInit).
@@ -590,84 +603,6 @@ async fn http_oauth_refresh_rotates_once_across_locations() {
     assert_eq!(row["metadata"]["client"]["client_id"], "dyn-client");
     a.shutdown().await;
     b.shutdown().await;
-}
-
-fn refresh_request(port: u16, token: &str) -> oc_mcp::oauth::fetch::HttpRequest {
-    oc_mcp::oauth::fetch::HttpRequest {
-        method: reqwest::Method::POST,
-        url: url::Url::parse(&format!("http://127.0.0.1:{port}/token")).unwrap(),
-        headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
-        body: Some(oc_mcp::oauth::fetch::Body::Form(vec![
-            ("grant_type".into(), "refresh_token".into()),
-            ("refresh_token".into(), token.into()),
-            ("client_id".into(), "dyn-client".into()),
-        ])),
-    }
-}
-
-fn locked(store: &Arc<dyn McpCredentialStore>, id: &str, integration: &str, port: u16) -> oc_mcp::oauth::refresh::LockedRefresh {
-    oc_mcp::oauth::refresh::LockedRefresh {
-        credentials: store.clone(),
-        id: id.into(),
-        method_id: integration.into(),
-        server_url: format!("http://127.0.0.1:{port}/mcp"),
-    }
-}
-
-#[tokio::test]
-async fn locked_refresh_hands_out_tokens_another_process_rotated() {
-    let (fake, port) = start_fake(|_| {}).await;
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn McpCredentialStore> =
-        Arc::new(LockedStore { rows: MemoryCredentialStore::default(), root: dir.path().to_path_buf() });
-    // Another process already spent ref-1 and stored its successor.
-    let (integration, id) = seed(&*store, port, "tok-9", "ref-9").await;
-    let response = locked(&store, &id, &integration, port).send(refresh_request(port, "ref-1"), "ref-1".into()).await.unwrap();
-    assert_eq!(response.status, 200);
-    let body = response.json().unwrap();
-    assert_eq!(body["access_token"], "tok-9");
-    assert_eq!(body["refresh_token"], "ref-9");
-    assert_eq!(body["token_type"], "Bearer");
-    assert_eq!(refreshes(&fake), 0, "the stale refresh token was not spent");
-
-    // The credential was signed out meanwhile: the SDK drops it and reports needs_auth.
-    store.remove(&id).await.unwrap();
-    let response = locked(&store, &id, &integration, port).send(refresh_request(port, "ref-9"), "ref-9".into()).await.unwrap();
-    assert_eq!((response.status, response.json().unwrap()), (400, json!({"error": "invalid_grant"})));
-}
-
-#[tokio::test]
-async fn locked_refresh_keeps_the_login_on_temporary_failures() {
-    let (fake, port) = start_fake(|f| f.refresh_status = Some(503)).await;
-    let store: Arc<dyn McpCredentialStore> = Arc::new(MemoryCredentialStore::default());
-    let (integration, id) = seed(&*store, port, "old", "ref-1").await;
-    let unavailable = |reason: &str| {
-        json!({"error": "temporarily_unavailable", "error_description": format!("Could not refresh the OAuth token: {reason}")})
-    };
-    let response = locked(&store, &id, &integration, port).send(refresh_request(port, "ref-1"), "ref-1".into()).await.unwrap();
-    assert_eq!((response.status, response.json().unwrap()), (503, unavailable("HTTP 503")));
-    fake.lock().refresh_status = Some(429);
-    let response = locked(&store, &id, &integration, port).send(refresh_request(port, "ref-1"), "ref-1".into()).await.unwrap();
-    assert_eq!((response.status, response.json().unwrap()), (503, unavailable("HTTP 429")));
-    // A network failure.
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
-    let response =
-        locked(&store, &id, &integration, port).send(refresh_request(closed, "ref-1"), "ref-1".into()).await.unwrap();
-    assert_eq!(response.status, 503);
-    let description = response.json().unwrap()["error_description"].as_str().unwrap().to_string();
-    assert!(description.starts_with("Could not refresh the OAuth token: "), "{description}");
-    // Any other rejection is passed through as the server sent it.
-    fake.lock().refresh_status = Some(400);
-    let response = locked(&store, &id, &integration, port).send(refresh_request(port, "ref-1"), "ref-1".into()).await.unwrap();
-    assert_eq!(
-        (response.status, response.json().unwrap()),
-        (400, json!({"error": "invalid_grant", "error_description": "Refresh token revoked"}))
-    );
-    let row = store.get(&id).await.unwrap().unwrap().value;
-    assert_eq!((row["access"].as_str(), row["refresh"].as_str()), (Some("old"), Some("ref-1")));
 }
 
 #[tokio::test]
