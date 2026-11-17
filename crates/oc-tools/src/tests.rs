@@ -27,6 +27,8 @@ struct MockHost {
     denied_resource: Mutex<Option<String>>,
     /// Whether `permission_allows` answers true (for resources other than the denied one).
     allows: Mutex<bool>,
+    /// The jobs cancelled, in order.
+    cancelled_jobs: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -38,6 +40,11 @@ impl ToolHost for MockHost {
     async fn permission_allows(&self, request: PermissionRequest) -> bool {
         let denied = self.denied_resource.lock().clone();
         *self.allows.lock() && !request.resources.iter().any(|r| Some(r) == denied.as_ref())
+    }
+
+    async fn job_cancel(&self, id: &str) -> Result<(), String> {
+        self.cancelled_jobs.lock().push(id.to_string());
+        Ok(())
     }
 
     async fn models_available(&self) -> Result<Vec<crate::host::ModelSummary>, String> {
@@ -725,6 +732,41 @@ async fn shell_tool_stopped_by_the_user() {
     assert_eq!(error.model_message(), "Command interrupted by the user before it started.");
     assert!(!dir.path().join("started").exists());
     assert!(service.list().is_empty());
+}
+
+// tool-shell.test.ts "stops a command whose call an interrupt cut off, with no handoff to take it over" (2.3.0): an
+// interrupted call is dropped wherever it waits, and the drop stops its command (it ends killed, not when it would
+// have exited) and cancels its job.
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_tool_interrupted_stops_its_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(MockHost::default());
+    let mut ctx = context(dir.path(), host.clone());
+    ctx.config = Arc::new(ToolConfig { shell: Some("/bin/sh".into()), ..ToolConfig::default() });
+    let service = crate::shell::service::ShellService::new(dir.path().join(".data"), None);
+    let call = tokio::spawn({
+        let tool = tools::shell::ShellTool::new(service.clone());
+        async move { run(&tool, json!({"command": "printf 'server starting'; sleep 60"}), ctx).await }
+    });
+    let info = loop {
+        if let Some(info) = service.list().into_iter().next().filter(|i| service.output(&i.id, None, None).unwrap().size > 0) {
+            break info;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), service.wait(&info.id)).await.expect("the command is stopped");
+    assert_eq!(ended.unwrap().status, oc_schema::message::ShellStatus::Killed);
+    assert_eq!(std::fs::read_to_string(&info.file).unwrap(), "server starting");
+    for _ in 0..500 {
+        if !host.cancelled_jobs.lock().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*host.cancelled_jobs.lock(), vec![info.id.clone()]);
 }
 
 #[cfg(unix)]

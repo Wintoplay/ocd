@@ -146,16 +146,28 @@ fn background_result(info: &oc_schema::message::ShellInfo, now: u64) -> ShellOut
 
 /// Stops the command when the job's run is dropped before it settled: cancelling the job (or interrupting the call
 /// that waits for it) stops the command but keeps it, output file included (`onInterrupt` → `shell.stop`, 2.3.0).
+///
+/// The call holds one too, with its job once started: upstream's call is uninterruptible from spawning the command
+/// to blocking on its job, and an interrupt while it blocks cancels the job (`onInterrupt` → `jobs.cancel`). Here an
+/// interrupted call is dropped wherever it waits, so the stop and the cancel come from the drop; without them the
+/// job would keep waiting for the command, which would run on.
 struct StopOnDrop {
     service: Arc<ShellService>,
     id: String,
     armed: bool,
+    job: Option<(Arc<dyn crate::host::ToolHost>, String)>,
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = self.service.stop(&self.id, oc_schema::message::ShellStatus::Killed);
+        if !self.armed {
+            return;
+        }
+        let _ = self.service.stop(&self.id, oc_schema::message::ShellStatus::Killed);
+        if let (Some((host, job)), Ok(runtime)) = (self.job.take(), tokio::runtime::Handle::try_current()) {
+            runtime.spawn(async move {
+                let _ = host.job_cancel(&job).await;
+            });
         }
     }
 }
@@ -354,7 +366,33 @@ impl Tool for ShellTool {
             .await
             .map_err(|m| ToolError::with_cause(leaf.clone(), ErrorCause::Error(m)))?;
         ctx.progress(meta(vec![("shellID", json!(info.id))]));
+        // Settled or not, the call ends here unless it is dropped (interrupted) first.
+        let mut interrupted = StopOnDrop { service: self.service.clone(), id: info.id.clone(), armed: true, job: None };
+        let ended = self.started(info, background, final_timeout, leaf, listener.as_ref(), &mut interrupted, ctx).await;
+        interrupted.armed = false;
+        ended
+    }
+}
 
+impl ShellTool {
+    /// The call once its command started: starts its job, then moves it to the background or waits for it.
+    #[allow(clippy::too_many_arguments)]
+    async fn started(
+        &self,
+        info: oc_schema::message::ShellInfo,
+        background: bool,
+        final_timeout: u64,
+        leaf: String,
+        listener: Option<&crate::tool::StopListener>,
+        interrupted: &mut StopOnDrop,
+        ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let stopped = || async move {
+            match listener {
+                Some(listener) => listener.stopped().await,
+                None => std::future::pending().await,
+            }
+        };
         let (settled_tx, settled_rx) = tokio::sync::watch::channel::<Option<ShellOutput>>(None);
         let service = self.service.clone();
         let started = info.clone();
@@ -364,7 +402,7 @@ impl Tool for ShellTool {
         // so the notices say how long it waited.
         let final_timeout = Arc::new(AtomicU64::new(final_timeout));
         let job_timeout = final_timeout.clone();
-        let guard = StopOnDrop { service: service.clone(), id: info.id.clone(), armed: true };
+        let guard = StopOnDrop { service: service.clone(), id: info.id.clone(), armed: true, job: None };
         let run = async move {
             // The whole guard moves into the run, so dropping the run drops it.
             let mut guard = guard;
@@ -397,8 +435,9 @@ impl Tool for ShellTool {
             })
             .await
             .map_err(|m| ToolError::with_cause(leaf.clone(), ErrorCause::Error(m)))?;
+        interrupted.job = Some((ctx.host.clone(), job.id.clone()));
         // Stopped while the command was starting: stop it now.
-        if listener.as_ref().is_some_and(|l| l.stopped().now_or_never().is_some()) {
+        if listener.is_some_and(|l| l.stopped().now_or_never().is_some()) {
             return Err(self.cancelled(&ctx, &info, &job.id).await);
         }
 

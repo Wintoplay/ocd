@@ -54,9 +54,16 @@ struct Active {
     line_starts: Mutex<[u64; 2]>,
     done: watch::Sender<Done>,
     deadline: watch::Sender<Option<tokio::time::Instant>>,
-    /// A recorded stop (`Shell.stop`): the status the command ends with once it exits.
+    /// A recorded stop (`Shell.stop`): the status the command ends with once it exits. Wakes the manager to kill it.
     stop: watch::Sender<Option<ShellStatus>>,
+    /// How the command ended and when (`ended`): the process exit, the timeout and a stop race to record it, and the
+    /// first wins. A stop is recorded when it is asked for, so the command reports it even if the process exits (or
+    /// its exit is observed) before the kill.
+    ended: Mutex<Option<(ShellStatus, u64)>>,
     pid: Option<u32>,
+    /// The Job Object holding the command and everything it starts, which stops them all at once.
+    #[cfg(windows)]
+    job: Option<windows_job::Job>,
 }
 
 pub struct ShellService {
@@ -64,6 +71,18 @@ pub struct ShellService {
     commands: Mutex<HashMap<String, Arc<Active>>>,
     exit_order: Mutex<Vec<String>>,
     events: Option<EventSink>,
+}
+
+impl Active {
+    /// Records how the command ended, unless something already did; returns whether this did (`end`).
+    fn end(&self, status: ShellStatus) -> bool {
+        let mut ended = self.ended.lock();
+        if ended.is_some() {
+            return false;
+        }
+        *ended = Some((status, crate::util::now_ms()));
+        true
+    }
 }
 
 #[cfg(unix)]
@@ -75,8 +94,16 @@ fn kill_group(pid: u32, signal: i32) {
 }
 
 
-fn kill_tree(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
+/// Stops the command and what it started: SIGTERM to its process group, then SIGKILL after 3 s. Windows has no
+/// signal to ask with, so the whole tree ends at once, as `taskkill /T /F` ends it upstream: through the command's
+/// Job Object, which needs no helper process and also holds what the command was starting meanwhile, or with
+/// `taskkill` when the command has none.
+fn kill_tree(active: &Active) {
+    #[cfg(windows)]
+    if active.job.as_ref().is_some_and(|job| job.terminate()) {
+        return;
+    }
+    let Some(pid) = active.pid else { return };
     #[cfg(unix)]
     {
         kill_group(pid, libc::SIGTERM);
@@ -88,6 +115,53 @@ fn kill_tree(pid: Option<u32>) {
     #[cfg(not(unix))]
     {
         let _ = std::process::Command::new("taskkill").args(["/pid", &pid.to_string(), "/T", "/F"]).output();
+    }
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject};
+
+    /// A Job Object holding one command's processes; processes they start join it too.
+    pub struct Job(HANDLE);
+
+    // SAFETY: a Job Object handle can be used and closed from any thread.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        /// A new Job Object holding `process` (a handle with PROCESS_SET_QUOTA and PROCESS_TERMINATE access, as
+        /// the spawner's handle has).
+        pub fn assign(process: HANDLE) -> Option<Job> {
+            // SAFETY: plain Win32 calls; the job handle is owned by the returned `Job` (or closed here).
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                if AssignProcessToJobObject(job, process) == 0 {
+                    CloseHandle(job);
+                    return None;
+                }
+                Some(Job(job))
+            }
+        }
+
+        /// Ends every process in the job, with exit code 1 as `taskkill /F` gives them.
+        pub fn terminate(&self) -> bool {
+            // SAFETY: the handle is valid until drop.
+            unsafe { TerminateJobObject(self.0, 1) != 0 }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: owned handle, closed once. Closing it leaves the processes running.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
     }
 }
 
@@ -117,7 +191,7 @@ impl ShellService {
         let _ = command.deadline.send(None);
         let running = command.info.lock().status == ShellStatus::Running;
         if running {
-            kill_tree(command.pid);
+            kill_tree(&command);
         }
         // Every shell reports exactly one exit; removing a running one ends it as killed (ce15cd882).
         if running {
@@ -184,6 +258,9 @@ impl ShellService {
         let command = self.require(id)?;
         let info = command.info.lock().clone();
         if info.status != ShellStatus::Running {
+            return Ok(info);
+        }
+        if !command.end(reason) {
             return Ok(info);
         }
         command.stop.send_if_modified(|stop| {
@@ -281,6 +358,8 @@ impl ShellService {
         drop(command);
         let mut child = spawned.map_err(|e| e.to_string())?;
         let pid = child.id();
+        #[cfg(windows)]
+        let job = child.raw_handle().and_then(|process| windows_job::Job::assign(process as _));
         let info = ShellInfo {
             id: id.clone(),
             status: ShellStatus::Running,
@@ -306,7 +385,10 @@ impl ShellService {
             done,
             deadline,
             stop,
+            ended: Mutex::new(None),
             pid,
+            #[cfg(windows)]
+            job,
         });
         self.commands.lock().insert(id.clone(), active.clone());
         if invocation.timeout > 0 {
@@ -347,10 +429,9 @@ impl ShellService {
         let manager_active = active.clone();
         tokio::spawn(async move {
             let active = manager_active;
-            // The process exit, the timeout and a stop race to record how the command ended; the first wins. A stop
-            // (a timeout is one) keeps its status but still records how the killed process exited. The terminal
-            // status is applied only once captured output is complete (3bdab634e).
-            let mut stopped: Option<(ShellStatus, u64)> = None;
+            // The process exit, the timeout and a stop race to record how the command ended (`Active::end`); the
+            // first wins. A stop (a timeout is one) keeps its status but still records how the killed process exited.
+            // The terminal status is applied only once captured output is complete (3bdab634e).
             let status = loop {
                 let deadline = *deadline_rx.borrow();
                 tokio::select! {
@@ -361,18 +442,19 @@ impl ShellService {
                             None => std::future::pending::<()>().await,
                         }
                     } => {
-                        // Timeout: record it, kill the process group, keep waiting for exit.
-                        stopped = Some((ShellStatus::Timeout, crate::util::now_ms()));
-                        kill_tree(active.pid);
+                        // Timeout: record it (unless a stop already did), kill the process group, keep waiting for
+                        // exit.
+                        active.end(ShellStatus::Timeout);
+                        kill_tree(&active);
                         let _ = active.deadline.send(None);
                         let status = child.wait().await.ok();
                         break status;
                     }
                     changed = stop_rx.changed() => {
                         let reason = *stop_rx.borrow();
-                        if let (Ok(()), Some(reason)) = (changed, reason) {
-                            stopped = Some((reason, crate::util::now_ms()));
-                            kill_tree(active.pid);
+                        // `stop` recorded it; a recorded stop always kills.
+                        if let (Ok(()), Some(_)) = (changed, reason) {
+                            kill_tree(&active);
                             let _ = active.deadline.send(None);
                             break child.wait().await.ok();
                         }
@@ -384,16 +466,14 @@ impl ShellService {
                     }
                 }
             };
-            let exited_at = crate::util::now_ms();
+            active.end(ShellStatus::Exited);
             let _ = output_task.await;
             let snapshot = {
                 let mut info = active.info.lock();
                 if info.status == ShellStatus::Running {
                     // A timeout keeps its status and time but still records how the killed process exited.
-                    (info.status, info.time.completed) = match stopped {
-                        Some((status, completed)) => (status, Some(completed)),
-                        None => (ShellStatus::Exited, Some(exited_at)),
-                    };
+                    let (ended, completed) = active.ended.lock().unwrap_or((ShellStatus::Exited, crate::util::now_ms()));
+                    (info.status, info.time.completed) = (ended, Some(completed));
                     if let Some(status) = status {
                         match status.code() {
                             Some(code) => info.exit = Some(code as i64),
