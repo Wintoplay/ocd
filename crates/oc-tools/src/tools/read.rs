@@ -300,7 +300,7 @@ pub fn read(path: &Path, resource: &str, page: Page) -> Result<ReadOutput, ReadE
         return Err(ReadError::PathKind { resource: resource.to_string(), expected: "a file or directory" });
     }
     let file = std::fs::File::open(path).map_err(io_error)?;
-    let name = FileName { uri: file_uri(path), name: util::basename(&path.to_string_lossy()) };
+    let name = FileName { uri: file_uri(path), name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
     read_file(file, metadata.len(), || std::fs::read(path).map_err(io_error), name, resource, page)
 }
 

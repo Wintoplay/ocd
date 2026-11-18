@@ -133,7 +133,7 @@ impl Tool for GrepTool {
         };
         let is_dir = kind.is_dir();
         let cwd = if is_dir { root.clone() } else { util::dirname(&root) };
-        let file_name = (!is_dir).then(|| util::basename(&root.to_string_lossy()));
+        let file_name = (!is_dir).then(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         let limit = input.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
         let search = self.ripgrep.grep(GrepInput {
             cwd: &cwd,

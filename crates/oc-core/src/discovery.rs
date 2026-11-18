@@ -649,8 +649,8 @@ mod tests {
         let global = root.join("global");
         let home = root.join("home");
         let project = home.join("repo");
-        let directory = project.join("packages/core");
-        let claude_global = home.join(".claude/CLAUDE.md");
+        let directory = project.join("packages").join("core");
+        let claude_global = home.join(".claude").join("CLAUDE.md");
         let project_agents = project.join("AGENTS.md");
         let package_claude = directory.join("CLAUDE.md");
         std::fs::create_dir_all(claude_global.parent().unwrap()).unwrap();
