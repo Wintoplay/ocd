@@ -2,8 +2,11 @@
 whose turn ends while a background shell still runs hands off like one with a running subagent, and the turn the
 shell's notice wakes after the response is streamed to the client. A shell that is done within its turn streams its
 reaction too (in that turn or in one it wakes: a race in both binaries, so only whether it arrived is recorded), and
-the session takes the next prompt as usual. The shell outputs (`SLOW-2`, `FAST-2`) are computed, so the command text
-in the history never matches the mock's turns."""
+the session takes the next prompt as usual. That race also decides how many steps the fast shell's prompt response
+counts (`usage` sums every step of the prompt's execution: 2.3.1's notice lands about 30 ms after the step that ran
+the shell, after the next step took its input, so it wakes a third step; ocd's lands within a few ms, in time for the
+second), so only which usage fields that response has is recorded. The shell outputs (`SLOW-2`, `FAST-2`) are
+computed, so the command text in the history never matches the mock's turns."""
 import os
 
 from parity.acp227 import Acp, CHILD_UPDATES, transcript
@@ -41,9 +44,12 @@ def acp_background_shell_wakes_turn(ctx):
     sid = acp.request("session/new", {"cwd": ctx.project, "mcpServers": []})["result"]["sessionId"]
     acp.wait(lambda m: (m.get("params") or {}).get("update", {}).get("sessionUpdate") == "available_commands_update")
 
-    def prompt(text):
+    def prompt(text, racy=False):
         rid = acp.start("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": text}]})
-        ctx.rec(f"prompt.{text}", (acp.response(rid) or {}).get("result"))
+        result = (acp.response(rid) or {}).get("result")
+        if racy and isinstance(result, dict) and isinstance(result.get("usage"), dict):
+            result = dict(result, usage=sorted(result["usage"]))
+        ctx.rec(f"prompt.{text}", result)
         return rid
 
     rid = prompt("run the slow shell")
@@ -58,7 +64,7 @@ def acp_background_shell_wakes_turn(ctx):
     ctx.rec("llm.slow", [[m for m in r["body"].get("messages", []) if m.get("role") != "system"]
                          for r in ctx.mock.main_requests()])
 
-    prompt("run the fast shell")
+    prompt("run the fast shell", racy=True)
     ctx.rec("fast.reaction", acp.wait(chunk("fast shell reaction"), timeout=30) is not None)
     acp.quiet(gap=1.5)
     prompt("FOLLOW-UP-PROMPT")

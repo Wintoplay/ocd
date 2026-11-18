@@ -3182,6 +3182,32 @@ mod tests {
         assert_eq!(st.shells, HashMap::from([("sh_bg".to_string(), None)]));
     }
 
+    /// translate.ts `recordStep`/`response` (2.3.1): a prompt's usage sums every step of its execution. A background
+    /// shell that finishes within the turn adds a step only when its notice arrives after the next step took its input
+    /// (the notice then wakes one more step before the execution ends); delivered with that step's input, it adds none.
+    /// Either way the shell is settled by the end of the turn.
+    #[test]
+    fn prompt_usage_sums_the_steps_a_shell_notice_wakes() {
+        let sid = "ses_root";
+        let ctx = Ctx { session: sid.into(), cwd: "/workspace".into(), start: Some("msg_input".into()), caps: Caps::default() };
+        let step = |finish: &str| ev("session.step.ended", json!({"sessionID": sid, "finish": finish, "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 0, "write": 0}}}));
+        let notice = || shell_notice(sid, "msg_notice", "sh_fast", true);
+        let run = |events: Vec<Value>| {
+            let mut st = TurnState::default();
+            let events = [vec![delivered(sid, "msg_input")], background_shell(sid, "sh_fast"), vec![step("tool-calls")], events, vec![succeeded(sid)]].concat();
+            let (_, terminal) = fold_all(&mut st, &ctx, &events);
+            assert_eq!(terminal, Some("succeeded"));
+            assert!(!pending(&st));
+            st.usage_turn.unwrap()
+        };
+        // 2.3.1's order: the notice is queued after the second step took its input, so a third step answers it.
+        let late = run(vec![notice(), step("stop"), delivered(sid, "msg_notice"), step("stop")]);
+        assert_eq!(late[..2], [30, 15]);
+        // Queued before the second step took its input, the notice is answered by that step.
+        let early = run(vec![notice(), delivered(sid, "msg_notice"), step("stop")]);
+        assert_eq!(early[..2], [20, 10]);
+    }
+
     /// turn.test.ts "streams resumed turns after background shells finish" (2.3.1, #64262): a prompt whose turn ends
     /// with a background shell running hands off; the turn the shell's notice wakes is streamed. A second shell whose
     /// notice is queued in its own turn wakes the session after it, and that turn is streamed too. The next prompt

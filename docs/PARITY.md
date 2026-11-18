@@ -249,6 +249,17 @@ throttle is the same as upstream's (`codemode/tool.ts` `record`/`publish`).
 identical** (the woken turn's `slow shell reaction` arrives after the prompt's response in both, never before the
 release file exists).
 
+**Final 2.3.1 differences (debug build, 2026-11-18):** `hg_session` and `acp_background_shell_wakes_turn` against the
+2.3.1 release, five runs each: identical in all. A Mercurial location now announces its branch right after
+`skill.updated`, before `artifact.updated`, where 2.3.1's hg plugin first changes the Vcs State (a git location still
+announces it after `model.updated`; `session_revert` identical). The fast background shell's prompt response differed
+by its token counts (2.3.1 30/15, ocd 20/10): `usage` sums every step of the prompt's execution, and 2.3.1's shell
+notice lands about 30 ms after the step that ran the shell, after the next step took its input, so it wakes a third
+step, while ocd's lands within a few ms and the second step answers it. A build of the ACP batch shows 20/10 too, so
+the scenario now records only the usage field names of that response. The neighbouring groups: `hg` 7 of 7, `acp` 4
+of 4, `loop` 20 of 22 and `readonly` 5 of 6, the same three differences as the full run (`loop_tool_error` and
+`loop_http_400` orderings, `readonly_fs`'s directory order).
+
 **Code Mode features of 2.3.1 (debug build, 2026-11-18):** the new group `codemode231` and the Code Mode
 scenarios `codemode230_*`, `tools227_codemode`, `session225_codemode_*` and `tools22_repair_codemode_mcp` against
 the 2.3.1 release (`up-dist-2.3.1`): every Code Mode part, tool result, permission request and model request is
