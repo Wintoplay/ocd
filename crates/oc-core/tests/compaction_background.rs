@@ -3,6 +3,8 @@
 //! `precompute`, against an OpenAI-compatible mock. One test function: the cases share one engine (the XDG
 //! environment is process-wide), each on its own session.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -208,6 +210,14 @@ async fn measured_and_background_compaction() {
     Box::pin(scenarios()).await
 }
 
+/// One case of the scenario, built in this function's frame and moved to the heap. A debug build keeps every
+/// future an async function builds in that function's poll frame, so building the cases inline would put all of
+/// them in the scenario's frame at once.
+#[inline(never)]
+fn case<'a, F: Future<Output = ()> + Send + 'a>(build: impl FnOnce() -> F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(build())
+}
+
 async fn scenarios() {
     let root = std::env::temp_dir().join(format!("oc-compaction-bg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -272,9 +282,11 @@ async fn scenarios() {
     let engine = Engine::new(app.clone(), &services);
     engine.install();
     let h = Harness { app, engine, mock };
+    // The cases borrow these; each case's closure copies the references.
+    let (h, summary, on, off) = (&h, &summary, &on, &off);
 
     // ---- summary cache prefix uses measured input with old reasoning (background = false, true)
-    Box::pin(async {
+    case(move || async move {
         for background in [false, true] {
             h.reset();
             // The cycle starts low, so the latest response is past the point where a background summary starts.
@@ -299,7 +311,7 @@ async fn scenarios() {
     .await;
 
     // ---- summary cache prefix still flattens genuinely oversized measured input
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let context = h.context(&summary, vec![text_user(&token_text(CEILING)), measured("Latest answer", WINDOW + BUFFER)]).await;
         assert_eq!(h.manual(&context).await, CompactOutcome::Completed);
@@ -313,7 +325,7 @@ async fn scenarios() {
     .await;
 
     // ---- summary measured recovery shrinks from the rejected measured size
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let text = token_text(CEILING / 2);
         let context = h
@@ -330,7 +342,7 @@ async fn scenarios() {
     .await;
 
     // ---- summary measured recovery reuses usage only for the matching agent
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let context = h.context(&summary, vec![text_user("Earlier question"), old_reasoning(INPUT)]).await;
         let mut other = context.clone();
@@ -351,7 +363,7 @@ async fn scenarios() {
     .await;
 
     // ---- background summaries stay off when disabled
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&off, history.near.clone()).await;
@@ -364,7 +376,7 @@ async fn scenarios() {
     .await;
 
     // ---- automatic compaction swaps in the background summary without another model call
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
@@ -403,7 +415,7 @@ async fn scenarios() {
     .await;
 
     // ---- automatic compaction waits for a background summary still being written
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let gate = Arc::new(tokio::sync::Notify::new());
         h.mock.lock().gate = Some(gate.clone());
@@ -430,7 +442,7 @@ async fn scenarios() {
     .await;
 
     // ---- a model switch waits for the new model's first response before summarizing in the background
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let mut switched = h.context(&on, history.near.clone()).await;
@@ -444,7 +456,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary that fell too far behind is replaced from a newer response
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
@@ -465,7 +477,7 @@ async fn scenarios() {
     .await;
 
     // ---- a failed background summary is retried from a newer response, then left until compaction
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
@@ -502,7 +514,7 @@ async fn scenarios() {
     .await;
 
     // ---- compaction summarizes as usual when the background summary no longer fits the conversation
-    Box::pin(async {
+    case(move || async move {
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
         // About 75k tokens arrived after the summarized prefix, past the 68k that may stay verbatim beside it.
@@ -516,7 +528,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary is swapped in for a different model (2.3.1: the summary is plain text)
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
@@ -532,7 +544,7 @@ async fn scenarios() {
     .await;
 
     // ---- an overflow compaction swaps in the background summary (2.3.1)
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
@@ -546,7 +558,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary starts when the latest response already passed the threshold (2.3.1)
-    Box::pin(async {
+    case(move || async move {
         h.reset();
         let history = precompute_history();
         // The turn ended past the threshold; the summary is written while the session is idle.
@@ -562,8 +574,7 @@ async fn scenarios() {
     .await;
 
     // The one request of an automatic compaction after two background attempts, as JSON text.
-    let swapped_in = |context: Loaded, before: Vec<Message>, within: Vec<Message>, due: Vec<Message>| {
-        let h = &h;
+    let swapped_in = &|context: Loaded, before: Vec<Message>, within: Vec<Message>, due: Vec<Message>| {
         async move {
             h.reset();
             h.engine.precompute(&h.with(&context, before), false).await.unwrap();
@@ -576,7 +587,7 @@ async fn scenarios() {
     };
 
     // ---- a background summary keeps a tail longer than twice keep while it stays under 40% of the budget (2.2.7)
-    Box::pin(async {
+    case(move || async move {
         let history = precompute_history();
         let near = h.context(&on, history.near.clone()).await;
         // About 35k tokens arrived after the summarized prefix: more than twice keep, less than 68k.
@@ -591,7 +602,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary starts a fixed lead before the threshold, not at a share of it
-    Box::pin(async {
+    case(move || async move {
         // A 1M window compacts at 850k, so a background summary starts 60k before that, at 790k.
         let mut large = h.context(&on, vec![]).await;
         (large.resolved.model.limit.context, large.resolved.model.limit.output) = (1_000_000, 128_000);
@@ -606,7 +617,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary starts on a window whose threshold is under 64k
-    Box::pin(async {
+    case(move || async move {
         // A 64k window compacts at 48k. The first response measured 20k, so half that room, 14k, sets the start at 34k.
         let mut small = h.context(&on, vec![]).await;
         (small.resolved.model.limit.context, small.resolved.model.limit.output) = (64_000, 16_000);
@@ -620,7 +631,7 @@ async fn scenarios() {
     .await;
 
     // ---- a background summary waits for a response whose prompt is still cached
-    Box::pin(async {
+    case(move || async move {
         let now = oc_schema::id::now_ms();
         let ten_minutes_ago = now - 10 * 60_000;
         // The latest response was written ten minutes ago; then a new one arrives.
