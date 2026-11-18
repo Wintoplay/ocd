@@ -113,7 +113,13 @@ fn main() {
         }
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    // The runtime's threads poll large futures (a session's turn, a provider call), so they get the stack the main
+    // thread has (8 MiB; see build.rs for Windows) instead of tokio's 2 MiB. Pages are committed only as used.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 << 20)
+        .build()
+        .expect("tokio runtime");
     // `run` and `serve` cancel their own work on a stop signal and return; any other command is interrupted.
     let graceful = matches!(inv.name.as_str(), "run" | "serve");
     let code = rt.block_on(async move {

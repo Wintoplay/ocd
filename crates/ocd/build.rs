@@ -4,7 +4,8 @@
 //! as written by `scripts/build-web-ui.sh`. The archive is not committed; without it the binary
 //! embeds nothing and serves no web UI (like an upstream build made with `--skip-web-ui`).
 //!
-//! Also sets the ocd build version (see [`build_version`]).
+//! Also sets the ocd build version (see [`build_version`]) and, on Windows, the main thread's stack (see
+//! [`main_stack`]).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,6 +37,22 @@ fn main() {
     };
     std::fs::write(&out, code).expect("write web_ui_archive.rs");
     build_version(&manifest);
+    main_stack();
+}
+
+/// The main thread runs the command's whole future (`block_on` in `main`). Windows gives it the stack the linker
+/// reserves, 1 MiB by default, where Linux and macOS give 8 MiB; reserve 8 MiB there too. Only address space is
+/// reserved: pages are committed as the stack grows.
+fn main_stack() {
+    const STACK: u32 = 8 << 20;
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("msvc") => println!("cargo:rustc-link-arg-bin=ocd=/STACK:{STACK}"),
+        Ok("gnu") | Ok("gnullvm") => println!("cargo:rustc-link-arg-bin=ocd=-Wl,--stack,{STACK}"),
+        _ => {}
+    }
 }
 
 /// `OCD_BUILD_VERSION` for `ocd --version`. The release workflow sets it to `<tag without v>+<commit>`; a build

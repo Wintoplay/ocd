@@ -254,6 +254,12 @@ impl Client {
     /// channel, the channel executor that carries the request (upstream `StreamOptions.webSocket`).
     /// On the channel path every failure (including the HTTP fallback's) arrives in the stream.
     pub async fn stream_opts(&self, request: LLMRequest, cancel: CancellationToken, options: StreamOptions) -> Result<LLMStream, AIError> {
+        // Boxed: opening a stream (compile, hooks, the HTTP exchange) is a large future, and every caller up to the
+        // session's turn would otherwise hold it inline and build it on the polling thread's stack.
+        Box::pin(self.open_stream(request, cancel, options)).await
+    }
+
+    async fn open_stream(&self, request: LLMRequest, cancel: CancellationToken, options: StreamOptions) -> Result<LLMStream, AIError> {
         let hook = options.http;
         if let Some(prepared) = request.model.route.stream.clone() {
             // `compile` then `route.streamPrepared`: no HTTP transport, no terminal-event rule.

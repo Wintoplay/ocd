@@ -990,7 +990,7 @@ impl Engine {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return Err(DrainError::Interrupted),
-                        result = self.idle_hook(session_id) => result.map_err(DrainError::Failed)?,
+                        result = Box::pin(self.idle_hook(session_id)) => result.map_err(DrainError::Failed)?,
                     }
                     if !inbox::has(bus, session_id, None)? {
                         return Ok(());
@@ -1016,7 +1016,8 @@ impl Engine {
                 }
                 break self.load(selected).await?;
             };
-            continuing = self.run_step(ready, step, cancel.clone()).await?;
+            // Boxed: a step (its compaction, the provider stream, the tools) is the turn's largest future.
+            continuing = Box::pin(self.run_step(ready, step, cancel.clone())).await?;
             stepped = true;
             step += 1;
             force = false;

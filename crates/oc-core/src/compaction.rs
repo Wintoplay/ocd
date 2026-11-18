@@ -1218,9 +1218,9 @@ impl Run<'_> {
         let history_is_prepared = !keep_id.as_deref().is_some_and(|k| prepared.request.messages.iter().any(|m| m.id.as_deref() == Some(k)));
         // The provider just rejected this conversation, so sending it unchanged again would be rejected too.
         let overflow = *self.trigger == Trigger::Overflow;
-        let mut result = self
-            .deliver(&prepared, Mode::Summary { prompt }, budget - overhead, fit - overhead, &history, measured, history_is_prepared, overflow)
-            .await?;
+        // Boxed (here and on the native path): the request attempts, each opening a stream, are a large future.
+        let delivered = self.deliver(&prepared, Mode::Summary { prompt }, budget - overhead, fit - overhead, &history, measured, history_is_prepared, overflow);
+        let mut result = Box::pin(delivered).await?;
         let Some(keep_id) = keep_id else { return Ok(result) };
         // A compaction hook may choose its own kept range.
         let mut metadata = Metadata::new();
@@ -1237,7 +1237,7 @@ impl Run<'_> {
         }
         let prepared = self.prepare(messages, budget).await?;
         let history = prepared.request.clone();
-        self.deliver(&prepared, Mode::Native, budget, budget, &history, None, true, false).await
+        Box::pin(self.deliver(&prepared, Mode::Native, budget, budget, &history, None, true, false)).await
     }
 
     fn publish(&self, outcome: Result<Res, SessionError>) -> anyhow::Result<CompactOutcome> {
@@ -1328,7 +1328,8 @@ impl Engine {
     /// `SessionCompaction.compact(trigger)`: one span, the parent of every request the compaction sends (the summary,
     /// its reminder, the shorter resends).
     pub async fn compact(self: &Arc<Self>, loaded: &Loaded, trigger: Trigger, cancel: CancellationToken) -> anyhow::Result<CompactOutcome> {
-        oc_util::trace::span(self.compact_in_span(loaded, trigger, cancel)).await
+        // Boxed: the summary request's future is large, and the turn's step awaits a compaction before every call.
+        oc_util::trace::span(Box::pin(self.compact_in_span(loaded, trigger, cancel))).await
     }
 
     async fn compact_in_span(self: &Arc<Self>, loaded: &Loaded, trigger: Trigger, cancel: CancellationToken) -> anyhow::Result<CompactOutcome> {
