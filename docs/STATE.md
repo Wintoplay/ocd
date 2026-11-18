@@ -94,6 +94,18 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-18: 2.3.1 CATCH-UP, PROVIDERS AND SERVER (Q3): reasoning replay on OpenAI Chat routes (#64243,
+  `openai_chat.rs` `lower_assistant`: a declared field other than `reasoning_details` drops replayed details/opaque,
+  `reasoning_details` never gets the text written over the array; `tests/wire_2_3_1.rs` compiles 512 replays with
+  2.3.1's own routes under Bun); the OpenAI sign-in read from the stored credential (#64470, `models.rs`
+  `openai_sign_in`, no refresh at load) and GPT 6.2 Sol/Astra in `FALLBACK_MODELS` (#64508); readable 500s (#64022:
+  `ApiError::Defect` → `UnknownError{message, ref}`, `ApiError::Storage` from `oc_storage::failure` (SQLite primary
+  code in the anyhow chain, via oc-backend `util::defect`/`defect_chain`), a panic-catch layer, failed commits roll
+  back); the local agent CLI's chat reports run one full check per model without a context size (#64107,
+  `claude_agent::Location::checked`); unreachable well-known sources skipped (#62578); models.dev `video` type kept
+  (`TYPES`, `CATALOG_PATH`), `xai/videos` bundled, video refs 422 in `generate.rs`, hourly `video_*` blob cleanup
+  (`automations::start_blob_cleanup`). Video routes still answer 403 even with the flag on (no video protocols).
+  Parity group `providers231` and `claude_new_model_context`.
 - 2026-11-18: 2.3.1 CATCH-UP, TUI AND ACP (Q4): the assistant footer drops `· N ttft` (#63759). A permission
   prompt wins over the composer (#64343, `composer_open` = upstream's `composerVisible`): a subagent session shows its
   own permission prompt instead of the Subagents composer, an open composer gives way to an arriving prompt and comes

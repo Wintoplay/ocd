@@ -299,3 +299,48 @@ def claude_exit_on_start(ctx):
     _connect(ctx, wait_models=False)
     _inventory(ctx)
     _wire(ctx, log)
+
+
+@scenario("claude")
+def claude_new_model_context(ctx):
+    """2.3.1 (#64107): a chat's `claude` reports a model the saved catalog doesn't know, without a context size (only
+    the login check reads those): one full check runs for it, so the model gets its real window instead of falling
+    back to 200k; the next chat start doesn't check again."""
+    log = _setup(ctx, {"contextWindows": {"opus": 1000000, "haiku": 200000, "sonnet": 1000000},
+                       "turns": [[{"text": "COPPER-OTTER"}], [{"text": "LILAC-HERON"}]]})
+    ctx.start()
+    ctx.booted()
+    _connect(ctx)
+    _inventory(ctx, ".connected")
+    # Claude Code now offers Sonnet too.
+    spec = os.path.join(ctx.state, "claude-scenario.json")
+    with open(spec) as f:
+        body = json.load(f)
+    body["init"] = {"models": [
+        {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)",
+         "description": "Opus 5.5", "supportsEffort": True, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+        {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "For complex work",
+         "supportsEffort": True, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+        {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5", "description": "Balanced",
+         "supportsEffort": True, "supportedEffortLevels": ["low", "medium", "high"]},
+        {"value": "haiku", "resolvedModel": "claude-haiku-5-5", "displayName": "Haiku 5.5", "description": "Fastest",
+         "supportsEffort": True, "supportedEffortLevels": ["low", "medium", "high"]},
+    ]}
+    with open(spec, "w") as f:
+        json.dump(body, f)
+    sid = _session(ctx)
+    ctx.prompt(sid, "Reply with a marker")
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        models = ctx.data("model.poll", "GET", f"/api/model?directory={ctx.project}", record=False)
+        sonnet = [m for m in models if m.get("providerID") == "claude-agent" and m.get("id") == "sonnet"] \
+            if isinstance(models, list) else []
+        if sonnet and sonnet[0].get("limit", {}).get("context") == 1000000:
+            break
+        time.sleep(0.3)
+    time.sleep(1.5)
+    _inventory(ctx, ".checked")
+    sid = _session(ctx)
+    ctx.prompt(sid, "Another marker")
+    time.sleep(1.5)
+    _record(ctx, sid, log)
