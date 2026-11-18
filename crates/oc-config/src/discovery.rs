@@ -60,6 +60,13 @@ impl Options {
     }
 }
 
+/// `instructions.claude` (`server-process.ts`, 2.3.1 #64474/#64533): CLAUDE.md stands in where no AGENTS.md exists,
+/// and `~/.claude/CLAUDE.md` for a missing global AGENTS.md, unless `OPENCODE_DISABLE_CLAUDE_CODE` or
+/// `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` is truthy.
+pub fn instructions_claude() -> bool {
+    !(truthy(std::env::var("OPENCODE_DISABLE_CLAUDE_CODE").ok()) || truthy(std::env::var("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT").ok()))
+}
+
 /// `OPENCODE_DISABLE_CLAUDE_CODE` or `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` truthy.
 pub fn claude_disabled() -> bool {
     truthy(std::env::var("OPENCODE_DISABLE_CLAUDE_CODE").ok())

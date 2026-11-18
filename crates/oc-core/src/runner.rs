@@ -617,6 +617,7 @@ impl Engine {
                 global_config: &g.config,
                 project: oc_config::discovery::Options::from_env().project != Some(false),
                 global: true,
+                claude: oc_config::discovery::instructions_claude(),
                 instructions: &configured,
                 remote: &remote,
             })
@@ -820,6 +821,7 @@ impl Engine {
             tool_output_max_bytes: oc_config::fold::tool_output(entries).and_then(|t| t.max_bytes).map(|v| v as usize),
             subagent_depth: Some(oc_config::fold::subagent_depth(entries)),
             shell: oc_config::fold::shell(entries).map(str::to_string),
+            instructions_claude: oc_config::discovery::instructions_claude(),
             image_model: match oc_config::fold::image_generate(entries) {
                 Some(oc_config::schema::ImageGenerate::Settings { model: Some(m) }) => Some(oc_tools::tools::image_generate::ConfiguredModel {
                     provider_id: m.provider_id.clone(),
@@ -1346,6 +1348,7 @@ impl Engine {
             tool_output_max_bytes: oc_config::fold::tool_output(entries).and_then(|t| t.max_bytes).map(|v| v as usize),
             subagent_depth: Some(oc_config::fold::subagent_depth(entries)),
             shell: oc_config::fold::shell(entries).map(str::to_string),
+            instructions_claude: oc_config::discovery::instructions_claude(),
             ..Default::default()
         };
         Ok(CheckEnv {

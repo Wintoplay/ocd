@@ -32,6 +32,9 @@ pub struct DiscoveryInput<'a> {
     pub global_config: &'a Path,
     pub project: bool,
     pub global: bool,
+    /// `instructions.claude`: CLAUDE.md where a directory has no AGENTS.md, and `~/.claude/CLAUDE.md` when the
+    /// global AGENTS.md is missing.
+    pub claude: bool,
     /// Configured `instructions` entries (files, globs, `~/` paths and http(s) URLs), deduplicated in
     /// entry order.
     pub instructions: &'a [String],
@@ -63,9 +66,9 @@ fn read_instruction(path: &Path) -> Result<ReadResult, std::io::Error> {
     }
 }
 
-/// `ConfigInstructionPlugin` sources: the global `AGENTS.md`, project `AGENTS.md` files from the
-/// location up to the project root (or home), then configured `instructions`. Returns `None` when
-/// the set is unavailable (a discovered project file vanished, or a source failed). Entries with
+/// `ConfigInstructionPlugin` sources: the global `AGENTS.md` (or `~/.claude/CLAUDE.md`), project `AGENTS.md` (or
+/// `CLAUDE.md`) files from the location up to the project root (or home), then configured `instructions`. Returns
+/// `None` when the set is unavailable (a discovered project file vanished, or a source failed). Entries with
 /// the same path keep their first position (the discovery editor is a `Map`).
 pub fn discover(input: &DiscoveryInput) -> Option<Vec<File>> {
     let start = resolve(input.directory);
@@ -74,28 +77,36 @@ pub fn discover(input: &DiscoveryInput) -> Option<Vec<File>> {
     let project = input.project && start.starts_with(&root);
     let stop = if start.starts_with(&home) { home } else { root.clone() };
     let global_file = resolve(&input.global_config.join("AGENTS.md"));
+    // ~/.claude/CLAUDE.md stands in for the global AGENTS.md when it is missing.
+    let claude_global_file = resolve(&resolve(input.home).join(".claude").join("CLAUDE.md"));
+    let names = oc_tools::tools::read::instruction_filenames(input.claude);
+    let global_files = if input.claude { vec![global_file, claude_global_file] } else { vec![global_file] };
 
     let global = || -> Result<Vec<File>, std::io::Error> {
-        if !input.global || !global_file.is_file() {
+        if !input.global {
             return Ok(vec![]);
         }
-        Ok(match read_instruction(&global_file)? {
-            ReadResult::File(f) => vec![f],
-            _ => vec![],
-        })
+        for candidate in &global_files {
+            if !candidate.is_file() {
+                continue;
+            }
+            return Ok(match read_instruction(candidate)? {
+                ReadResult::File(f) => vec![f],
+                _ => vec![],
+            });
+        }
+        Ok(vec![])
     };
     let project_files = || -> Result<Option<Vec<File>>, std::io::Error> {
         if !project {
             return Ok(Some(vec![]));
         }
+        let found: Vec<PathBuf> =
+            ancestors(&start, &stop).iter().flat_map(|dir| names.iter().map(move |name| dir.join(name))).filter(|c| c.is_file()).collect();
         let mut seen: Vec<PathBuf> = Vec::new();
-        for dir in ancestors(&start, &stop) {
-            let candidate = dir.join("AGENTS.md");
-            if !candidate.is_file() {
-                continue;
-            }
+        for candidate in oc_tools::tools::read::prefer_agents(found) {
             let r = resolve(&candidate);
-            if (!input.global && r == global_file) || seen.contains(&r) {
+            if (!input.global && global_files.contains(&r)) || seen.contains(&r) {
                 continue;
             }
             seen.push(r);
@@ -436,6 +447,7 @@ mod tests {
             global_config: Path::new("/nonexistent-config"),
             project: true,
             global: true,
+            claude: true,
             instructions: &[],
             remote: &HashMap::new(),
         })
@@ -505,6 +517,7 @@ mod tests {
             global_config: &root.join("global"),
             project: true,
             global: true,
+            claude: true,
             instructions: &instructions,
             remote: &fetched,
         };
@@ -561,6 +574,7 @@ mod tests {
             global_config: &global_dir,
             project,
             global,
+            claude: true,
             instructions: &instructions,
             remote: &empty,
         };
@@ -619,10 +633,64 @@ mod tests {
             global_config: Path::new("/nonexistent-config"),
             project: true,
             global: true,
+            claude: true,
             instructions: &[],
             remote: &HashMap::new(),
         })
         .unwrap();
         assert_eq!(render(&files), format!("Instructions from: {}\npackage", packages.join("AGENTS.md").display()));
+    }
+
+    // instruction-discovery.test.ts "falls back to CLAUDE.md where no AGENTS.md exists" (2.3.1, #64474, #64533).
+    #[test]
+    fn falls_back_to_claude_md_where_no_agents_md_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = resolve(tmp.path());
+        let global = root.join("global");
+        let home = root.join("home");
+        let project = home.join("repo");
+        let directory = project.join("packages/core");
+        let claude_global = home.join(".claude/CLAUDE.md");
+        let project_agents = project.join("AGENTS.md");
+        let package_claude = directory.join("CLAUDE.md");
+        std::fs::create_dir_all(claude_global.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&claude_global, "claude global").unwrap();
+        std::fs::write(&project_agents, "project agents").unwrap();
+        std::fs::write(project.join("CLAUDE.md"), "project claude").unwrap();
+        std::fs::write(&package_claude, "package claude").unwrap();
+        let load = |claude: bool| {
+            render(
+                &discover(&DiscoveryInput {
+                    directory: &directory,
+                    project_directory: &project,
+                    home: &home,
+                    global_config: &global,
+                    project: true,
+                    global: true,
+                    claude,
+                    instructions: &[],
+                    remote: &HashMap::new(),
+                })
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            load(true),
+            [
+                format!("Instructions from: {}\nclaude global", claude_global.display()),
+                format!("Instructions from: {}\npackage claude", package_claude.display()),
+                format!("Instructions from: {}\nproject agents", project_agents.display()),
+            ]
+            .join("\n\n")
+        );
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join("AGENTS.md"), "global agents").unwrap();
+        let preferred = load(true);
+        assert!(preferred.contains(&format!("Instructions from: {}\nglobal agents", global.join("AGENTS.md").display())));
+        assert!(!preferred.contains("claude global"));
+        let disabled = load(false);
+        assert!(!disabled.contains("CLAUDE.md"));
+        assert!(disabled.contains(&format!("Instructions from: {}\nproject agents", project_agents.display())));
     }
 }

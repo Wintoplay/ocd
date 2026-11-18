@@ -78,6 +78,9 @@ agent/provider registries. It uses the functions below to do that work.
 - `Options { project, global, file, content }` and `Options::from_env()`, which reads
   `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG_PROJECT_DISABLE` and
   `OPENCODE_DISABLE_PROJECT_CONFIG`. `filewatcher_disabled()` reports the watcher switch.
+- `instructions_claude()` is the server's `instructions.claude` (2.3.1): CLAUDE.md where a directory has no
+  AGENTS.md and `~/.claude/CLAUDE.md` for a missing global AGENTS.md, off when `OPENCODE_DISABLE_CLAUDE_CODE` or
+  `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` is truthy (`claude_disabled()`, the skills switch, is separate).
 - `discover(global_config, home, directory, &Options) -> Sources { global, explicit, direct,
   project: [ProjectRoot{path,present}], claude, agents }`. It walks upward to `/`, resolves every
   candidate with realpath, and filters out global roots.

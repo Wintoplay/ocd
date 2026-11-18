@@ -31,16 +31,6 @@ pub enum ListType {
     Symlink,
 }
 
-impl ListType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ListType::File => "file",
-            ListType::Directory => "directory",
-            ListType::Symlink => "symlink",
-        }
-    }
-}
-
 /// Structured read output (`ReadToolFileSystem.Output`, 2.3.1): text with its first line number and line count, a
 /// directory page, or media whose bytes travel beside the reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,7 +904,7 @@ impl Tool for ReadTool {
             Err(error) => return Err(map_read_error(error, &input.path)),
         };
         if target.external_directory.is_none() {
-            let candidates = discover_agents(&target.absolute, &ctx.directory, matches!(output, ReadOutput::Directory { .. }), false);
+            let candidates = discover_agents(&target.absolute, &ctx.directory, matches!(output, ReadOutput::Directory { .. }), ctx.config.instructions_claude);
             if !candidates.is_empty() {
                 let _ = ctx.host.load_instructions(&ctx.session_id, candidates).await;
             }

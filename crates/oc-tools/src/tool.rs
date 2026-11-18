@@ -133,6 +133,8 @@ pub struct ToolConfig {
     pub image: ImageLimits,
     /// `experimental.image_generate.model`: the image tool's preferred model.
     pub image_model: Option<crate::tools::image_generate::ConfiguredModel>,
+    /// `instructions.claude`: a read also discovers CLAUDE.md where a directory has no AGENTS.md.
+    pub instructions_claude: bool,
 }
 
 impl Default for ToolConfig {
@@ -145,6 +147,7 @@ impl Default for ToolConfig {
             shell: None,
             image: ImageLimits::default(),
             image_model: None,
+            instructions_claude: true,
         }
     }
 }
