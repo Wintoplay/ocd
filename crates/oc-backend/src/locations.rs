@@ -376,6 +376,9 @@ async fn boot_notifications(app: &Arc<App>, git: &Git, loc: &Arc<Loc>, at: &oc_s
     // artifact State in the same batch, after the built-ins before the configured plugins and before the `post`
     // ones (the first to touch references is `opencode.config.reference`): its first notify always fires.
     let artifacts = app.plugins.transforms(&loc.key, oc_core::artifact::DOMAIN);
+    // 2.3.1: the built-in `opencode.provider.opencode` plugin transforms the artifact State too (its OpenCode Console
+    // provider, added only while Console offers artifacts), after the skills and before web search.
+    let console_artifacts = app.plugins.builtin_enabled(&loc.key, "opencode.provider.opencode");
     // Upstream's local model discovery plugins ask their servers while the boot batch runs: an answer that comes
     // at once is part of these notifications (a server that does not answer within the budget announces later).
     app.plugins.local.first_round(&loc.key, std::time::Duration::from_millis(250)).await;
@@ -383,15 +386,18 @@ async fn boot_notifications(app: &Arc<App>, git: &Git, loc: &Arc<Loc>, at: &oc_s
         if kind == vcs_slot {
             crate::vcs_watch::refresh(app, loc).await;
         }
-        if kind == "reference.updated" && artifacts {
+        if kind == "reference.updated" && artifacts && !console_artifacts {
             app.bus.publish("artifact.updated", json!({}), Some(at.clone()));
         }
         app.bus.publish(kind, json!({}), Some(at.clone()));
+        if kind == "skill.updated" && console_artifacts {
+            app.bus.publish("artifact.updated", json!({}), Some(at.clone()));
+        }
     }
     // A booted location's first notify always fires: whatever was recorded for an earlier instance is stale.
     app.plugins.forget_projections(&loc.key);
     // The artifact State announced its providers in the burst; a later notify compares with them.
-    if artifacts
+    if (artifacts || console_artifacts)
         && let Some(projector) = &notify.projector
         && let Some(projection) = projector(loc.clone(), oc_core::artifact::DOMAIN).await
     {

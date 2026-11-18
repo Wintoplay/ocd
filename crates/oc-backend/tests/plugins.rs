@@ -601,6 +601,7 @@ async fn failing_transform_announces_only_changed_domains() {
             "agent.updated",
             "command.updated",
             "skill.updated",
+            "artifact.updated",
             "websearch.updated",
             "reference.updated",
             "plugin.updated"
