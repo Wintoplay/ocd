@@ -1,6 +1,7 @@
 //! `oc_server::Backend` implemented over `oc_core::App` (spec 06): every HTTP operation maps to
 //! a core service, a direct storage/git/config call, or a documented `TODO(core)` stub.
 
+pub mod automations;
 pub mod backend;
 pub mod catalog;
 pub mod engine;
@@ -11,7 +12,6 @@ pub mod locations;
 pub mod notify;
 pub mod persistent;
 pub mod plugins;
-pub mod schedules;
 pub mod sessions;
 pub mod shells;
 pub mod stats;
@@ -69,8 +69,6 @@ pub async fn start(
     start_v1_import(&engine);
     start_models_refresh(&engine);
     start_project_sweep(&engine);
-    // Schedules fire from any server process (`service`, `serve` or `--standalone`); the table holds their state.
-    schedules::start(&engine);
     Ok((server, engine))
 }
 

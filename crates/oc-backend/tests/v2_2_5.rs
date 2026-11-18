@@ -1,6 +1,6 @@
 //! opencode 2.2.5 API behaviour: `integration.connect` (listing, connecting, credential creation), `integration.use`
-//! by account, the artifact routes answering as disabled, Code Mode schedule checks, and session deletion clearing
-//! the session's background jobs. Expected bodies were checked against the 2.2.5 binary.
+//! by account, the artifact routes answering as disabled, and session deletion clearing the session's background
+//! jobs. Expected bodies were checked against the 2.2.5 binary.
 
 mod common;
 
@@ -174,20 +174,6 @@ async fn artifact_routes_validate_resolve_the_location_then_answer_disabled() {
     assert_eq!((r.status.as_u16(), r.json()["_tag"].clone()), (404, json!("SessionNotFoundError")));
     let r = h.req_in(Some(&h.dir()), "POST", "/api/experimental/artifacts", Some(json!({ "title": "t", "files": files, "sessionID": missing }))).await;
     assert_eq!(r.status, 403);
-}
-
-#[tokio::test]
-async fn schedule_code_checks_pass_validation_and_answer_disabled() {
-    let h = harness();
-    let sid = h.session().await;
-    let r = h.post("/api/experimental/schedule", json!({ "sessionID": sid, "prompt": "p", "if": { "code": "return true" } })).await;
-    assert_eq!(
-        (r.status.as_u16(), r.json()),
-        (403, json!({ "_tag": "ForbiddenError", "message": "Scheduled tasks are disabled; set experimental.schedules in config" }))
-    );
-    let r = h.post("/api/experimental/schedule", json!({ "sessionID": sid, "prompt": "p", "if": { "run": "true", "code": "x" } })).await;
-    assert_eq!(r.status, 400);
-    assert_eq!(r.json()["message"], "Expected never\n  at [\"if\"][\"code\"]\nExpected never\n  at [\"if\"][\"run\"]");
 }
 
 #[tokio::test]

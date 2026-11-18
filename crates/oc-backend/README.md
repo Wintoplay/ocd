@@ -83,14 +83,16 @@ responses always match `openapi.json` key order and shapes (a mismatch is a defe
   `runner.generate_image` / `generate_decisions` at the same location: the image or decision model of the
   ref, the provider call with the one-shot retry, URL images downloaded so every image comes back inline,
   `tokens`, `cost` (decisions) and the provider metadata as `native`.
-* **schedules** (`schedules.rs`, `experimental.schedules`): the six `experimental.schedule.*` routes over
-  `oc_core::schedule::Schedules` (`server/src/handlers/schedule.ts`): create settles permission asks unattended
-  (no listener can answer them), `Schedule.InvalidError` → 400 `{kind:"schedule"}`, disabled → 403, permission
-  blocks/corrections → 403, a missing session → 404 `SessionNotFoundError`; get/pause/resume/delete read a schedule
-  whose session is gone as 404 `ScheduleNotFoundError` and one whose location has the flag off as 403. Every server
-  process (`serve`, `--standalone`, the service) runs the schedule loop (`schedules::start`); scheduled wakes go
-  through `Engine::prompt` (activation, `session.prompt` hook, admission, wake). `/schedule` is a native command
-  (`CommandDef::Schedule`) listed only where the flag is on and `opencode.tool.schedule` is enabled.
+* **automations, video and blobs** (`automations.rs`, 2.3.1): the schedule routes, the schedule loop and `/schedule`
+  are gone (2.3.1's migrations drop the `schedule` table; `oc_core::schedule` stays unwired as the base of the
+  automations port). The six `experimental.automation.*` routes answer like a release build with
+  `experimental.automations` off (`server/src/handlers/automation.ts`): create checks the owner session (404), the
+  directory (the session's, the payload's or the home folder; relative or missing → 400 `{kind:"automation"}`), then
+  403 `Automations are disabled; set experimental.automations in config`; list checks its `sessionID`/`directory`
+  filters the same way (a folder that is gone stays readable) and lists nothing; get/pause/resume/delete answer 404
+  `AutomationNotFoundError` for an id the `automation` table lacks, else 403. `generate.video.*` answer 403 `Video
+  generation is disabled; enable experimental.video_generate` after decoding. `blob.get` reads `<data>/blobs/<id>`
+  (`BlobStore.read`: 404 `BlobNotFoundError` when missing, the type sniffed from the first 64 bytes).
 * **disabled features**: `plugin.gui` is always 404 `PluginNotFoundError`.
 * **artifacts** (`server/src/handlers/artifact.ts` over `oc_core::artifact`, `experimental.artifacts`): after
   param/body validation the location resolves from an explicit directory, else the session (404), else the stored

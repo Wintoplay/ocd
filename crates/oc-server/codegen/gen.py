@@ -101,8 +101,9 @@ ERROR_STATUS = {
     "InstructionEntryValueTooLargeError": 413, "UnknownError": 500,
     "CommandExecutionError": 500, "RpcInternalError": 500, "VcsInitNotSupportedError": 501,
     "ServiceUnavailableError": 503, "PluginNotFoundError": 404, "ModelNotFoundError": 404,
-    "UnsupportedModelError": 422, "ProviderRequestError": 502, "ScheduleNotFoundError": 404,
+    "UnsupportedModelError": 422, "ProviderRequestError": 502, "AutomationNotFoundError": 404,
     "PtyFeatureUnsupportedError": 501, "ArtifactNotFoundError": 404,
+    "VideoNotFoundError": 404, "BlobNotFoundError": 404,
 }
 
 # Scope per operation (spec 06 §1.1 / §7). Operations with a `location` query parameter are L.
@@ -137,6 +138,7 @@ SPECIAL = {
     "fs.read": ("crate::backend::FsReadRequest", "crate::backend::FsFile"),
     "pty.connect": ("crate::backend::PtyAttachRequest", "crate::backend::PtyAttachment"),
     "experimental.media.get": ("MediaGetRequest", "crate::backend::MediaBlob"),
+    "experimental.blob.get": ("BlobGetRequest", "crate::backend::BlobFile"),
     "experimental.persistentPty.connect": ("crate::backend::PersistentPtyAttachRequest",
                               "crate::backend::PersistentPtyAttachment"),
     "experimental.artifacts.view": ("crate::backend::ArtifactViewRequest", "crate::backend::ArtifactView"),

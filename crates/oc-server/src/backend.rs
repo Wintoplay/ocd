@@ -241,6 +241,17 @@ pub struct MediaBlob {
     pub data: Bytes,
 }
 
+// ---- experimental.blob.get -------------------------------------------------------------------
+
+/// A stored blob (`BlobStore.read`): the file under `<data>/blobs/`, its size and the type sniffed from its first
+/// bytes. The server answers `If-None-Match`, `Range` and `If-Range` and streams the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobFile {
+    pub path: std::path::PathBuf,
+    pub mime: String,
+    pub bytes: u64,
+}
+
 // ---- pty.connect -------------------------------------------------------------------------------
 
 /// `pty.connect` attach input. `cursor`: absolute output cursor (`-1` = tail only, `None` = the

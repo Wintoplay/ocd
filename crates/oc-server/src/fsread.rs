@@ -225,6 +225,62 @@ pub async fn serve(method: &Method, headers: &HeaderMap, file: FsFile, path: &st
     res
 }
 
+/// `makeBlobGet`: one immutable blob named by its ID, always a download, with a strong ETag, a week of private
+/// caching, `If-None-Match` (304), and a single `bytes=` range that only a strong `If-Range` match allows.
+pub async fn serve_blob(headers: &HeaderMap, id: &str, blob: crate::backend::BlobFile) -> Response {
+    let etag = format!("\"{id}\"");
+    let common = |h: &mut HeaderMap| {
+        download(h, "", &blob.mime);
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=604800, immutable"));
+        if let Ok(v) = HeaderValue::from_str(&etag) {
+            h.insert(header::ETAG, v);
+        }
+        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    };
+    let not_modified = header_str(headers, "if-none-match")
+        .is_some_and(|inm| inm.split(',').any(|t| t.trim() == "*" || strip_weak(t) == etag));
+    if not_modified {
+        let mut res = StatusCode::NOT_MODIFIED.into_response();
+        common(res.headers_mut());
+        return res;
+    }
+    let range = match header_str(headers, "if-range") {
+        Some(ir) if ir.trim() != etag => Range::Full,
+        _ => header_str(headers, "range").map_or(Range::Full, |r| parse_range(r, blob.bytes)),
+    };
+    if range == Range::Unsatisfiable {
+        let mut res = (StatusCode::RANGE_NOT_SATISFIABLE, crate::webui::unsized_body(bytes::Bytes::new())).into_response();
+        res.extensions_mut().insert(crate::webui::Bodiless);
+        let h = res.headers_mut();
+        common(h);
+        if let Ok(v) = HeaderValue::from_str(&format!("bytes */{}", blob.bytes)) {
+            h.insert(header::CONTENT_RANGE, v);
+        }
+        return res;
+    }
+    let (status, offset, length) = match range {
+        Range::Partial { start, end } => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
+        _ => (StatusCode::OK, 0, blob.bytes),
+    };
+    let body = match body(&FsSource::Path(blob.path.clone()), offset, length).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "blob.get failed to open file");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let mut res = (status, body).into_response();
+    let h = res.headers_mut();
+    common(h);
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    if let Range::Partial { start, end } = range
+        && let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{}", blob.bytes))
+    {
+        h.insert(header::CONTENT_RANGE, v);
+    }
+    res
+}
+
 async fn body(source: &FsSource, offset: u64, length: u64) -> std::io::Result<Body> {
     if length == 0 {
         return Ok(Body::empty());

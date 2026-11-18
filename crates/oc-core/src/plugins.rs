@@ -106,7 +106,9 @@ pub const BUILTIN_PLUGINS: [&str; 94] = [
     "opencode.tool.question",
     "opencode.tool.read",
     "opencode.tool.artifact",
-    "opencode.tool.schedule",
+    // 2.3.1: replaces `opencode.tool.schedule`; its tools and `/automation` need `experimental.automations`, which
+    // ocd does not port yet.
+    "opencode.tool.automation",
     "opencode.tool.shell",
     "opencode.tool.skill",
     "opencode.tool.subagent",
@@ -233,9 +235,6 @@ pub fn tool_plugin(tool: &dyn Tool) -> Option<&'static str> {
         "webfetch" => "opencode.tool.webfetch",
         "websearch" => "opencode.tool.websearch",
         "write" => "opencode.tool.write",
-        name if tool.options().namespace.as_deref() == Some("opencode") && crate::schedule::tools::is_schedule_tool(name) => {
-            crate::schedule::PLUGIN_ID
-        }
         name if crate::artifact::tools::is_artifact_tool(name) => crate::artifact::tools::PLUGIN_ID,
         _ if tool.options().namespace.as_deref() == Some("opencode") => "opencode.tools",
         _ => return None,

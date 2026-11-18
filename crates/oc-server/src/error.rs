@@ -433,10 +433,16 @@ impl ApiError {
         )
     }
 
-    /// `404 ScheduleNotFoundError` — `Schedule not found: <id>`.
-    pub fn schedule_not_found(schedule_id: impl Into<String>) -> Self {
-        let id = schedule_id.into();
-        tagged(404, "ScheduleNotFoundError", json!({ "scheduleID": id, "message": format!("Schedule not found: {id}") }))
+    /// `404 AutomationNotFoundError` — `Automation not found: <id>`.
+    pub fn automation_not_found(automation_id: impl Into<String>) -> Self {
+        let id = automation_id.into();
+        tagged(404, "AutomationNotFoundError", json!({ "automationID": id, "message": format!("Automation not found: {id}") }))
+    }
+
+    /// `404 BlobNotFoundError` — `Blob not found: <id>`.
+    pub fn blob_not_found(blob_id: impl Into<String>) -> Self {
+        let id = blob_id.into();
+        tagged(404, "BlobNotFoundError", json!({ "blobID": id, "message": format!("Blob not found: {id}") }))
     }
 
     /// `404 PluginNotFoundError{pluginID, message}`.

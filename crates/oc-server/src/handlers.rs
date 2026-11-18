@@ -16,7 +16,7 @@ use crate::backend::{
 use crate::cors::is_allowed_request_origin;
 use crate::error::ApiError;
 use crate::generated::{
-    ExperimentalMediaGetRequest, ExperimentalPersistentPtyGetRequest, ExperimentalSessionLogRequest, Op, OpMeta,
+    ExperimentalBlobGetRequest, ExperimentalMediaGetRequest, ExperimentalPersistentPtyGetRequest, ExperimentalSessionLogRequest, Op, OpMeta,
     PairingCode, PairingSession, PtyGetRequest, PtyTicketConnectToken, SessionInfo, SessionMessageListOrder,
 };
 use crate::location::decode_uri_component;
@@ -55,6 +55,11 @@ pub(crate) async fn special(
             let hash = call.path_str("hash", Some("^[0-9a-f]{64}$"))?;
             let blob = app.backend.experimental_media_get(&call.ctx, ExperimentalMediaGetRequest { hash: hash.clone() }).await?;
             Ok(media_response(&hash, blob, &call.headers))
+        }
+        Op::ExperimentalBlobGet => {
+            let id = call.path_str("id", Some(BLOB_ID_PATTERN))?;
+            let blob = app.backend.experimental_blob_get(&call.ctx, ExperimentalBlobGetRequest { id: id.clone() }).await?;
+            Ok(crate::fsread::serve_blob(&call.headers, &id, blob).await)
         }
         Op::ExperimentalArtifactsView => {
             let artifact_id = call.path_str("artifactID", Some("^art_"))?;
@@ -159,6 +164,9 @@ fn matches_if_none_match(value: Option<&str>, etag: &str) -> bool {
         t == "*" || stripped == etag
     })
 }
+
+/// `Blob.ID`: what made the blob and its position among its outputs (`video_<id>_0`).
+const BLOB_ID_PATTERN: &str = "^video_[0-9a-f]{12}[0-9A-Za-z]{14}_(0|[1-9][0-9]{0,2})$";
 
 /// `makeMediaGet`: immutable caching, a strong ETag, always a download (2.2.7) with `nosniff` and the sandboxing
 /// CSP, and the real type only for the image types browsers render safely.

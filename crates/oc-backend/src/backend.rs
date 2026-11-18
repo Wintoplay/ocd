@@ -689,34 +689,68 @@ impl Backend for Engine {
         }
     }
 
-    // ---- schedules (`schedule.*`, experimental.schedules) ----
+    // ---- automations (`automation.*`, experimental.automations; not ported, read as off everywhere) ----
 
-    async fn experimental_schedule_create(
+    async fn experimental_automation_create(
         &self,
         _ctx: &RequestContext,
-        req: ExperimentalScheduleCreateRequest,
-    ) -> Result<ScheduleInfo, ApiError> {
-        self.schedule_create(&req.body).await
+        req: ExperimentalAutomationCreateRequest,
+    ) -> Result<AutomationInfo, ApiError> {
+        self.automation_create(&req.body).await
     }
 
-    async fn experimental_schedule_list(&self, _ctx: &RequestContext, req: ExperimentalScheduleListRequest) -> Result<Vec<ScheduleInfo>, ApiError> {
-        self.schedule_list(&req.session_id).await
+    async fn experimental_automation_list(
+        &self,
+        _ctx: &RequestContext,
+        req: ExperimentalAutomationListRequest,
+    ) -> Result<Vec<AutomationInfo>, ApiError> {
+        self.automation_list(&req).await
     }
 
-    async fn experimental_schedule_get(&self, _ctx: &RequestContext, req: ExperimentalScheduleGetRequest) -> Result<ScheduleInfo, ApiError> {
-        self.schedule_get(&req.schedule_id).await
+    async fn experimental_automation_get(&self, _ctx: &RequestContext, req: ExperimentalAutomationGetRequest) -> Result<AutomationInfo, ApiError> {
+        self.automation_find(&req.automation_id).await
     }
 
-    async fn experimental_schedule_pause(&self, _ctx: &RequestContext, req: ExperimentalSchedulePauseRequest) -> Result<ScheduleInfo, ApiError> {
-        self.schedule_pause(&req.schedule_id).await
+    async fn experimental_automation_pause(
+        &self,
+        _ctx: &RequestContext,
+        req: ExperimentalAutomationPauseRequest,
+    ) -> Result<AutomationInfo, ApiError> {
+        self.automation_find(&req.automation_id).await
     }
 
-    async fn experimental_schedule_resume(&self, _ctx: &RequestContext, req: ExperimentalScheduleResumeRequest) -> Result<ScheduleInfo, ApiError> {
-        self.schedule_resume(&req.schedule_id).await
+    async fn experimental_automation_resume(
+        &self,
+        _ctx: &RequestContext,
+        req: ExperimentalAutomationResumeRequest,
+    ) -> Result<AutomationInfo, ApiError> {
+        self.automation_find(&req.automation_id).await
     }
 
-    async fn experimental_schedule_delete(&self, _ctx: &RequestContext, req: ExperimentalScheduleDeleteRequest) -> Result<(), ApiError> {
-        self.schedule_delete(&req.schedule_id).await
+    async fn experimental_automation_delete(&self, _ctx: &RequestContext, req: ExperimentalAutomationDeleteRequest) -> Result<(), ApiError> {
+        self.automation_find(&req.automation_id).await.map(|_| ())
+    }
+
+    // ---- video generation (experimental.video_generate; not ported, off) and blobs ----
+
+    async fn experimental_generate_video_create(
+        &self,
+        _ctx: &RequestContext,
+        _req: ExperimentalGenerateVideoCreateRequest,
+    ) -> Result<GenerateVideoCreateResponse, ApiError> {
+        Err(ApiError::forbidden(crate::automations::VIDEO_DISABLED))
+    }
+
+    async fn experimental_generate_video_get(
+        &self,
+        _ctx: &RequestContext,
+        _req: ExperimentalGenerateVideoGetRequest,
+    ) -> Result<GenerateVideoGetResponse, ApiError> {
+        Err(ApiError::forbidden(crate::automations::VIDEO_DISABLED))
+    }
+
+    async fn experimental_blob_get(&self, _ctx: &RequestContext, req: ExperimentalBlobGetRequest) -> Result<oc_server::BlobFile, ApiError> {
+        self.blob_read(&req.id).await
     }
 
     async fn plugin_gui(&self, ctx: &RequestContext, req: PluginGuiRequest) -> Result<PluginGuiBundle, ApiError> {

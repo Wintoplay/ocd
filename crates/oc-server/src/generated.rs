@@ -12,6 +12,14 @@ pub use crate::support::{JsNumber, JsonObject};
 
 crate::lit_str!(LitAgentNotFoundError, "AgentNotFoundError");
 crate::lit_str!(LitArtifactNotFoundError, "ArtifactNotFoundError");
+crate::lit_str!(LitCode, "code");
+crate::lit_str!(LitPrompt, "prompt");
+crate::lit_str!(LitAt, "at");
+crate::lit_str!(LitCron, "cron");
+crate::lit_str!(LitEvent, "event");
+crate::lit_str!(LitEvery, "every");
+crate::lit_str!(LitAutomationNotFoundError, "AutomationNotFoundError");
+crate::lit_str!(LitBlobNotFoundError, "BlobNotFoundError");
 crate::lit_str!(LitCommandExecutionError, "CommandExecutionError");
 crate::lit_str!(LitCommandNotFoundError, "CommandNotFoundError");
 crate::lit_str!(LitDirectory, "directory");
@@ -52,6 +60,8 @@ crate::lit_str!(LitError, "error");
 crate::lit_str!(LitImage, "image");
 crate::lit_str!(LitPredicate, "predicate");
 crate::lit_str!(LitScore, "score");
+crate::lit_str!(LitCompleted, "completed");
+crate::lit_str!(LitRunning, "running");
 crate::lit_str!(LitInstructionEntryValueTooLargeError, "InstructionEntryValueTooLargeError");
 crate::lit_str!(LitComplete, "complete");
 crate::lit_str!(LitFailed, "failed");
@@ -62,6 +72,7 @@ crate::lit_str!(LitIntegrationMethodNotFoundError, "IntegrationMethodNotFoundErr
 crate::lit_str!(LitIntegrationNotFoundError, "IntegrationNotFoundError");
 crate::lit_str!(LitInvalidCursorError, "InvalidCursorError");
 crate::lit_str!(LitInvalidRequestError, "InvalidRequestError");
+crate::lit_str!(LitCodemode, "codemode");
 crate::lit_str!(LitShell, "shell");
 crate::lit_str!(LitSubagent, "subagent");
 crate::lit_str!(LitLocationNotFoundError, "LocationNotFoundError");
@@ -92,13 +103,6 @@ crate::lit_str!(LitPtyNotFoundError, "PtyNotFoundError");
 crate::lit_str!(LitGit, "git");
 crate::lit_str!(LitRpcError, "RpcError");
 crate::lit_str!(LitRpcInternalError, "RpcInternalError");
-crate::lit_str!(LitPrompt, "prompt");
-crate::lit_str!(LitCode, "code");
-crate::lit_str!(LitAt, "at");
-crate::lit_str!(LitCron, "cron");
-crate::lit_str!(LitEvery, "every");
-crate::lit_str!(LitIn, "in");
-crate::lit_str!(LitScheduleNotFoundError, "ScheduleNotFoundError");
 crate::lit_str!(LitServiceUnavailableError, "ServiceUnavailableError");
 crate::lit_str!(LitBefore, "before");
 crate::lit_str!(LitThrough, "through");
@@ -109,8 +113,6 @@ crate::lit_str!(LitMove, "move");
 crate::lit_str!(LitAgentSwitched, "agent-switched");
 crate::lit_str!(LitAssistant, "assistant");
 crate::lit_str!(LitReasoning, "reasoning");
-crate::lit_str!(LitCompleted, "completed");
-crate::lit_str!(LitRunning, "running");
 crate::lit_str!(LitIdle, "idle");
 crate::lit_str!(LitLocationSwitched, "location-switched");
 crate::lit_str!(LitModelSwitched, "model-switched");
@@ -131,6 +133,7 @@ crate::lit_str!(LitUnknownError, "UnknownError");
 crate::lit_str!(LitUnsupportedModelError, "UnsupportedModelError");
 crate::lit_str!(LitServerConnected, "server.connected");
 crate::lit_str!(LitVcsInitNotSupportedError, "VcsInitNotSupportedError");
+crate::lit_str!(LitVideoNotFoundError, "VideoNotFoundError");
 crate::lit_str!(LitWebrtc, "webrtc");
 crate::lit_str!(LitWebsocket, "websocket");
 crate::lit_str!(LitWorktreeError, "WorktreeError");
@@ -401,6 +404,374 @@ pub struct ArtifactNotFoundErrorEncoded {
     pub tag: LitArtifactNotFoundError,
     #[serde(rename = "artifactID")]
     pub artifact_id: String,
+    pub message: String,
+}
+
+/// Component schema `Automation.Action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationAction {
+    Prompt(AutomationActionPrompt),
+    Code(AutomationActionCode),
+}
+
+impl From<AutomationActionPrompt> for AutomationAction {
+    fn from(value: AutomationActionPrompt) -> Self {
+        Self::Prompt(value)
+    }
+}
+
+impl From<AutomationActionCode> for AutomationAction {
+    fn from(value: AutomationActionCode) -> Self {
+        Self::Code(value)
+    }
+}
+
+/// Component schema `Automation.Action.Code`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationActionCode {
+    pub r#type: LitCode,
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+/// Component schema `Automation.Action.Prompt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationActionPrompt {
+    pub r#type: LitPrompt,
+    pub prompt: String,
+    pub to: AutomationTarget,
+}
+
+/// Component schema `Automation.ActionInput`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationActionInput {
+    PromptActionInput(AutomationPromptActionInput),
+    CodeActionInput(AutomationCodeActionInput),
+}
+
+impl From<AutomationPromptActionInput> for AutomationActionInput {
+    fn from(value: AutomationPromptActionInput) -> Self {
+        Self::PromptActionInput(value)
+    }
+}
+
+impl From<AutomationCodeActionInput> for AutomationActionInput {
+    fn from(value: AutomationCodeActionInput) -> Self {
+        Self::CodeActionInput(value)
+    }
+}
+
+/// Component schema `Automation.CodeActionInput`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationCodeActionInput {
+    pub r#type: LitCode,
+    /// Code Mode JavaScript run on each trigger with no model (no fetch; 30s, 20 tool calls, 32 KB output cap). Call tools statically as tools.<ns>.<tool>(...) or tools["ns-name"].tool(...); each is authorized once at creation to run unattended. Receives input = { state, now, runs, args } (also globals): state starts null, now is epoch ms, runs counts earlier runs. Event triggers also receive input.event = { id, timestamp, data }; data follows the event type's payloadSchema. Return nothing, or { state?, done?, send? }. JSON state is kept for the next run; done: true stops. lastOutput shows the delivery target and any logs. Return at most one send per run. { send: { prompt } } steers the creating session; { send: { prompt, to: { subagent } } } starts a permitted child that does not report back. No session IDs. Omit send to stay quiet. A rejected send commits neither state nor done. Example code string: if (runs < 2) return; return { done: true, send: { prompt: "Three checks elapsed. Review the build." } }
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+/// Component schema `Automation.CreatePayload`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationCreatePayload {
+    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionID>,
+    /// Where it runs when there is no Session. Defaults to the server user's home folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// A short label shown in lists.
+    pub name: String,
+    pub trigger: AutomationTrigger,
+    pub action: AutomationActionInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+}
+
+/// Component schema `Automation.Duration`.
+///
+/// A duration such as "90 seconds", "5 minutes" or "2 hours".
+pub type AutomationDuration = String;
+
+/// Component schema `Automation.ID`. Pattern: `^aut_`.
+pub type AutomationID = String;
+
+/// Component schema `Automation.Info`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationInfo {
+    pub id: AutomationID,
+    pub name: String,
+    #[serde(rename = "projectID")]
+    pub project_id: ProjectID,
+    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionID>,
+    pub directory: String,
+    pub trigger: AutomationTrigger1,
+    pub tz: String,
+    pub action: AutomationAction,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
+    pub expires: Option<f64>,
+    pub status: AutomationStatus,
+    #[serde(rename = "nextDueAt", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
+    pub next_due_at: Option<f64>,
+    #[serde(rename = "runCount")]
+    pub run_count: i64,
+    #[serde(rename = "lastRunAt", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
+    pub last_run_at: Option<f64>,
+    #[serde(rename = "lastOutcome", default, skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<AutomationOutcome>,
+    #[serde(rename = "lastOutput", default, skip_serializing_if = "Option::is_none")]
+    pub last_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<serde_json::Value>,
+    pub time: AutomationInfoTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationInfoTime {
+    #[serde(serialize_with = "crate::support::ser_f64")]
+    pub created: f64,
+    #[serde(serialize_with = "crate::support::ser_f64")]
+    pub updated: f64,
+}
+
+/// Component schema `Automation.Outcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AutomationOutcome {
+    #[serde(rename = "fired")]
+    Fired,
+    #[serde(rename = "late")]
+    Late,
+    #[serde(rename = "skipped")]
+    Skipped,
+    #[serde(rename = "disabled")]
+    Disabled,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "expired")]
+    Expired,
+}
+
+impl AutomationOutcome {
+    /// Wire value of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fired => "fired",
+            Self::Late => "late",
+            Self::Skipped => "skipped",
+            Self::Disabled => "disabled",
+            Self::Failed => "failed",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// Component schema `Automation.PromptActionInput`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationPromptActionInput {
+    pub r#type: LitPrompt,
+    /// The message the target Session receives, with enough context to act on it without this conversation.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<AutomationTarget>,
+}
+
+/// Component schema `Automation.Status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AutomationStatus {
+    #[serde(rename = "active")]
+    Active,
+    #[serde(rename = "paused")]
+    Paused,
+    #[serde(rename = "done")]
+    Done,
+}
+
+impl AutomationStatus {
+    /// Wire value of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// Component schema `Automation.Target`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationTarget {
+    Object(AutomationTargetObject),
+    Object2(AutomationTargetObject2),
+}
+
+impl From<AutomationTargetObject> for AutomationTarget {
+    fn from(value: AutomationTargetObject) -> Self {
+        Self::Object(value)
+    }
+}
+
+impl From<AutomationTargetObject2> for AutomationTarget {
+    fn from(value: AutomationTargetObject2) -> Self {
+        Self::Object2(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTargetObject {
+    pub session: SessionID,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTargetObject2 {
+    pub subagent: AgentID,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<serde_json::Value>,
+}
+
+/// Component schema `Automation.Trigger`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationTrigger {
+    At(AutomationTriggerAt),
+    Every(AutomationTriggerEvery),
+    Cron(AutomationTriggerCron),
+    Event(AutomationTriggerEvent),
+}
+
+impl From<AutomationTriggerAt> for AutomationTrigger {
+    fn from(value: AutomationTriggerAt) -> Self {
+        Self::At(value)
+    }
+}
+
+impl From<AutomationTriggerEvery> for AutomationTrigger {
+    fn from(value: AutomationTriggerEvery) -> Self {
+        Self::Every(value)
+    }
+}
+
+impl From<AutomationTriggerCron> for AutomationTrigger {
+    fn from(value: AutomationTriggerCron) -> Self {
+        Self::Cron(value)
+    }
+}
+
+impl From<AutomationTriggerEvent> for AutomationTrigger {
+    fn from(value: AutomationTriggerEvent) -> Self {
+        Self::Event(value)
+    }
+}
+
+/// Component schema `Automation.Trigger.At`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTriggerAt {
+    pub r#type: LitAt,
+    /// An instant with an offset, a wall-clock time in tz such as "2026-10-27T09:00", or "in 10 minutes".
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+}
+
+/// Component schema `Automation.Trigger.Cron`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTriggerCron {
+    pub r#type: LitCron,
+    pub cron: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+}
+
+/// Component schema `Automation.Trigger.Event`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTriggerEvent {
+    pub r#type: LitEvent,
+    pub server: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<JsonObject>,
+}
+
+/// Component schema `Automation.Trigger.Every`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationTriggerEvery {
+    pub r#type: LitEvery,
+    pub every: AutomationDuration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+}
+
+/// Component schema `Automation.Trigger_1`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutomationTrigger1 {
+    TriggerAt(AutomationTriggerAt),
+    TriggerEvery(AutomationTriggerEvery),
+    TriggerCron(AutomationTriggerCron),
+    TriggerEvent(AutomationTriggerEvent),
+}
+
+impl From<AutomationTriggerAt> for AutomationTrigger1 {
+    fn from(value: AutomationTriggerAt) -> Self {
+        Self::TriggerAt(value)
+    }
+}
+
+impl From<AutomationTriggerEvery> for AutomationTrigger1 {
+    fn from(value: AutomationTriggerEvery) -> Self {
+        Self::TriggerEvery(value)
+    }
+}
+
+impl From<AutomationTriggerCron> for AutomationTrigger1 {
+    fn from(value: AutomationTriggerCron) -> Self {
+        Self::TriggerCron(value)
+    }
+}
+
+impl From<AutomationTriggerEvent> for AutomationTrigger1 {
+    fn from(value: AutomationTriggerEvent) -> Self {
+        Self::TriggerEvent(value)
+    }
+}
+
+/// Component schema `AutomationNotFoundErrorEncoded`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AutomationNotFoundErrorEncoded {
+    #[serde(rename = "_tag")]
+    pub tag: LitAutomationNotFoundError,
+    #[serde(rename = "automationID")]
+    pub automation_id: String,
+    pub message: String,
+}
+
+/// Component schema `Blob.ID`. Pattern: `^video_[0-9a-f]{12}[0-9A-Za-z]{14}_(0|[1-9][0-9]{0,2})$`.
+pub type BlobID = String;
+
+/// Component schema `Blob.Info`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct BlobInfo {
+    pub id: BlobID,
+    pub mime: String,
+    #[serde(serialize_with = "crate::support::ser_f64")]
+    pub bytes: f64,
+    /// Epoch milliseconds after which the blob may be deleted. Read it with GET /api/experimental/blob/:id
+    #[serde(rename = "expiresAt", serialize_with = "crate::support::ser_f64")]
+    pub expires_at: f64,
+}
+
+/// Component schema `BlobNotFoundErrorEncoded`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct BlobNotFoundErrorEncoded {
+    #[serde(rename = "_tag")]
+    pub tag: LitBlobNotFoundError,
+    #[serde(rename = "blobID")]
+    pub blob_id: String,
     pub message: String,
 }
 
@@ -905,6 +1276,8 @@ pub struct ConfigInfoEncodedCompaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<ConfigInfoEncodedCompactionKeep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<ConfigInfoEncodedCompactionBuffer>,
@@ -1005,19 +1378,21 @@ pub struct ConfigInfoEncodedExperimental {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background_compaction: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_blob: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schedules: Option<bool>,
+    pub automations: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_timeout_background: Option<bool>,
+    pub video_generate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_watches: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_events: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_codemode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_rows: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2910,6 +3285,15 @@ pub struct GenerateFile {
 /// Aspect ratio as width:height, for example 16:9
 pub type GenerateImageAspect = String;
 
+/// Component schema `Generate.ImageFile`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerateImageFile {
+    pub data: PromptBase64,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Component schema `Generate.ImageOutput`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GenerateImageOutput {
@@ -3065,6 +3449,165 @@ pub struct GenerateUsage {
     pub output: Option<f64>,
 }
 
+/// Component schema `Generate.VideoAspect`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GenerateVideoAspect {
+    ImageAspect(GenerateImageAspect),
+    Literal(LitAuto),
+}
+
+impl From<GenerateImageAspect> for GenerateVideoAspect {
+    fn from(value: GenerateImageAspect) -> Self {
+        Self::ImageAspect(value)
+    }
+}
+
+impl From<LitAuto> for GenerateVideoAspect {
+    fn from(value: LitAuto) -> Self {
+        Self::Literal(value)
+    }
+}
+
+/// Component schema `Generate.VideoCompleted`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerateVideoCompleted {
+    pub id: GenerateVideoID,
+    pub status: LitCompleted,
+    /// The finished videos, usually one. Read each with GET /api/experimental/blob/:id
+    pub blobs: Vec<BlobInfo>,
+}
+
+/// Component schema `Generate.VideoError`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerateVideoError {
+    pub id: GenerateVideoID,
+    pub status: LitError,
+    pub error: String,
+    pub reason: GenerateVideoErrorReason,
+}
+
+/// Component schema `Generate.VideoErrorReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GenerateVideoErrorReason {
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "expired")]
+    Expired,
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+impl GenerateVideoErrorReason {
+    /// Wire value of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Component schema `Generate.VideoID`. Pattern: `^video_[0-9a-f]{12}[0-9A-Za-z]{14}$`.
+pub type GenerateVideoID = String;
+
+/// Component schema `Generate.VideoJob`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GenerateVideoJob {
+    VideoRunning(GenerateVideoRunning),
+    VideoCompleted(GenerateVideoCompleted),
+    VideoError(GenerateVideoError),
+}
+
+impl From<GenerateVideoRunning> for GenerateVideoJob {
+    fn from(value: GenerateVideoRunning) -> Self {
+        Self::VideoRunning(value)
+    }
+}
+
+impl From<GenerateVideoCompleted> for GenerateVideoJob {
+    fn from(value: GenerateVideoCompleted) -> Self {
+        Self::VideoCompleted(value)
+    }
+}
+
+impl From<GenerateVideoError> for GenerateVideoJob {
+    fn from(value: GenerateVideoError) -> Self {
+        Self::VideoError(value)
+    }
+}
+
+/// Component schema `Generate.VideoRequest`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerateVideoRequest {
+    pub model: ModelRef,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<GenerateImageFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<GenerateImageFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<GenerateFile>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<GenerateVideoAspect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<GenerateVideoResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<bool>,
+}
+
+/// Component schema `Generate.VideoResolution`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GenerateVideoResolution {
+    Enum(GenerateVideoResolutionEnum),
+    String(String),
+}
+
+impl From<GenerateVideoResolutionEnum> for GenerateVideoResolution {
+    fn from(value: GenerateVideoResolutionEnum) -> Self {
+        Self::Enum(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GenerateVideoResolutionEnum {
+    #[serde(rename = "480p")]
+    V480p,
+    #[serde(rename = "720p")]
+    V720p,
+    #[serde(rename = "1080p")]
+    V1080p,
+    #[serde(rename = "4k")]
+    V4k,
+}
+
+impl GenerateVideoResolutionEnum {
+    /// Wire value of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::V480p => "480p",
+            Self::V720p => "720p",
+            Self::V1080p => "1080p",
+            Self::V4k => "4k",
+        }
+    }
+}
+
+/// Component schema `Generate.VideoRunning`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerateVideoRunning {
+    pub id: GenerateVideoID,
+    pub status: LitRunning,
+}
+
 /// Component schema `GenerateDecisionsResponse`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GenerateDecisionsResponse {
@@ -3086,6 +3629,18 @@ pub struct GenerateTextResponse {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GenerateTextResponseData {
     pub text: String,
+}
+
+/// Component schema `GenerateVideoCreateResponse`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GenerateVideoCreateResponse {
+    pub data: GenerateVideoRunning,
+}
+
+/// Component schema `GenerateVideoGetResponse`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerateVideoGetResponse {
+    pub data: GenerateVideoJob,
 }
 
 /// Component schema `Instruction.Hash`. Pattern: `^[a-f0-9]{64}$`.
@@ -3510,6 +4065,19 @@ pub struct InvalidRequestErrorEncoded {
     pub field: Option<String>,
 }
 
+/// Component schema `Job.CodeMode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobCodeMode {
+    pub kind: LitCodemode,
+    pub id: String,
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionID,
+    pub status: JobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub time: JobTime,
+}
+
 /// Component schema `Job.Image`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobImage {
@@ -3532,6 +4100,7 @@ pub enum JobInfo {
     Shell(JobShell),
     Subagent(JobSubagent),
     Image(JobImage),
+    CodeMode(JobCodeMode),
 }
 
 impl From<JobShell> for JobInfo {
@@ -3552,6 +4121,12 @@ impl From<JobImage> for JobInfo {
     }
 }
 
+impl From<JobCodeMode> for JobInfo {
+    fn from(value: JobCodeMode) -> Self {
+        Self::CodeMode(value)
+    }
+}
+
 /// Component schema `Job.Kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobKind {
@@ -3561,6 +4136,8 @@ pub enum JobKind {
     Subagent,
     #[serde(rename = "image")]
     Image,
+    #[serde(rename = "codemode")]
+    Codemode,
 }
 
 impl JobKind {
@@ -3570,6 +4147,7 @@ impl JobKind {
             Self::Shell => "shell",
             Self::Subagent => "subagent",
             Self::Image => "image",
+            Self::Codemode => "codemode",
         }
     }
 }
@@ -4216,6 +4794,8 @@ pub enum ModelTypeEnum {
     Decision,
     #[serde(rename = "image")]
     Image,
+    #[serde(rename = "video")]
+    Video,
 }
 
 impl ModelTypeEnum {
@@ -4225,6 +4805,7 @@ impl ModelTypeEnum {
             Self::Chat => "chat",
             Self::Decision => "decision",
             Self::Image => "image",
+            Self::Video => "video",
         }
     }
 }
@@ -5340,405 +5921,6 @@ impl RpcInternalErrorEncodedType {
             Self::RpcInvalidOutput => "rpc.invalid_output",
         }
     }
-}
-
-/// Component schema `Schedule.Action`.
-pub type ScheduleAction = ScheduleActionPrompt;
-
-/// Component schema `Schedule.Action.Prompt`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleActionPrompt {
-    pub r#type: LitPrompt,
-    pub prompt: String,
-}
-
-/// Component schema `Schedule.Condition`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ScheduleCondition {
-    Shell(ScheduleConditionShell),
-    Code(ScheduleConditionCode),
-}
-
-impl From<ScheduleConditionShell> for ScheduleCondition {
-    fn from(value: ScheduleConditionShell) -> Self {
-        Self::Shell(value)
-    }
-}
-
-impl From<ScheduleConditionCode> for ScheduleCondition {
-    fn from(value: ScheduleConditionCode) -> Self {
-        Self::Code(value)
-    }
-}
-
-/// Component schema `Schedule.Condition.Code`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleConditionCode {
-    pub r#type: LitCode,
-    pub code: String,
-}
-
-/// Component schema `Schedule.Condition.Shell`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleConditionShell {
-    pub r#type: LitShell,
-    pub run: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matches: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes: Option<bool>,
-}
-
-/// Component schema `Schedule.ConditionInput`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ScheduleConditionInput {
-    Object(ScheduleConditionInputObject),
-    Object2(ScheduleConditionInputObject2),
-}
-
-impl From<ScheduleConditionInputObject> for ScheduleConditionInput {
-    fn from(value: ScheduleConditionInputObject) -> Self {
-        Self::Object(value)
-    }
-}
-
-impl From<ScheduleConditionInputObject2> for ScheduleConditionInput {
-    fn from(value: ScheduleConditionInputObject2) -> Self {
-        Self::Object2(value)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleConditionInputObject {
-    /// Shell command to run in the Session's directory. Alone, exit 0 wakes and stdout is appended.
-    pub run: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matches: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleConditionInputObject2 {
-    /// Code Mode JavaScript check (no fetch; 30s, 20 tool calls, 32 KB output cap). Call tools statically as tools.<ns>.<tool>(...) or tools["ns-name"].tool(...); each is authorized once at creation to run unattended. Runs once at creation with state = null (if baselines state without waking; until matches immediately if true), with globals state, now (epoch ms) and runs. Return a boolean or { wake, state?, message? } (message is appended to prompt on wake), e.g.: const t = await tools.slack.read_thread({ id }); return { wake: state !== null && t.count > state.count, state: { count: t.count }, message: "New reply" }
-    pub code: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matches: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes: Option<serde_json::Value>,
-}
-
-/// Component schema `Schedule.CreatePayload`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleCreatePayload {
-    #[serde(rename = "sessionID")]
-    pub session_id: SessionID,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<ScheduleWhenInput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#if: Option<ScheduleConditionInput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<ScheduleConditionInput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ends: Option<ScheduleEnds>,
-    /// The message the Session receives when the schedule wakes.
-    pub prompt: String,
-}
-
-/// Component schema `Schedule.Duration`.
-///
-/// A duration such as "90 seconds", "5 minutes" or "2 hours".
-pub type ScheduleDuration = String;
-
-/// Component schema `Schedule.Ends`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleEnds {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<ScheduleDuration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub times: Option<i64>,
-}
-
-/// Component schema `Schedule.ID`. Pattern: `^sch_`.
-pub type ScheduleID = String;
-
-/// Component schema `Schedule.Info`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScheduleInfo {
-    pub id: ScheduleID,
-    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionID>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub when: ScheduleWhen,
-    pub tz: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#if: Option<ScheduleCondition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<ScheduleCondition>,
-    pub action: ScheduleAction,
-    pub status: ScheduleStatus,
-    #[serde(rename = "nextDueAt", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
-    pub next_due_at: Option<f64>,
-    #[serde(rename = "endsAt", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
-    pub ends_at: Option<f64>,
-    #[serde(rename = "remainingRuns", default, skip_serializing_if = "Option::is_none")]
-    pub remaining_runs: Option<i64>,
-    #[serde(rename = "runCount")]
-    pub run_count: i64,
-    #[serde(rename = "lastFiredAt", default, skip_serializing_if = "Option::is_none", serialize_with = "crate::support::ser_opt_f64")]
-    pub last_fired_at: Option<f64>,
-    #[serde(rename = "lastOutcome", default, skip_serializing_if = "Option::is_none")]
-    pub last_outcome: Option<ScheduleOutcome>,
-    #[serde(rename = "lastOutput", default, skip_serializing_if = "Option::is_none")]
-    pub last_output: Option<String>,
-    pub time: ScheduleInfoTime,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleInfoTime {
-    #[serde(serialize_with = "crate::support::ser_f64")]
-    pub created: f64,
-    #[serde(serialize_with = "crate::support::ser_f64")]
-    pub updated: f64,
-}
-
-/// Component schema `Schedule.Outcome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ScheduleOutcome {
-    #[serde(rename = "fired")]
-    Fired,
-    #[serde(rename = "late")]
-    Late,
-    #[serde(rename = "checked")]
-    Checked,
-    #[serde(rename = "expired")]
-    Expired,
-    #[serde(rename = "skipped")]
-    Skipped,
-    #[serde(rename = "disabled")]
-    Disabled,
-    #[serde(rename = "failed")]
-    Failed,
-}
-
-impl ScheduleOutcome {
-    /// Wire value of this variant.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Fired => "fired",
-            Self::Late => "late",
-            Self::Checked => "checked",
-            Self::Expired => "expired",
-            Self::Skipped => "skipped",
-            Self::Disabled => "disabled",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-/// Component schema `Schedule.Status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ScheduleStatus {
-    #[serde(rename = "active")]
-    Active,
-    #[serde(rename = "paused")]
-    Paused,
-    #[serde(rename = "done")]
-    Done,
-}
-
-impl ScheduleStatus {
-    /// Wire value of this variant.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Paused => "paused",
-            Self::Done => "done",
-        }
-    }
-}
-
-/// Component schema `Schedule.When`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ScheduleWhen {
-    In(ScheduleWhenIn),
-    At(ScheduleWhenAt),
-    Every(ScheduleWhenEvery),
-    Cron(ScheduleWhenCron),
-}
-
-impl From<ScheduleWhenIn> for ScheduleWhen {
-    fn from(value: ScheduleWhenIn) -> Self {
-        Self::In(value)
-    }
-}
-
-impl From<ScheduleWhenAt> for ScheduleWhen {
-    fn from(value: ScheduleWhenAt) -> Self {
-        Self::At(value)
-    }
-}
-
-impl From<ScheduleWhenEvery> for ScheduleWhen {
-    fn from(value: ScheduleWhenEvery) -> Self {
-        Self::Every(value)
-    }
-}
-
-impl From<ScheduleWhenCron> for ScheduleWhen {
-    fn from(value: ScheduleWhenCron) -> Self {
-        Self::Cron(value)
-    }
-}
-
-/// Component schema `Schedule.When.At`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenAt {
-    pub r#type: LitAt,
-    pub at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-/// Component schema `Schedule.When.Cron`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenCron {
-    pub r#type: LitCron,
-    pub cron: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-/// Component schema `Schedule.When.Every`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenEvery {
-    pub r#type: LitEvery,
-    pub every: ScheduleDuration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-/// Component schema `Schedule.When.In`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenIn {
-    pub r#type: LitIn,
-    pub r#in: ScheduleDuration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-/// Component schema `Schedule.WhenInput`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ScheduleWhenInput {
-    Object(ScheduleWhenInputObject),
-    Object2(ScheduleWhenInputObject2),
-    Object3(ScheduleWhenInputObject3),
-    Object4(ScheduleWhenInputObject4),
-}
-
-impl From<ScheduleWhenInputObject> for ScheduleWhenInput {
-    fn from(value: ScheduleWhenInputObject) -> Self {
-        Self::Object(value)
-    }
-}
-
-impl From<ScheduleWhenInputObject2> for ScheduleWhenInput {
-    fn from(value: ScheduleWhenInputObject2) -> Self {
-        Self::Object2(value)
-    }
-}
-
-impl From<ScheduleWhenInputObject3> for ScheduleWhenInput {
-    fn from(value: ScheduleWhenInputObject3) -> Self {
-        Self::Object3(value)
-    }
-}
-
-impl From<ScheduleWhenInputObject4> for ScheduleWhenInput {
-    fn from(value: ScheduleWhenInputObject4) -> Self {
-        Self::Object4(value)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenInputObject {
-    pub r#in: ScheduleDuration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenInputObject2 {
-    pub at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#in: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenInputObject3 {
-    pub every: ScheduleDuration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#in: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleWhenInputObject4 {
-    pub cron: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#in: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
-}
-
-/// Component schema `ScheduleNotFoundErrorEncoded`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ScheduleNotFoundErrorEncoded {
-    #[serde(rename = "_tag")]
-    pub tag: LitScheduleNotFoundError,
-    #[serde(rename = "scheduleID")]
-    pub schedule_id: String,
-    pub message: String,
 }
 
 /// Component schema `ServerInfo`.
@@ -8740,6 +8922,16 @@ pub struct VcsInitNotSupportedErrorEncoded {
     pub tag: LitVcsInitNotSupportedError,
     #[serde(rename = "providerID")]
     pub provider_id: String,
+    pub message: String,
+}
+
+/// Component schema `VideoNotFoundErrorEncoded`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct VideoNotFoundErrorEncoded {
+    #[serde(rename = "_tag")]
+    pub tag: LitVideoNotFoundError,
+    #[serde(rename = "videoID")]
+    pub video_id: String,
     pub message: String,
 }
 
@@ -12841,6 +13033,16 @@ impl ErrorEncoded for ArtifactNotFoundErrorEncoded {
     const STATUS: u16 = 404;
 }
 
+impl ErrorEncoded for AutomationNotFoundErrorEncoded {
+    const TAG: &'static str = "AutomationNotFoundError";
+    const STATUS: u16 = 404;
+}
+
+impl ErrorEncoded for BlobNotFoundErrorEncoded {
+    const TAG: &'static str = "BlobNotFoundError";
+    const STATUS: u16 = 404;
+}
+
 impl ErrorEncoded for CommandExecutionErrorEncoded {
     const TAG: &'static str = "CommandExecutionError";
     const STATUS: u16 = 500;
@@ -12981,11 +13183,6 @@ impl ErrorEncoded for RpcInternalErrorEncoded {
     const STATUS: u16 = 500;
 }
 
-impl ErrorEncoded for ScheduleNotFoundErrorEncoded {
-    const TAG: &'static str = "ScheduleNotFoundError";
-    const STATUS: u16 = 404;
-}
-
 impl ErrorEncoded for ServiceUnavailableErrorEncoded {
     const TAG: &'static str = "ServiceUnavailableError";
     const STATUS: u16 = 503;
@@ -13029,6 +13226,11 @@ impl ErrorEncoded for UnsupportedModelErrorEncoded {
 impl ErrorEncoded for VcsInitNotSupportedErrorEncoded {
     const TAG: &'static str = "VcsInitNotSupportedError";
     const STATUS: u16 = 501;
+}
+
+impl ErrorEncoded for VideoNotFoundErrorEncoded {
+    const TAG: &'static str = "VideoNotFoundError";
+    const STATUS: u16 = 404;
 }
 
 impl ErrorEncoded for WorktreeErrorEncoded {
@@ -13076,9 +13278,11 @@ pub const ERROR_STATUS: &[(&str, u16)] = &[
     ("ModelNotFoundError", 404),
     ("UnsupportedModelError", 422),
     ("ProviderRequestError", 502),
-    ("ScheduleNotFoundError", 404),
+    ("AutomationNotFoundError", 404),
     ("PtyFeatureUnsupportedError", 501),
     ("ArtifactNotFoundError", 404),
+    ("VideoNotFoundError", 404),
+    ("BlobNotFoundError", 404),
 ];
 
 // ---- operation requests -------------------------------------------------------------------
@@ -13537,6 +13741,20 @@ pub struct ExperimentalGenerateTextLegacyRequest {
 pub struct ExperimentalGenerateImageRequest {
     /// Request body.
     pub body: GenerateImageRequest,
+}
+
+/// Request for `experimental.generate.video.create` (`POST /api/experimental/generate/video`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExperimentalGenerateVideoCreateRequest {
+    /// Request body.
+    pub body: GenerateVideoRequest,
+}
+
+/// Request for `experimental.generate.video.get` (`GET /api/experimental/generate/video/{id}`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExperimentalGenerateVideoGetRequest {
+    /// path parameter `id`.
+    pub id: GenerateVideoID,
 }
 
 /// Request for `experimental.generate.decisions` (`POST /api/experimental/generate/decisions`).
@@ -14017,46 +14235,55 @@ pub struct ExperimentalMediaGetRequest {
     pub hash: MediaHash,
 }
 
-/// Request for `experimental.schedule.create` (`POST /api/experimental/schedule`).
+/// Request for `experimental.blob.get` (`GET /api/experimental/blob/{id}`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalScheduleCreateRequest {
+pub struct ExperimentalBlobGetRequest {
+    /// path parameter `id`.
+    pub id: BlobID,
+}
+
+/// Request for `experimental.automation.create` (`POST /api/experimental/automation`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExperimentalAutomationCreateRequest {
     /// Request body.
-    pub body: ScheduleCreatePayload,
+    pub body: AutomationCreatePayload,
 }
 
-/// Request for `experimental.schedule.list` (`GET /api/experimental/schedule`).
+/// Request for `experimental.automation.list` (`GET /api/experimental/automation`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalScheduleListRequest {
-    /// query parameter `sessionID`.
-    pub session_id: SessionID,
+pub struct ExperimentalAutomationListRequest {
+    /// query parameter `sessionID`. Only automations created by this Session.
+    pub session_id: Option<SessionID>,
+    /// query parameter `directory`. Only automations in the project that owns this directory.
+    pub directory: Option<String>,
 }
 
-/// Request for `experimental.schedule.get` (`GET /api/experimental/schedule/{scheduleID}`).
+/// Request for `experimental.automation.get` (`GET /api/experimental/automation/{automationID}`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalScheduleGetRequest {
-    /// path parameter `scheduleID`.
-    pub schedule_id: ScheduleID,
+pub struct ExperimentalAutomationGetRequest {
+    /// path parameter `automationID`.
+    pub automation_id: AutomationID,
 }
 
-/// Request for `experimental.schedule.delete` (`DELETE /api/experimental/schedule/{scheduleID}`).
+/// Request for `experimental.automation.delete` (`DELETE /api/experimental/automation/{automationID}`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalScheduleDeleteRequest {
-    /// path parameter `scheduleID`.
-    pub schedule_id: ScheduleID,
+pub struct ExperimentalAutomationDeleteRequest {
+    /// path parameter `automationID`.
+    pub automation_id: AutomationID,
 }
 
-/// Request for `experimental.schedule.pause` (`POST /api/experimental/schedule/{scheduleID}/pause`).
+/// Request for `experimental.automation.pause` (`POST /api/experimental/automation/{automationID}/pause`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalSchedulePauseRequest {
-    /// path parameter `scheduleID`.
-    pub schedule_id: ScheduleID,
+pub struct ExperimentalAutomationPauseRequest {
+    /// path parameter `automationID`.
+    pub automation_id: AutomationID,
 }
 
-/// Request for `experimental.schedule.resume` (`POST /api/experimental/schedule/{scheduleID}/resume`).
+/// Request for `experimental.automation.resume` (`POST /api/experimental/automation/{automationID}/resume`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExperimentalScheduleResumeRequest {
-    /// path parameter `scheduleID`.
-    pub schedule_id: ScheduleID,
+pub struct ExperimentalAutomationResumeRequest {
+    /// path parameter `automationID`.
+    pub automation_id: AutomationID,
 }
 
 /// Request for `experimental.artifacts.providers` (`GET /api/experimental/artifacts/providers`).
@@ -14115,7 +14342,7 @@ pub struct ExperimentalArtifactsViewRequest {
 pub struct ExperimentalJobListRequest {
     /// query parameter `sessionID`. Filter to background jobs owned by this session.
     pub session_id: Option<SessionID>,
-    /// query parameter `kind`. Filter by background job kind (shell, subagent, or image).
+    /// query parameter `kind`. Filter by background job kind.
     pub kind: Option<JobKind>,
     /// query parameter `status`. Filter by job status (running, completed, error, or cancelled).
     pub status: Option<JobStatus>,
@@ -14448,6 +14675,10 @@ pub enum Op {
     ExperimentalGenerateTextLegacy,
     /// `experimental.generate.image`
     ExperimentalGenerateImage,
+    /// `experimental.generate.video.create`
+    ExperimentalGenerateVideoCreate,
+    /// `experimental.generate.video.get`
+    ExperimentalGenerateVideoGet,
     /// `experimental.generate.decisions`
     ExperimentalGenerateDecisions,
     /// `experimental.voice.models`
@@ -14588,18 +14819,20 @@ pub enum Op {
     ExperimentalPersistentPtyConnect,
     /// `experimental.media.get`
     ExperimentalMediaGet,
-    /// `experimental.schedule.create`
-    ExperimentalScheduleCreate,
-    /// `experimental.schedule.list`
-    ExperimentalScheduleList,
-    /// `experimental.schedule.get`
-    ExperimentalScheduleGet,
-    /// `experimental.schedule.delete`
-    ExperimentalScheduleDelete,
-    /// `experimental.schedule.pause`
-    ExperimentalSchedulePause,
-    /// `experimental.schedule.resume`
-    ExperimentalScheduleResume,
+    /// `experimental.blob.get`
+    ExperimentalBlobGet,
+    /// `experimental.automation.create`
+    ExperimentalAutomationCreate,
+    /// `experimental.automation.list`
+    ExperimentalAutomationList,
+    /// `experimental.automation.get`
+    ExperimentalAutomationGet,
+    /// `experimental.automation.delete`
+    ExperimentalAutomationDelete,
+    /// `experimental.automation.pause`
+    ExperimentalAutomationPause,
+    /// `experimental.automation.resume`
+    ExperimentalAutomationResume,
     /// `experimental.artifacts.providers`
     ExperimentalArtifactsProviders,
     /// `experimental.artifacts.list`
@@ -14750,6 +14983,8 @@ pub const OPS: &[OpMeta] = &[
     OpMeta { op: Op::ExperimentalGenerateText, id: "experimental.generate.text", method: "POST", path: "/api/experimental/generate/text", route: "/api/experimental/generate/text", scope: Scope::G, envelope: Envelope::Bare, special: false },
     OpMeta { op: Op::ExperimentalGenerateTextLegacy, id: "experimental.generate.textLegacy", method: "POST", path: "/api/experimental/generate", route: "/api/experimental/generate", scope: Scope::G, envelope: Envelope::Bare, special: false },
     OpMeta { op: Op::ExperimentalGenerateImage, id: "experimental.generate.image", method: "POST", path: "/api/experimental/generate/image", route: "/api/experimental/generate/image", scope: Scope::G, envelope: Envelope::Bare, special: false },
+    OpMeta { op: Op::ExperimentalGenerateVideoCreate, id: "experimental.generate.video.create", method: "POST", path: "/api/experimental/generate/video", route: "/api/experimental/generate/video", scope: Scope::G, envelope: Envelope::Bare, special: false },
+    OpMeta { op: Op::ExperimentalGenerateVideoGet, id: "experimental.generate.video.get", method: "GET", path: "/api/experimental/generate/video/{id}", route: "/api/experimental/generate/video/{id}", scope: Scope::G, envelope: Envelope::Bare, special: false },
     OpMeta { op: Op::ExperimentalGenerateDecisions, id: "experimental.generate.decisions", method: "POST", path: "/api/experimental/generate/decisions", route: "/api/experimental/generate/decisions", scope: Scope::G, envelope: Envelope::Bare, special: false },
     OpMeta { op: Op::ExperimentalVoiceModels, id: "experimental.voice.models", method: "GET", path: "/api/experimental/voice/models", route: "/api/experimental/voice/models", scope: Scope::G, envelope: Envelope::Bare, special: false },
     OpMeta { op: Op::ExperimentalVoiceSession, id: "experimental.voice.session", method: "POST", path: "/api/experimental/voice/session", route: "/api/experimental/voice/session", scope: Scope::G, envelope: Envelope::Bare, special: false },
@@ -14820,12 +15055,13 @@ pub const OPS: &[OpMeta] = &[
     OpMeta { op: Op::ExperimentalPersistentPtyConnectToken, id: "experimental.persistentPty.connectToken", method: "POST", path: "/api/experimental/persistent-pty/{ptyID}/connect-token", route: "/api/experimental/persistent-pty/{ptyID}/connect-token", scope: Scope::G, envelope: Envelope::Data, special: true },
     OpMeta { op: Op::ExperimentalPersistentPtyConnect, id: "experimental.persistentPty.connect", method: "GET", path: "/api/experimental/persistent-pty/{ptyID}/connect", route: "/api/experimental/persistent-pty/{ptyID}/connect", scope: Scope::G, envelope: Envelope::Raw, special: true },
     OpMeta { op: Op::ExperimentalMediaGet, id: "experimental.media.get", method: "GET", path: "/api/experimental/media/{hash}", route: "/api/experimental/media/{hash}", scope: Scope::G, envelope: Envelope::Raw, special: true },
-    OpMeta { op: Op::ExperimentalScheduleCreate, id: "experimental.schedule.create", method: "POST", path: "/api/experimental/schedule", route: "/api/experimental/schedule", scope: Scope::G, envelope: Envelope::Data, special: false },
-    OpMeta { op: Op::ExperimentalScheduleList, id: "experimental.schedule.list", method: "GET", path: "/api/experimental/schedule", route: "/api/experimental/schedule", scope: Scope::G, envelope: Envelope::Data, special: false },
-    OpMeta { op: Op::ExperimentalScheduleGet, id: "experimental.schedule.get", method: "GET", path: "/api/experimental/schedule/{scheduleID}", route: "/api/experimental/schedule/{scheduleID}", scope: Scope::G, envelope: Envelope::Data, special: false },
-    OpMeta { op: Op::ExperimentalScheduleDelete, id: "experimental.schedule.delete", method: "DELETE", path: "/api/experimental/schedule/{scheduleID}", route: "/api/experimental/schedule/{scheduleID}", scope: Scope::G, envelope: Envelope::NoContent, special: false },
-    OpMeta { op: Op::ExperimentalSchedulePause, id: "experimental.schedule.pause", method: "POST", path: "/api/experimental/schedule/{scheduleID}/pause", route: "/api/experimental/schedule/{scheduleID}/pause", scope: Scope::G, envelope: Envelope::Data, special: false },
-    OpMeta { op: Op::ExperimentalScheduleResume, id: "experimental.schedule.resume", method: "POST", path: "/api/experimental/schedule/{scheduleID}/resume", route: "/api/experimental/schedule/{scheduleID}/resume", scope: Scope::G, envelope: Envelope::Data, special: false },
+    OpMeta { op: Op::ExperimentalBlobGet, id: "experimental.blob.get", method: "GET", path: "/api/experimental/blob/{id}", route: "/api/experimental/blob/{id}", scope: Scope::G, envelope: Envelope::Raw, special: true },
+    OpMeta { op: Op::ExperimentalAutomationCreate, id: "experimental.automation.create", method: "POST", path: "/api/experimental/automation", route: "/api/experimental/automation", scope: Scope::G, envelope: Envelope::Data, special: false },
+    OpMeta { op: Op::ExperimentalAutomationList, id: "experimental.automation.list", method: "GET", path: "/api/experimental/automation", route: "/api/experimental/automation", scope: Scope::G, envelope: Envelope::Data, special: false },
+    OpMeta { op: Op::ExperimentalAutomationGet, id: "experimental.automation.get", method: "GET", path: "/api/experimental/automation/{automationID}", route: "/api/experimental/automation/{automationID}", scope: Scope::G, envelope: Envelope::Data, special: false },
+    OpMeta { op: Op::ExperimentalAutomationDelete, id: "experimental.automation.delete", method: "DELETE", path: "/api/experimental/automation/{automationID}", route: "/api/experimental/automation/{automationID}", scope: Scope::G, envelope: Envelope::NoContent, special: false },
+    OpMeta { op: Op::ExperimentalAutomationPause, id: "experimental.automation.pause", method: "POST", path: "/api/experimental/automation/{automationID}/pause", route: "/api/experimental/automation/{automationID}/pause", scope: Scope::G, envelope: Envelope::Data, special: false },
+    OpMeta { op: Op::ExperimentalAutomationResume, id: "experimental.automation.resume", method: "POST", path: "/api/experimental/automation/{automationID}/resume", route: "/api/experimental/automation/{automationID}/resume", scope: Scope::G, envelope: Envelope::Data, special: false },
     OpMeta { op: Op::ExperimentalArtifactsProviders, id: "experimental.artifacts.providers", method: "GET", path: "/api/experimental/artifacts/providers", route: "/api/experimental/artifacts/providers", scope: Scope::H, envelope: Envelope::Location, special: false },
     OpMeta { op: Op::ExperimentalArtifactsList, id: "experimental.artifacts.list", method: "GET", path: "/api/experimental/artifacts", route: "/api/experimental/artifacts", scope: Scope::H, envelope: Envelope::Location, special: false },
     OpMeta { op: Op::ExperimentalArtifactsCreate, id: "experimental.artifacts.create", method: "POST", path: "/api/experimental/artifacts", route: "/api/experimental/artifacts", scope: Scope::H, envelope: Envelope::Location, special: false },
@@ -15392,6 +15628,24 @@ pub trait Backend: Send + Sync + 'static {
     async fn experimental_generate_image(&self, ctx: &RequestContext, req: ExperimentalGenerateImageRequest) -> Result<GenerateImageResponse, ApiError> {
         let _ = (ctx, req);
         Err(ApiError::not_implemented("experimental.generate.image"))
+    }
+    /// `POST /api/experimental/generate/video` — `experimental.generate.video.create`: Create a video generation.
+    ///
+    /// Submit a video job to a video model using the server's base configuration and return its ID once the provider accepted it. The server polls the job and stores the finished video as a blob for 7 days; read the job with GET /api/experimental/generate/video/:id and the video with GET /api/experimental/blob/:id. Behind the video_generate flag. Experimental: may change without compatibility guarantees.
+    ///
+    /// Scope `G`, envelope `Bare`.
+    async fn experimental_generate_video_create(&self, ctx: &RequestContext, req: ExperimentalGenerateVideoCreateRequest) -> Result<GenerateVideoCreateResponse, ApiError> {
+        let _ = (ctx, req);
+        Err(ApiError::not_implemented("experimental.generate.video.create"))
+    }
+    /// `GET /api/experimental/generate/video/{id}` — `experimental.generate.video.get`: Read a video generation.
+    ///
+    /// Read a video job: running, completed with the video's blob, or error with a reason. Jobs are kept in memory, so a server restart forgets them; a finished video's blob stays readable. Behind the video_generate flag. Experimental: may change without compatibility guarantees.
+    ///
+    /// Scope `G`, envelope `Bare`.
+    async fn experimental_generate_video_get(&self, ctx: &RequestContext, req: ExperimentalGenerateVideoGetRequest) -> Result<GenerateVideoGetResponse, ApiError> {
+        let _ = (ctx, req);
+        Err(ApiError::not_implemented("experimental.generate.video.get"))
     }
     /// `POST /api/experimental/generate/decisions` — `experimental.generate.decisions`: Generate decisions.
     ///
@@ -15991,59 +16245,68 @@ pub trait Backend: Send + Sync + 'static {
         let _ = (ctx, req);
         Err(ApiError::not_implemented("experimental.media.get"))
     }
-    /// `POST /api/experimental/schedule` — `experimental.schedule.create`: Create schedule.
+    /// `GET /api/experimental/blob/{id}` — `experimental.blob.get`: Read a blob.
     ///
-    /// Schedule a prompt that wakes the Session once after a delay, at a time, every interval, or on a cron. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// Stream a stored blob's bytes, such as a generated video, with single byte Range, ETag and 304 Not Modified support. Blobs are deleted 7 days after they're written. Experimental: may change without compatibility guarantees.
+    ///
+    /// Scope `G`, envelope `Raw`.
+    async fn experimental_blob_get(&self, ctx: &RequestContext, req: ExperimentalBlobGetRequest) -> Result<crate::backend::BlobFile, ApiError> {
+        let _ = (ctx, req);
+        Err(ApiError::not_implemented("experimental.blob.get"))
+    }
+    /// `POST /api/experimental/automation` — `experimental.automation.create`: Create automation.
+    ///
+    /// Create an automation that sends a prompt or runs a Code Mode program at a time, every interval, or on a cron. Creating an MCP event watch requires the automation_create tool in a local session; a session ID over HTTP is not a watch authorization. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `Data`.
-    async fn experimental_schedule_create(&self, ctx: &RequestContext, req: ExperimentalScheduleCreateRequest) -> Result<ScheduleInfo, ApiError> {
+    async fn experimental_automation_create(&self, ctx: &RequestContext, req: ExperimentalAutomationCreateRequest) -> Result<AutomationInfo, ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.create"))
+        Err(ApiError::not_implemented("experimental.automation.create"))
     }
-    /// `GET /api/experimental/schedule` — `experimental.schedule.list`: List schedules.
+    /// `GET /api/experimental/automation` — `experimental.automation.list`: List automations.
     ///
-    /// List a Session's schedules, oldest first. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// List automations, oldest first. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `Data`.
-    async fn experimental_schedule_list(&self, ctx: &RequestContext, req: ExperimentalScheduleListRequest) -> Result<Vec<ScheduleInfo>, ApiError> {
+    async fn experimental_automation_list(&self, ctx: &RequestContext, req: ExperimentalAutomationListRequest) -> Result<Vec<AutomationInfo>, ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.list"))
+        Err(ApiError::not_implemented("experimental.automation.list"))
     }
-    /// `GET /api/experimental/schedule/{scheduleID}` — `experimental.schedule.get`: Get schedule.
+    /// `GET /api/experimental/automation/{automationID}` — `experimental.automation.get`: Get automation.
     ///
-    /// Read one schedule. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// Read one automation. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `Data`.
-    async fn experimental_schedule_get(&self, ctx: &RequestContext, req: ExperimentalScheduleGetRequest) -> Result<ScheduleInfo, ApiError> {
+    async fn experimental_automation_get(&self, ctx: &RequestContext, req: ExperimentalAutomationGetRequest) -> Result<AutomationInfo, ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.get"))
+        Err(ApiError::not_implemented("experimental.automation.get"))
     }
-    /// `DELETE /api/experimental/schedule/{scheduleID}` — `experimental.schedule.delete`: Delete schedule.
+    /// `DELETE /api/experimental/automation/{automationID}` — `experimental.automation.delete`: Delete automation.
     ///
-    /// Delete a schedule. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// Delete an automation. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `NoContent`.
-    async fn experimental_schedule_delete(&self, ctx: &RequestContext, req: ExperimentalScheduleDeleteRequest) -> Result<(), ApiError> {
+    async fn experimental_automation_delete(&self, ctx: &RequestContext, req: ExperimentalAutomationDeleteRequest) -> Result<(), ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.delete"))
+        Err(ApiError::not_implemented("experimental.automation.delete"))
     }
-    /// `POST /api/experimental/schedule/{scheduleID}/pause` — `experimental.schedule.pause`: Pause schedule.
+    /// `POST /api/experimental/automation/{automationID}/pause` — `experimental.automation.pause`: Pause automation.
     ///
-    /// Stop a schedule from firing until it is resumed. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// Stop an automation from running until it is resumed. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `Data`.
-    async fn experimental_schedule_pause(&self, ctx: &RequestContext, req: ExperimentalSchedulePauseRequest) -> Result<ScheduleInfo, ApiError> {
+    async fn experimental_automation_pause(&self, ctx: &RequestContext, req: ExperimentalAutomationPauseRequest) -> Result<AutomationInfo, ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.pause"))
+        Err(ApiError::not_implemented("experimental.automation.pause"))
     }
-    /// `POST /api/experimental/schedule/{scheduleID}/resume` — `experimental.schedule.resume`: Resume schedule.
+    /// `POST /api/experimental/automation/{automationID}/resume` — `experimental.automation.resume`: Resume automation.
     ///
-    /// Resume a paused schedule. A one-shot that fell due while paused fires once; a repeating schedule resumes at its next slot. Experimental: needs experimental.schedules in the Session's config and may change without notice.
+    /// Resume a paused automation. A missed `at` runs once; repeating timers resume at their next slot. Event watches request replay from their saved cursor. Experimental: needs experimental.automations in the config of the automation's directory and may change without compatibility guarantees.
     ///
     /// Scope `G`, envelope `Data`.
-    async fn experimental_schedule_resume(&self, ctx: &RequestContext, req: ExperimentalScheduleResumeRequest) -> Result<ScheduleInfo, ApiError> {
+    async fn experimental_automation_resume(&self, ctx: &RequestContext, req: ExperimentalAutomationResumeRequest) -> Result<AutomationInfo, ApiError> {
         let _ = (ctx, req);
-        Err(ApiError::not_implemented("experimental.schedule.resume"))
+        Err(ApiError::not_implemented("experimental.automation.resume"))
     }
     /// `GET /api/experimental/artifacts/providers` — `experimental.artifacts.providers`: List artifact providers.
     ///
@@ -16818,6 +17081,20 @@ pub(crate) async fn dispatch(
             let out = backend.experimental_generate_image(&call.ctx, req).await?;
             Ok(respond::bare(&out))
         }
+        Op::ExperimentalGenerateVideoCreate => {
+            let req = ExperimentalGenerateVideoCreateRequest {
+                body: call.json_body_for("experimental.generate.video.create")?,
+            };
+            let out = backend.experimental_generate_video_create(&call.ctx, req).await?;
+            Ok(respond::bare(&out))
+        }
+        Op::ExperimentalGenerateVideoGet => {
+            let req = ExperimentalGenerateVideoGetRequest {
+                id: call.path_str("id", Some("^video_[0-9a-f]{12}[0-9A-Za-z]{14}$"))?,
+            };
+            let out = backend.experimental_generate_video_get(&call.ctx, req).await?;
+            Ok(respond::bare(&out))
+        }
         Op::ExperimentalGenerateDecisions => {
             let req = ExperimentalGenerateDecisionsRequest {
                 body: call.json_body_for("experimental.generate.decisions")?,
@@ -17281,47 +17558,48 @@ pub(crate) async fn dispatch(
             let out = backend.experimental_persistent_pty_snapshot(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
-        Op::ExperimentalScheduleCreate => {
-            let req = ExperimentalScheduleCreateRequest {
-                body: call.json_body_for("experimental.schedule.create")?,
+        Op::ExperimentalAutomationCreate => {
+            let req = ExperimentalAutomationCreateRequest {
+                body: call.json_body_for("experimental.automation.create")?,
             };
-            let out = backend.experimental_schedule_create(&call.ctx, req).await?;
+            let out = backend.experimental_automation_create(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
-        Op::ExperimentalScheduleList => {
-            let req = ExperimentalScheduleListRequest {
-                session_id: crate::router::required(call.query_str("sessionID", Some("^ses"))?, "sessionID")?,
+        Op::ExperimentalAutomationList => {
+            let req = ExperimentalAutomationListRequest {
+                session_id: call.query_str("sessionID", Some("^ses"))?,
+                directory: call.query_str("directory", None)?,
             };
-            let out = backend.experimental_schedule_list(&call.ctx, req).await?;
+            let out = backend.experimental_automation_list(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
-        Op::ExperimentalScheduleGet => {
-            let req = ExperimentalScheduleGetRequest {
-                schedule_id: call.path_str("scheduleID", Some("^sch_"))?,
+        Op::ExperimentalAutomationGet => {
+            let req = ExperimentalAutomationGetRequest {
+                automation_id: call.path_str("automationID", Some("^aut_"))?,
             };
-            let out = backend.experimental_schedule_get(&call.ctx, req).await?;
+            let out = backend.experimental_automation_get(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
-        Op::ExperimentalScheduleDelete => {
-            let req = ExperimentalScheduleDeleteRequest {
-                schedule_id: call.path_str("scheduleID", Some("^sch_"))?,
+        Op::ExperimentalAutomationDelete => {
+            let req = ExperimentalAutomationDeleteRequest {
+                automation_id: call.path_str("automationID", Some("^aut_"))?,
             };
-            let out = backend.experimental_schedule_delete(&call.ctx, req).await?;
+            let out = backend.experimental_automation_delete(&call.ctx, req).await?;
             let () = out;
             Ok(respond::no_content())
         }
-        Op::ExperimentalSchedulePause => {
-            let req = ExperimentalSchedulePauseRequest {
-                schedule_id: call.path_str("scheduleID", Some("^sch_"))?,
+        Op::ExperimentalAutomationPause => {
+            let req = ExperimentalAutomationPauseRequest {
+                automation_id: call.path_str("automationID", Some("^aut_"))?,
             };
-            let out = backend.experimental_schedule_pause(&call.ctx, req).await?;
+            let out = backend.experimental_automation_pause(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
-        Op::ExperimentalScheduleResume => {
-            let req = ExperimentalScheduleResumeRequest {
-                schedule_id: call.path_str("scheduleID", Some("^sch_"))?,
+        Op::ExperimentalAutomationResume => {
+            let req = ExperimentalAutomationResumeRequest {
+                automation_id: call.path_str("automationID", Some("^aut_"))?,
             };
-            let out = backend.experimental_schedule_resume(&call.ctx, req).await?;
+            let out = backend.experimental_automation_resume(&call.ctx, req).await?;
             Ok(respond::data(&out))
         }
         Op::ExperimentalArtifactsProviders => {

@@ -1,7 +1,7 @@
 //! opencode 2.2.2 API behaviour: session routes that no longer need their location, forms of unloaded
 //! locations, canonical location directories, media blobs, and the endpoints of features ocd answers as
-//! disabled (schedules, GUI plugin bundles, image and decision generation). Expected bodies were checked
-//! against the 2.2.2 binary.
+//! disabled (GUI plugin bundles, image and decision generation). Expected bodies were checked against the 2.2.2
+//! binary. 2.3.1 replaced the schedule routes with automations (`v2_3_1.rs`).
 
 mod common;
 
@@ -135,37 +135,6 @@ async fn data_attachments_keep_their_source() {
         .await;
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     assert_eq!(r.json()["data"]["payload"]["files"][0]["source"], json!({ "type": "uri", "uri": "file:///tmp/a.txt" }));
-}
-
-#[tokio::test]
-async fn schedules_answer_as_disabled() {
-    let h = harness();
-    let id = h.session().await;
-    let r = h.post("/api/experimental/schedule", json!({ "sessionID": id, "when": { "in": "1h" }, "prompt": "x" })).await;
-    assert_eq!(r.status, 403);
-    assert_eq!(r.json(), json!({ "_tag": "ForbiddenError", "message": "Scheduled tasks are disabled; set experimental.schedules in config" }));
-    let r = h.post("/api/experimental/schedule", json!({ "sessionID": "ses_ffffffffffffZZZZZZZZZZZZZZ", "when": { "in": "1h" }, "prompt": "x" })).await;
-    assert_eq!(r.status, 404);
-    assert_eq!(r.json()["_tag"], "SessionNotFoundError");
-    assert_eq!(h.get(&format!("/api/experimental/schedule?sessionID={id}")).await.status, 403);
-    let r = h.get("/api/experimental/schedule/sch_ffffffffffffZZZZZZZZZZZZZZ").await;
-    assert_eq!(r.status, 404);
-    assert_eq!(
-        r.json(),
-        json!({ "_tag": "ScheduleNotFoundError", "scheduleID": "sch_ffffffffffffZZZZZZZZZZZZZZ", "message": "Schedule not found: sch_ffffffffffffZZZZZZZZZZZZZZ" })
-    );
-    // A schedule row another release created reads as forbidden while its session exists.
-    h.app
-        .db
-        .with(|c| {
-            c.execute(
-                "INSERT INTO schedule (id, session_id, action, \"when\", tz, time_created, time_updated) VALUES ('sch_1', ?, '{}', '{}', 'UTC', 0, 0)",
-                [&id],
-            )
-        })
-        .unwrap();
-    assert_eq!(h.req("POST", "/api/experimental/schedule/sch_1/pause", None).await.status, 403);
-    assert_eq!(h.req("DELETE", "/api/experimental/schedule/sch_1", None).await.status, 403);
 }
 
 #[tokio::test]

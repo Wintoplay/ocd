@@ -50,10 +50,8 @@ pub struct Engine {
     console_skill_downloads: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// The built-in `opencode.goal` plugin (`/goal`).
     pub goals: crate::goal::Goals,
-    /// Background summaries held per session (`experimental.background_compaction`).
+    /// Background summaries held per session (`compaction.background`).
     pub(crate) precomputed: Mutex<HashMap<String, crate::compaction::Precomputed>>,
-    /// Scheduled prompts (`experimental.schedules`).
-    pub schedules: Arc<crate::schedule::Schedules>,
     /// Tools tests register in every location after the built-ins (a stand-in for a plugin's tool transform).
     #[doc(hidden)]
     pub extra_tools: Mutex<Vec<Arc<dyn oc_tools::Tool>>>,
@@ -109,7 +107,6 @@ impl Engine {
         models.set_plugins(app.plugins.clone());
         models.set_lock_root(app.global.locks());
         app.plugins.add_websearch(services.websearch.clone());
-        let schedules = crate::schedule::Schedules::new(&app);
         Arc::new_cyclic(|me| Engine {
             app,
             models,
@@ -125,10 +122,6 @@ impl Engine {
             console_skill_downloads: Mutex::new(HashMap::new()),
             goals: Default::default(),
             precomputed: Mutex::new(HashMap::new()),
-            schedules: {
-                schedules.set_engine(me.clone());
-                schedules
-            },
             extra_tools: Mutex::new(Vec::new()),
             me: me.clone(),
         })
@@ -561,27 +554,8 @@ impl Engine {
                 }
             }
         }
-        // `opencode.tool.schedule` (registered after `read`) adds its tools only while `experimental.schedules` is on.
-        if crate::schedule::settings_of(&location.entries).enabled
-            && self.app.plugins.enabled(key).is_none_or(|enabled| enabled.iter().any(|e| e == crate::schedule::PLUGIN_ID))
-        {
-            let mut next = Registry::new();
-            for namespace in registry.namespaces().to_vec() {
-                let _ = next.namespace(namespace);
-            }
-            let mut added = false;
-            for (id, tool) in registry.list() {
-                let _ = next.add(tool);
-                if id == "read" {
-                    crate::schedule::tools::register(&mut next, &self.schedules);
-                    added = true;
-                }
-            }
-            if !added {
-                crate::schedule::tools::register(&mut next, &self.schedules);
-            }
-            registry = next;
-        }
+        // 2.3.1 replaced `opencode.tool.schedule` with `opencode.tool.automation`, whose tools need
+        // `experimental.automations`; automations are not ported yet, so it adds nothing.
         for tool in self.extra_tools.lock().iter() {
             let _ = registry.add(tool.clone());
         }

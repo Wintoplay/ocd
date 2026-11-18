@@ -654,34 +654,29 @@ mod tests {
         );
     }
 
-    // Schedule conditions: a `run` check or a Code Mode `code` check, the other member's keys `Never`
-    // (strings captured from the 2.2.5 server).
+    // Automation targets: a `session` or a `subagent`, the other member's key `Never`; triggers and actions by their
+    // `type` (strings captured from the 2.3.1 server).
     #[test]
-    fn schedule_condition_members() {
-        let op = "experimental.schedule.create";
-        let body = |c: Value| json!({"sessionID": "ses_x", "prompt": "p", "if": c});
-        assert_eq!(msg(op, body(json!({"code": "return true"}))), None);
-        assert_eq!(msg(op, body(json!({"run": "x"}))), None);
+    fn automation_create_members() {
+        let op = "experimental.automation.create";
+        let body = |action: Value| json!({"name": "n", "trigger": {"type": "every", "every": "1 hour"}, "action": action});
+        assert_eq!(msg(op, body(json!({"type": "prompt", "prompt": "p"}))), None);
+        assert_eq!(msg(op, body(json!({"type": "prompt", "prompt": "p", "to": {"subagent": "general"}}))), None);
+        assert_eq!(msg(op, body(json!({"type": "code", "code": "return 1", "args": {"a": 1}}))), None);
         assert_eq!(
-            msg(op, body(json!({"run": "true", "code": "x"}))).unwrap(),
-            "Expected never\n  at [\"if\"][\"code\"]\nExpected never\n  at [\"if\"][\"run\"]"
+            msg(op, body(json!({"type": "prompt", "prompt": "p", "to": {"session": "ses_x", "subagent": "a"}}))).unwrap(),
+            "Expected never\n  at [\"action\"][\"to\"][\"subagent\"]\nExpected never\n  at [\"action\"][\"to\"][\"session\"]"
         );
         assert_eq!(
-            msg(op, body(json!({"code": "x", "is": "y"}))).unwrap(),
-            "Missing key\n  at [\"if\"][\"run\"]\nExpected never\n  at [\"if\"][\"is\"]"
+            msg(op, body(json!({"type": "code", "code": ""}))).unwrap(),
+            "Expected a value with a length of at least 1\n  at [\"action\"][\"code\"]"
         );
         assert_eq!(
-            msg(op, body(json!({"code": ""}))).unwrap(),
-            "Missing key\n  at [\"if\"][\"run\"]\nExpected a value with a length of at least 1\n  at [\"if\"][\"code\"]"
+            msg(op, json!({"name": "n", "trigger": {"every": "1h"}, "action": {"type": "prompt", "prompt": "p"}})).unwrap(),
+            "Expected Automation.Trigger\n  at [\"trigger\"]"
         );
-        assert_eq!(
-            msg(op, body(json!({"is": "y"}))).unwrap(),
-            "Missing key\n  at [\"if\"][\"run\"]\nMissing key\n  at [\"if\"][\"code\"]"
-        );
-        assert_eq!(
-            msg(op, json!({"sessionID": "ses_x", "prompt": "p", "until": {"run": "x", "code": null}})).unwrap(),
-            "Expected never\n  at [\"until\"][\"code\"]\nExpected string\n  at [\"until\"][\"code\"]"
-        );
+        assert_eq!(msg(op, json!({"trigger": {}, "action": {}})).unwrap(), "Missing key\n  at [\"name\"]");
+        assert_eq!(msg("experimental.generate.video.create", json!({"model": "x/y", "prompt": "p"})).unwrap(), "Expected Model.Ref\n  at [\"model\"]");
     }
 
     #[test]
