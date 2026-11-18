@@ -577,6 +577,54 @@ async fn settlement_cases(h: &Harness) {
     assert!(h.job_rows(&p).is_empty());
     started.notify_waiters();
 
+    // "keeps an automation run's child quiet unless the parent followed up through a Job" (2.3.1): the child an
+    // automation starts for a run (`ses_<aut>_<run>`) finishes without reporting to or waking its parent.
+    let p = h.session("Automation parent", None).await;
+    let child = h
+        .app
+        .sessions
+        .create(CreateInput {
+            id: Some(oc_core::automation::run_session_id("aut_quiet", 1)),
+            parent_id: Some(p.clone()),
+            title: Some("Morning triage".into()),
+            agent: Some("general".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    claim(&h.app, &child, 0);
+    // A failure carries a body that a regular child would report.
+    settle(h, &report, &child, Outcome::Failed("triage failed".into())).await.unwrap();
+    let inbox = |session: &str| -> i64 {
+        h.app.db.with(|c| c.query_row("SELECT count(*) FROM session_inbox WHERE session_id = ?", [session], |r| r.get(0))).unwrap()
+    };
+    assert_eq!((inbox(&p), h.reports(&p).len()), (0, 0));
+    assert!(h.job_rows(&p).is_empty());
+    assert!(!h.suspended(&child));
+    // A follow-up the parent sends with the subagent tool runs as a Job, and that reports as usual.
+    let started = Arc::new(tokio::sync::Notify::new());
+    h.app.jobs.start_input(oc_core::job::StartInput {
+        id: child.clone(),
+        kind: "subagent".into(),
+        title: Some("Morning triage".into()),
+        metadata_session: None,
+        recovery: Some(recovery(&p, &child, "Morning triage")),
+        notification_id: None,
+        background: true,
+        run: {
+            let s = started.clone();
+            Box::pin(async move {
+                s.notified().await;
+                Ok(String::new())
+            })
+        },
+    });
+    settle(h, &report, &child, Outcome::Failed("follow-up failed".into())).await.unwrap();
+    let reports = h.wait_reports(&p, 1).await;
+    assert!(reports[0].1.contains("follow-up failed"), "{reports:?}");
+    started.notify_waiters();
+
     // "acknowledges a parent deleted before or after commit": a report owed to nobody is dropped with its row.
     let p = h.session("Doomed parent", None).await;
     let child = h.session("Orphan", Some(&p)).await;
