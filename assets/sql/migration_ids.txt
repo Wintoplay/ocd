@@ -57,3 +57,6 @@
 20261029073502_session_time_busy
 20261029165540_schedule_checks
 20261030054400_job
+20261116043204_automation
+20261116181958_automation_event_position
+20261116213417_automation_active_index

@@ -155,9 +155,9 @@ fn a_database_migrated_from_2_1_4_matches_a_fresh_database() {
         })
         .unwrap()
     };
-    assert_eq!(ids(&migrated).len(), 59);
+    assert_eq!(ids(&migrated).len(), 62);
     assert_eq!(ids(&migrated), ids(&fresh));
-    assert_eq!(ids(&fresh).last().unwrap(), "20261030054400_job");
+    assert_eq!(ids(&fresh).last().unwrap(), "20261116213417_automation_active_index");
 
     let mut expected = tables(&fresh);
     expected.retain(|t| t != "migration");
@@ -165,7 +165,8 @@ fn a_database_migrated_from_2_1_4_matches_a_fresh_database() {
     got.retain(|t| t != "migration");
     assert_eq!(got, expected);
     assert!(!expected.contains(&"session_pending".to_string()));
-    for t in ["session_v2", "schedule", "session_part", "blob", "blob_ref"] {
+    assert!(!expected.contains(&"schedule".to_string()));
+    for t in ["session_v2", "automation", "session_part", "blob", "blob_ref", "job"] {
         assert!(expected.contains(&t.to_string()), "{t}");
         assert_eq!(columns(&migrated, t), columns(&fresh, t), "{t}");
     }
@@ -192,8 +193,8 @@ fn py_opt(s: &Option<String>) -> String {
     s.as_deref().map(py_str).unwrap_or_else(|| "None".into())
 }
 
-/// The schema dump `tests/fixtures/schema-2.2.5.txt` holds, taken from a 2.1.4 database that the real
-/// opencode 2.2.5 binary migrated: migration ids, every table's columns and foreign keys, every index.
+/// The schema dump `tests/fixtures/schema-2.3.1.txt` holds, taken from a 2.1.4 database that the real
+/// opencode 2.3.1 binary migrated: migration ids, every table's columns and foreign keys, every index.
 fn schema_dump(db: &Database) -> String {
     db.with(|c| {
         let mut out = Vec::new();
@@ -233,11 +234,11 @@ fn schema_dump(db: &Database) -> String {
     .unwrap()
 }
 
-/// A 2.1.4 database migrated by ocd, and a fresh one, have exactly the schema the real 2.2.5 binary gives a
+/// A 2.1.4 database migrated by ocd, and a fresh one, have exactly the schema the real 2.3.1 binary gives a
 /// migrated 2.1.4 database.
 #[test]
-fn schema_matches_the_one_the_2_2_5_binary_migrates_to() {
-    let expected = include_str!("fixtures/schema-2.2.5.txt");
+fn schema_matches_the_one_the_2_3_1_binary_migrates_to() {
+    let expected = include_str!("fixtures/schema-2.3.1.txt");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("opencode.db");
     {
@@ -987,7 +988,142 @@ fn a_fresh_database_imports_legacy_credentials() {
         .unwrap();
     assert_eq!(rows, [("openai".to_string(), "OAuth".to_string())]);
     let n: i64 = db.with(|c| c.query_row("SELECT count(*) FROM migration", [], |r| r.get(0))).unwrap();
-    assert_eq!(n, 59);
+    assert_eq!(n, 62);
+}
+
+/// `database-migration.test.ts` "leaves legacy credentials out of in-memory databases" (2.3.1): only a database file
+/// imports the legacy `auth.json`.
+#[test]
+fn an_in_memory_database_leaves_legacy_credentials_out() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("auth.json"),
+        json!({"openai": {"type": "oauth", "refresh": "refresh", "access": "access", "expires": 123}}).to_string(),
+    )
+    .unwrap();
+    let db = Database::open(std::path::Path::new(":memory:"), dir.path()).unwrap();
+    let n: i64 = db.with(|c| c.query_row("SELECT count(*) FROM credential", [], |r| r.get(0))).unwrap();
+    assert_eq!(n, 0);
+}
+
+/// A database file as opencode 2.3.0 (and ocd before 2.3.1) left it: the 59 migrations up to `job`, with a project
+/// and the session `ses_1` in `/repo`.
+fn database_2_3_0(path: &std::path::Path) -> rusqlite::Connection {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.execute_batch(include_str!("fixtures/schema-2.3.0.sql")).unwrap();
+    c.execute_batch("CREATE TABLE \"migration\" (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)").unwrap();
+    for id in include_str!("fixtures/migration-ids-2.3.0.txt").lines() {
+        c.execute("INSERT INTO migration (id, time_completed) VALUES (?, 0)", [id]).unwrap();
+    }
+    c.execute("INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('prj_1', '/repo', 0, 0, '[]')", [])
+        .unwrap();
+    c.execute(
+        "INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES ('ses_1', 'prj_1', 's', '/repo', '2.3.0', 1, 2)",
+        [],
+    )
+    .unwrap();
+    c
+}
+
+/// `database-migration.test.ts` "moves plain live schedules to automations and drops the schedule table" (2.3.1,
+/// `20261116043204_automation` and the two after it): a live prompt schedule without an `if`/`until` check or an
+/// `ends.times` limit becomes an automation that prompts its session (an `in` delay becomes an `at` time at its next
+/// run); gated, counted and finished schedules are dropped, then the `schedule` table and its indexes.
+#[test]
+fn moves_plain_live_schedules_to_automations_and_drops_the_schedule_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("opencode.db");
+    {
+        let c = database_2_3_0(&path);
+        let insert = |id: &str, when: &str, status: &str, check: Option<&str>, remaining: Option<i64>, name: Option<&str>| {
+            c.execute(
+                "INSERT INTO schedule (id, session_id, name, action, \"when\", tz, status, next_due_at, remaining_runs, \"check\", run_count, last_message_id, time_created, time_updated)
+                 VALUES (?, 'ses_1', ?, '{\"type\":\"prompt\",\"prompt\":\"check the build\"}', ?, 'UTC', ?, 60000, ?, ?, 2, ?, 1, 2)",
+                rusqlite::params![id, name, when, status, remaining, check, format!("msg_{id}_2")],
+            )
+            .unwrap();
+        };
+        insert("sch_cron", r#"{"type":"cron","cron":"0 9 * * *"}"#, "active", None, None, Some("morning"));
+        insert("sch_in", r#"{"type":"in","in":"1 minute"}"#, "paused", None, None, None);
+        insert(
+            "sch_gated",
+            r#"{"type":"every","every":"1 minute"}"#,
+            "active",
+            Some(r#"{"mode":"if","condition":{"type":"shell","run":"true"}}"#),
+            None,
+            None,
+        );
+        insert("sch_counted", r#"{"type":"every","every":"1 minute"}"#, "active", None, Some(2), None);
+        insert("sch_done", r#"{"type":"every","every":"1 minute"}"#, "done", None, None, None);
+    }
+    let db = Database::open(&path, dir.path()).unwrap();
+    type Row = (String, String, Option<String>, String, String, String, String, String, Option<i64>, i64, Option<String>, Option<String>);
+    let rows: Vec<Row> = db
+        .with(|c| {
+            let mut s = c.prepare(
+                "SELECT id, project_id, session_id, directory, name, \"trigger\", action, status, next_due_at, run_count, last_message_id, event_position FROM automation ORDER BY id",
+            )?;
+            let r = s
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                        r.get(9)?, r.get(10)?, r.get(11)?,
+                    ))
+                })?
+                .collect();
+            r
+        })
+        .unwrap();
+    let action = r#"{"type":"prompt","prompt":"check the build","to":{"session":"ses_1"}}"#.to_string();
+    let row = |id: &str, name: &str, trigger: &str, status: &str, message: &str| -> Row {
+        (
+            id.into(),
+            "prj_1".into(),
+            Some("ses_1".into()),
+            "/repo".into(),
+            name.into(),
+            trigger.into(),
+            action.clone(),
+            status.into(),
+            Some(60000),
+            2,
+            Some(message.into()),
+            None,
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            row("aut_cron", "morning", r#"{"type":"cron","cron":"0 9 * * *"}"#, "active", "msg_sch_cron_2"),
+            row("aut_in", "check the build", r#"{"type":"at","at":"1970-01-01T00:01:00.000Z"}"#, "paused", "msg_sch_in_2"),
+        ]
+    );
+    let names: Vec<String> = db
+        .with(|c| {
+            let mut s = c.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'schedule%' OR name LIKE 'automation%' ORDER BY name")?;
+            let r = s.query_map([], |r| r.get(0))?.collect();
+            r
+        })
+        .unwrap();
+    assert_eq!(names, ["automation", "automation_active_idx", "automation_project_idx", "automation_session_idx"]);
+    // The migrated database has exactly the schema a fresh one has.
+    let fresh = Database::memory().unwrap();
+    assert_eq!(schema_dump(&db), schema_dump(&fresh));
+    assert_eq!(indexes(&db), indexes(&fresh));
+}
+
+/// The fresh 2.3.1 schema: `automation` has no foreign key (a session delete keeps its automations), and the active
+/// index covers every active row.
+#[test]
+fn the_automation_table_has_no_session_foreign_key() {
+    let db = Database::memory().unwrap();
+    let fks: i64 = db.with(|c| c.query_row("SELECT count(*) FROM pragma_foreign_key_list('automation')", [], |r| r.get(0))).unwrap();
+    assert_eq!(fks, 0);
+    let sql: String = db
+        .with(|c| c.query_row("SELECT sql FROM sqlite_master WHERE name = 'automation_active_idx'", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(sql, r#"CREATE INDEX `automation_active_idx` ON `automation` (`next_due_at`) WHERE "automation"."status" = 'active'"#);
+    assert!(columns(&db, "automation").iter().any(|c| c.0 == "event_position" && c.1 == "TEXT"));
 }
 
 /// "bootstraps a fresh database when the legacy credential file is malformed": a file that is not a JSON object

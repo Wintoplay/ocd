@@ -56,6 +56,9 @@ impl Database {
         let _ = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let db = Database { conn: Arc::new(Mutex::new(conn)), path: path.to_path_buf() };
+        // 2.3.1: only a database file the user opens imports their legacy `auth.json`; an in-memory one belongs to
+        // embedders and tests, which must not pick up the user's credentials.
+        let data_dir = data_dir.filter(|_| path != Path::new(":memory:"));
         crate::migrate::apply(&db, data_dir)?;
         if path != Path::new(":memory:") {
             restrict_to_owner(path);

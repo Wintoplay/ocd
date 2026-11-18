@@ -1,6 +1,10 @@
 //! Scheduled prompts (`core/src/schedule.ts`): upstream's `test/schedule.test.ts` (2.2.5) over the real service, with
 //! a manual clock, a prompter that admits into the session inbox and records wakes, real shell checks and test
 //! Code Mode tools in the `slack` namespace. Each test builds its own app (explicit paths, no process-wide XDG).
+//!
+//! 2.3.1 retired schedules (nothing wires the service any more; its migrations drop the table). These tests keep the
+//! service, the base of the automations port, working over the 2.3.0 table, with `experimental.schedules` read as
+//! the old name of `experimental.automations`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -181,6 +185,19 @@ fn enabled_config() -> Value {
     json!({"timezone": "America/New_York", "experimental": {"schedules": true}})
 }
 
+/// The `schedule` table as opencode 2.3.0 left it. 2.3.1's migrations copy simple schedules into `automation` and
+/// drop it, so the retired service runs over this legacy table here.
+const LEGACY_SCHEDULE_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS `schedule` (
+  `id` text PRIMARY KEY, `session_id` text, `name` text, `action` text NOT NULL, `check` text, `when` text NOT NULL,
+  `tz` text NOT NULL, `status` text DEFAULT 'active' NOT NULL, `next_due_at` integer, `ends_at` integer,
+  `remaining_runs` integer, `run_count` integer DEFAULT 0 NOT NULL, `checks` integer DEFAULT 0 NOT NULL,
+  `failures` integer DEFAULT 0 NOT NULL, `last_fired_at` integer, `last_message_id` text, `last_outcome` text,
+  `retry_at` integer, `state` text, `time_created` integer NOT NULL, `time_updated` integer NOT NULL,
+  CONSTRAINT `fk_schedule_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session_v2`(`id`) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS `schedule_session_idx` ON `schedule` (`session_id`);
+CREATE INDEX IF NOT EXISTS `schedule_due_idx` ON `schedule` (`next_due_at`) WHERE "schedule"."status" = 'active' and "schedule"."next_due_at" is not null;"#;
+
 /// An app over `db` (a fresh in-memory one when `None`) with directories `enabled`, `disabled` and `toggle`.
 fn harness_with(db: Option<oc_storage::Database>, clock: Clock, tmp: Option<tempfile::TempDir>) -> H {
     unsafe { std::env::set_var("OPENCODE_DISABLE_MODELS_FETCH", "1") };
@@ -189,7 +206,9 @@ fn harness_with(db: Option<oc_storage::Database>, clock: Clock, tmp: Option<temp
     write_config(&root.join("enabled"), enabled_config());
     write_config(&root.join("disabled"), json!({"experimental": {"schedules": false}}));
     write_config(&root.join("toggle"), json!({"experimental": {"schedules": false}}));
-    let app = App::new(global(&root.join("g")), db.unwrap_or_else(|| oc_storage::Database::memory().unwrap()), "2.2.5");
+    let db = db.unwrap_or_else(|| oc_storage::Database::memory().unwrap());
+    db.with(|c| c.execute_batch(LEGACY_SCHEDULE_TABLE)).unwrap();
+    let app = App::new(global(&root.join("g")), db, "2.2.5");
     let services = oc_tools::tools::Services {
         formatter: Arc::new(oc_tools::formatter::Formatter::new()),
         ripgrep: Arc::new(oc_tools::ripgrep::Ripgrep::new(app.global.bin.clone(), reqwest::Client::new())),

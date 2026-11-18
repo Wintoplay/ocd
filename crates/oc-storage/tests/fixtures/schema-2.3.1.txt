@@ -1,4 +1,4 @@
-migrations 59: last=20261030054400_job
+migrations 62: last=20261116213417_automation_active_index
   mig 20260127222353_familiar_lady_ursula
   mig 20260211171708_add_project_commands
   mig 20260213144116_wakeful_the_professor
@@ -58,6 +58,9 @@ migrations 59: last=20261030054400_job
   mig 20261029073502_session_time_busy
   mig 20261029165540_schedule_checks
   mig 20261030054400_job
+  mig 20261116043204_automation
+  mig 20261116181958_automation_event_position
+  mig 20261116213417_automation_active_index
 table account
   col ('access_token', 'TEXT', 1, None, 0)
   col ('email', 'TEXT', 1, None, 0)
@@ -72,6 +75,29 @@ table account_state
   col ('active_org_id', 'TEXT', 0, None, 0)
   col ('id', 'INTEGER', 0, None, 1)
   fk ('account', 'active_account_id', 'id', 'NO ACTION', 'SET NULL', 'NONE')
+table automation
+  col ('action', 'TEXT', 1, None, 0)
+  col ('directory', 'TEXT', 1, None, 0)
+  col ('event_position', 'TEXT', 0, None, 0)
+  col ('expires_at', 'INTEGER', 0, None, 0)
+  col ('failures', 'INTEGER', 1, '0', 0)
+  col ('id', 'TEXT', 0, None, 1)
+  col ('last_message_id', 'TEXT', 0, None, 0)
+  col ('last_outcome', 'TEXT', 0, None, 0)
+  col ('last_output', 'TEXT', 0, None, 0)
+  col ('last_run_at', 'INTEGER', 0, None, 0)
+  col ('name', 'TEXT', 1, None, 0)
+  col ('next_due_at', 'INTEGER', 0, None, 0)
+  col ('project_id', 'TEXT', 1, None, 0)
+  col ('retry_at', 'INTEGER', 0, None, 0)
+  col ('run_count', 'INTEGER', 1, '0', 0)
+  col ('session_id', 'TEXT', 0, None, 0)
+  col ('state', 'TEXT', 0, None, 0)
+  col ('status', 'TEXT', 1, "'active'", 0)
+  col ('time_created', 'INTEGER', 1, None, 0)
+  col ('time_updated', 'INTEGER', 1, None, 0)
+  col ('trigger', 'TEXT', 1, None, 0)
+  col ('tz', 'TEXT', 1, None, 0)
 table blob
   col ('bytes', 'INTEGER', 1, None, 0)
   col ('data', 'BLOB', 1, None, 0)
@@ -187,29 +213,6 @@ table project_directory
   col ('time_created', 'INTEGER', 1, None, 0)
   col ('type', 'TEXT', 0, None, 0)
   fk ('project', 'project_id', 'id', 'NO ACTION', 'CASCADE', 'NONE')
-table schedule
-  col ('action', 'TEXT', 1, None, 0)
-  col ('check', 'TEXT', 0, None, 0)
-  col ('checks', 'INTEGER', 1, '0', 0)
-  col ('ends_at', 'INTEGER', 0, None, 0)
-  col ('failures', 'INTEGER', 1, '0', 0)
-  col ('id', 'TEXT', 0, None, 1)
-  col ('last_fired_at', 'INTEGER', 0, None, 0)
-  col ('last_message_id', 'TEXT', 0, None, 0)
-  col ('last_outcome', 'TEXT', 0, None, 0)
-  col ('name', 'TEXT', 0, None, 0)
-  col ('next_due_at', 'INTEGER', 0, None, 0)
-  col ('remaining_runs', 'INTEGER', 0, None, 0)
-  col ('retry_at', 'INTEGER', 0, None, 0)
-  col ('run_count', 'INTEGER', 1, '0', 0)
-  col ('session_id', 'TEXT', 0, None, 0)
-  col ('state', 'TEXT', 0, None, 0)
-  col ('status', 'TEXT', 1, "'active'", 0)
-  col ('time_created', 'INTEGER', 1, None, 0)
-  col ('time_updated', 'INTEGER', 1, None, 0)
-  col ('tz', 'TEXT', 1, None, 0)
-  col ('when', 'TEXT', 1, None, 0)
-  fk ('session_v2', 'session_id', 'id', 'NO ACTION', 'CASCADE', 'NONE')
 table session_inbox
   col ('delivery', 'TEXT', 1, None, 0)
   col ('enqueued_seq', 'INTEGER', 1, None, 0)
@@ -290,6 +293,9 @@ table worktree
   col ('strategy', 'TEXT', 0, None, 0)
   col ('time_created', 'INTEGER', 1, None, 0)
   fk ('project', 'project_id', 'id', 'NO ACTION', 'CASCADE', 'NONE')
+index automation_active_idx: CREATE INDEX `automation_active_idx` ON `automation` (`next_due_at`) WHERE "automation"."status" = 'active'
+index automation_project_idx: CREATE INDEX `automation_project_idx` ON `automation` (`project_id`)
+index automation_session_idx: CREATE INDEX `automation_session_idx` ON `automation` (`session_id`)
 index blob_ref_hash_idx: CREATE INDEX `blob_ref_hash_idx` ON `blob_ref` (`hash`)
 index blob_ref_session_seq_idx: CREATE INDEX `blob_ref_session_seq_idx` ON `blob_ref` (`session_id`,`seq`)
 index event_aggregate_seq_idx: CREATE UNIQUE INDEX `event_aggregate_seq_idx` ON `event` (`aggregate_id`,`seq`)
@@ -298,8 +304,6 @@ index job_child_session_idx: CREATE INDEX `job_child_session_idx` ON `job` (`chi
 index job_id_idx: CREATE INDEX `job_id_idx` ON `job` (`id`)
 index job_session_idx: CREATE INDEX `job_session_idx` ON `job` (`session_id`)
 index permission_project_action_resource_idx: CREATE UNIQUE INDEX `permission_project_action_resource_idx` ON `permission` (`project_id`,`action`,`resource`)
-index schedule_due_idx: CREATE INDEX `schedule_due_idx` ON `schedule` (`next_due_at`) WHERE "schedule"."status" = 'active' and "schedule"."next_due_at" is not null
-index schedule_session_idx: CREATE INDEX `schedule_session_idx` ON `schedule` (`session_id`)
 index session_inbox_session_delivery_seq_idx: CREATE INDEX `session_inbox_session_delivery_seq_idx` ON `session_inbox` (`session_id`,`delivery`,`enqueued_seq`)
 index session_inbox_session_enqueued_seq_idx: CREATE UNIQUE INDEX `session_inbox_session_enqueued_seq_idx` ON `session_inbox` (`session_id`,`enqueued_seq`)
 index session_message_session_seq_idx: CREATE UNIQUE INDEX `session_message_session_seq_idx` ON `session_message` (`session_id`,`seq`)
