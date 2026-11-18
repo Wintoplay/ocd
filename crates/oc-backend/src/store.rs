@@ -35,8 +35,8 @@ pub fn list_sessions(db: &Database, q: &SessionListQuery, limit: Option<i64>) ->
         }
     }
     if let Some(s) = q.search.as_ref().filter(|s| !s.is_empty()) {
-        cond.push("title LIKE ?".into());
-        args.push(Sql::Text(format!("%{s}%")));
+        cond.push("title GLOB ?".into());
+        args.push(Sql::Text(title_pattern(s)));
     }
     match &q.parent_id {
         Some(ParentFilter::Root) => cond.push("parent_id IS NULL".into()),
@@ -517,4 +517,40 @@ pub fn read_events(db: &Database, aggregate: &str, after: i64, through: i64) -> 
 
 pub fn latest_seq(db: &Database, aggregate: &str) -> anyhow::Result<i64> {
     db.session_seq(aggregate)
+}
+
+/// `titlePattern` (2.3.1, #64259): SQLite's LIKE folds case for ASCII only, so the search is a GLOB where each cased
+/// letter is a class of its single-character case forms ("т" -> "[тТ]"). LIKE's `%` and `_` keep their meaning, and
+/// GLOB metacharacters sit in a class so they stay literal as they were under LIKE.
+pub fn title_pattern(search: &str) -> String {
+    let mut out = String::from("*");
+    for c in search.chars() {
+        match c {
+            '%' => out.push('*'),
+            '_' => out.push('?'),
+            _ => {
+                let mut cases: Vec<char> = vec![c];
+                for form in [c.to_lowercase().collect::<Vec<_>>(), c.to_uppercase().collect::<Vec<_>>()] {
+                    if let [single] = form[..]
+                        && !cases.contains(&single)
+                    {
+                        cases.push(single);
+                    }
+                }
+                if cases.len() > 1 {
+                    out.push('[');
+                    out.extend(cases);
+                    out.push(']');
+                } else if matches!(c, '*' | '?' | '[') {
+                    out.push('[');
+                    out.push(c);
+                    out.push(']');
+                } else {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out.push('*');
+    out
 }

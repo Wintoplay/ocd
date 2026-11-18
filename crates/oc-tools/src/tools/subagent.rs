@@ -219,6 +219,7 @@ impl Tool for SubagentTool {
             child_session_id: child.id.clone(),
             agent: agent.name.clone(),
             description: input.description.clone(),
+            outstanding: None,
         };
         host.subagent_job_start(recovery).await.map_err(|m| ToolError::with_cause(format!("Failed to prompt subagent: {}", child.id), ErrorCause::Error(m)))?;
         let output = background_text(&child.id);

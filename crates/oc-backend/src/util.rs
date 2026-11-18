@@ -50,7 +50,7 @@ pub fn job_info(job: oc_core::job::ListedJob) -> oc_server::generated::JobInfo {
         JobRecovery::Shell { session_id, shell_id, command } => {
             JobShell { kind: LitShell, id, session_id, status, title, time, shell_id, command }.into()
         }
-        JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } => JobSubagent {
+        JobRecovery::Subagent { parent_session_id, child_session_id, agent, description, .. } => JobSubagent {
             kind: LitSubagent,
             id,
             session_id: parent_session_id,

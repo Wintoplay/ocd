@@ -491,7 +491,7 @@ async fn outstanding_cases(h: &Harness) {
         kind: "subagent".into(),
         title: None,
         metadata_session: None,
-        recovery: Some(JobRecovery::Subagent { parent_session_id: root.clone(), child_session_id: child.clone(), agent: "explore".into(), description: "Already running".into() }),
+        recovery: Some(JobRecovery::Subagent { parent_session_id: root.clone(), child_session_id: child.clone(), agent: "explore".into(), description: "Already running".into(), outstanding: None }),
         notification_id: None,
         background: true,
         run: Box::pin(futures::future::pending()),
@@ -505,7 +505,7 @@ async fn outstanding_cases(h: &Harness) {
 }
 
 fn recovery(parent: &str, child: &str, description: &str) -> JobRecovery {
-    JobRecovery::Subagent { parent_session_id: parent.into(), child_session_id: child.into(), agent: "general".into(), description: description.into() }
+    JobRecovery::Subagent { parent_session_id: parent.into(), child_session_id: child.into(), agent: "general".into(), description: description.into(), outstanding: None }
 }
 
 fn insert_row(app: &App, nid: &str, recovery: &JobRecovery, status: &str, output: Option<&str>, error: Option<&str>) {
@@ -656,14 +656,34 @@ async fn restart_cases(h: &Harness) {
     // "delivers a completed outbox row at boot without touching the child"
     let p = h.session("Parent", None).await;
     let child = h.session("Finished child", Some(&p)).await;
-    insert_row(&h.app, "msg_outbox_row", &recovery(&p, &child, "Finished child"), "completed", Some("stored answer\n\nBackground work still running:\n- shell (sh_1): sleep 9"), None);
+    // 2.3.1 (#64026): the row keeps the raw body and the outstanding-work snapshot the replay formats from.
+    let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description, .. } = recovery(&p, &child, "Finished child") else { unreachable!() };
+    let snapshot = JobRecovery::Subagent {
+        outstanding: Some(vec![serde_json::json!({"kind": "shell", "sessionID": child.clone(), "shellID": "sh_1", "command": "sleep 9"})]),
+        parent_session_id,
+        child_session_id,
+        agent,
+        description,
+    };
+    insert_row(&h.app, "msg_outbox_row", &snapshot, "completed", Some("stored answer"), None);
     h.engine.resume_suspended().await.unwrap();
     let reports = h.wait_reports(&p, 1).await;
     assert_eq!(reports[0].0, "msg_outbox_row");
-    // The replay derives the running tag from the stored body.
-    assert!(reports[0].1.starts_with(&format!("<subagent sessionID=\"{child}\" state=\"running\" description=\"Finished child\">\nstored answer")));
+    assert_eq!(
+        reports[0].1,
+        format!("<subagent sessionID=\"{child}\" state=\"running\" description=\"Finished child\">\nstored answer\n\nBackground work still running:\n- shell (sh_1): sleep 9\n</subagent>")
+    );
     assert!(h.messages(&child).is_empty());
     assert!(h.job_rows(&p).is_empty());
+
+    // An older row without the snapshot replays its recorded status and keeps its full body.
+    let p = h.session("Parent", None).await;
+    let child = h.session("Older child", Some(&p)).await;
+    let body = "stored answer\n\nBackground work still running:\n- shell (sh_1): sleep 9";
+    insert_row(&h.app, "msg_older_row", &recovery(&p, &child, "Older child"), "completed", Some(body), None);
+    h.engine.resume_suspended().await.unwrap();
+    let reports = h.wait_reports(&p, 1).await;
+    assert_eq!(reports[0].1, format!("<subagent sessionID=\"{child}\" state=\"completed\" description=\"Older child\">\n{body}\n</subagent>"));
 
     // "resumes a directly driven child after execution teardown": a claimed child without a job resumes like a root
     // and reports with a fresh notification ID.

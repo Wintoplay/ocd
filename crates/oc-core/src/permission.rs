@@ -359,6 +359,10 @@ impl Permissions {
                 let same: Vec<String> = pending
                     .iter()
                     .filter(|(_, p)| p.request.session_id == existing.request.session_id)
+                    // Only the asks of the same assistant message (2.3.1).
+                    .filter(|(_, p)| {
+                        p.request.source.as_ref().map(|s| &s.message_id) == existing.request.source.as_ref().map(|s| &s.message_id)
+                    })
                     .map(|(k, _)| k.clone())
                     .collect();
                 for id in same {
@@ -536,6 +540,22 @@ mod tests {
         ask("per_after").await;
         assert_eq!(perms.get("per_nested").unwrap().source, Some(Source { id: "call_parent_64324".into(), ..source.clone() }));
         assert_eq!(perms.get("per_after").unwrap().source, Some(source));
+    }
+
+    // permission.test.ts "rejects sibling requests in the same step and leaves another step's request pending" (2.3.1)
+    #[tokio::test]
+    async fn rejects_siblings_in_the_same_step_only() {
+        let perms = Permissions::new(Arc::new(Ctx::default()));
+        let ask = |call: &str, message: &str| {
+            let mut asked = input(&format!("per_{call}"), "ses_1", "a.txt", false);
+            asked.source = Some(Source { kind: "tool".into(), message_id: message.into(), id: format!("call_{call}") });
+            perms.ask(asked)
+        };
+        ask("first", "msg_one").await;
+        ask("sibling", "msg_one").await;
+        ask("other", "msg_two").await;
+        perms.reply("per_first", Reply::Reject, None).await.unwrap();
+        assert_eq!(perms.list().into_iter().map(|r| r.id).collect::<Vec<_>>(), ["per_other"]);
     }
 
     // permission.test.ts "checks for a deny without asking"

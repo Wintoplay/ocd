@@ -339,7 +339,7 @@ async fn goal_plugin() {
         child.clone(),
         "subagent".into(),
         None,
-        Some(JobRecovery::Subagent { parent_session_id: s.clone(), child_session_id: child.clone(), agent: "explore".into(), description: "Explore".into() }),
+        Some(JobRecovery::Subagent { parent_session_id: s.clone(), child_session_id: child.clone(), agent: "explore".into(), description: "Explore".into(), outstanding: None }),
         Box::pin(async move {
             let _ = finished.await;
             Ok("Found everything".to_string())
@@ -373,7 +373,7 @@ async fn goal_plugin() {
         grandchild.clone(),
         "subagent".into(),
         None,
-        Some(JobRecovery::Subagent { parent_session_id: child.clone(), child_session_id: grandchild.clone(), agent: "explore".into(), description: "Dig".into() }),
+        Some(JobRecovery::Subagent { parent_session_id: child.clone(), child_session_id: grandchild.clone(), agent: "explore".into(), description: "Dig".into(), outstanding: None }),
         never(),
     );
     h.app.jobs.background(&grandchild);

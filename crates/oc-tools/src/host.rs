@@ -187,6 +187,10 @@ pub enum JobRecovery {
         child_session_id: String,
         agent: String,
         description: String,
+        /// The child's background work still running when it reported (`outstanding`, 2.3.1 #64026): a report's
+        /// state and its still-running list come from this snapshot. Absent before the report and on older rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outstanding: Option<Vec<serde_json::Value>>,
     },
     /// A background `experimental_image_generate` job.
     #[serde(rename = "image")]

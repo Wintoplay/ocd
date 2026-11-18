@@ -322,6 +322,39 @@ async fn permissions_flow() {
     assert_eq!(r.json()["data"], json!([]));
 }
 
+// session-store.test.ts "searches titles case-insensitively beyond ASCII and keeps LIKE wildcard semantics"
+// (2.3.1, #64259).
+#[tokio::test]
+async fn session_title_search_beyond_ascii() {
+    let h = harness();
+    let mut ids = std::collections::HashMap::new();
+    for title in ["Тестова сесия", "OpenCode notes", "100% done", "file_name [draft]"] {
+        let r = h.post("/api/session", json!({"title": title})).await;
+        ids.insert(r.json()["data"]["id"].as_str().unwrap().to_string(), title);
+    }
+    let search = |text: &str| {
+        let url = format!("/api/session?search={}", enc(text));
+        let h = &h;
+        let ids = &ids;
+        async move {
+            let r = h.get(&url).await.json();
+            r["data"].as_array().unwrap().iter().map(|s| ids[s["id"].as_str().unwrap()]).collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(search("тестова").await, ["Тестова сесия"]);
+    assert_eq!(search("ТЕСТОВА СЕСИЯ").await, ["Тестова сесия"]);
+    assert_eq!(search("opencode").await, ["OpenCode notes"]);
+    assert_eq!(search("OPENCODE").await, ["OpenCode notes"]);
+    assert_eq!(search("тест%сия").await, ["Тестова сесия"]);
+    assert_eq!(search("OP_NCODE").await, ["OpenCode notes"]);
+    assert_eq!(search("100%").await, ["100% done"]);
+    assert_eq!(search("file_name").await, ["file_name [draft]"]);
+    assert_eq!(search("[DRAFT]").await, ["file_name [draft]"]);
+    assert!(search("*").await.is_empty());
+    assert!(search("?").await.is_empty());
+    assert_eq!(oc_backend::store::title_pattern("т*?[ß"), "*[тТ][*][?][[]ß*");
+}
+
 #[tokio::test]
 async fn filesystem() {
     let h = harness();
@@ -347,6 +380,16 @@ async fn filesystem() {
     // Found files use `/`; a directory ends in the platform separator.
     let r = h.get("/api/fs/find?query=src&type=directory").await;
     assert_eq!(r.json()["data"][0], json!({"path":format!("src{sep}"),"type":"directory"}));
+    // 2.3.1 (#62577): hidden files are in the index, but nothing inside `.git`.
+    std::fs::create_dir_all(h.cwd.join(".github/workflows")).unwrap();
+    std::fs::write(h.cwd.join(".github/workflows/ci.yml"), "on: push").unwrap();
+    std::fs::write(h.cwd.join(".env.example"), "A=1").unwrap();
+    std::fs::create_dir_all(h.cwd.join(".git/objects")).unwrap();
+    std::fs::write(h.cwd.join(".git/objects/ci.yml"), "x").unwrap();
+    let r = h.get("/api/fs/find?query=ci.yml&type=file").await;
+    assert_eq!(r.json()["data"], json!([{"path":".github/workflows/ci.yml","type":"file"}]));
+    let r = h.get("/api/fs/find?query=env.example").await;
+    assert_eq!(r.json()["data"][0], json!({"path":".env.example","type":"file"}));
 
     let r = h.get("/api/fs/read/src/main.rs").await;
     assert_eq!(r.status, 200);
@@ -571,6 +614,7 @@ async fn experimental_job_list() {
         child_session_id: "ses_grandchild".into(),
         agent: "explore".into(),
         description: "Look around".into(),
+        outstanding: None,
     };
     jobs.start("job_2".into(), "subagent".into(), None, Some(subagent), Box::pin(async { Ok("done".to_string()) }));
     jobs.background("job_2").unwrap();

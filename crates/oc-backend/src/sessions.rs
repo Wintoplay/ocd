@@ -1164,6 +1164,7 @@ impl Engine {
             child_session_id: child.id.clone(),
             agent: selected.id.clone(),
             description,
+            outstanding: None,
         };
         oc_core::job::start_subagent(&self.app, recovery, None);
         Ok(())

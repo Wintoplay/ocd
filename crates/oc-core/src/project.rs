@@ -99,8 +99,12 @@ pub fn normalize_remote(input: &str) -> Option<String> {
     parts(&c[2], &c[3])
 }
 
+/// The project id cached in the VCS directory; a corrupt one holding control characters is ignored (2.3.1, #62576).
 fn cached(store: &Path) -> Option<String> {
-    std::fs::read_to_string(store.join("opencode")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::fs::read_to_string(store.join("opencode"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}'))
 }
 
 /// Walk up for the first `.git` or `.hg`.
@@ -279,6 +283,23 @@ mod tests {
         assert_eq!(n("git@github.com:a/b.git").as_deref(), Some("github.com/a/b"));
         assert_eq!(n("ssh://git@host:22/a/b/").as_deref(), Some("host/a/b"));
         assert_eq!(n("file:///tmp/x"), None);
+    }
+
+    /// project.test.ts "falls back to root commit when origin is missing and the cached id is corrupt" (2.3.1,
+    /// #62576): a cached id with control characters is ignored.
+    #[test]
+    fn ignores_a_corrupt_cached_id() {
+        let dir = tempfile::tempdir().unwrap();
+        for (content, expected) in [
+            ("\u{0}".repeat(40), None),
+            ("abc\u{7f}".into(), None),
+            ("abc\u{1b}def\n".into(), None),
+            ("  6f1a9c\n".into(), Some("6f1a9c")),
+            ("\n".into(), None),
+        ] {
+            std::fs::write(dir.path().join("opencode"), &content).unwrap();
+            assert_eq!(super::cached(dir.path()).as_deref(), expected, "{content:?}");
+        }
     }
 
     /// `Project.activate` (also for a Location whose directory is gone): an existing row is touched and announced

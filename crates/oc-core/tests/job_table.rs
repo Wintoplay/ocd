@@ -83,6 +83,7 @@ async fn persists_subagent_ownership_by_parent_and_cancellation() {
         child_session_id: "ses_background_child".into(),
         agent: "explore".into(),
         description: "Explore background recovery".into(),
+        outstanding: None,
     };
     let job = jobs.start(
         "ses_background_child".into(),
@@ -213,6 +214,7 @@ async fn cancel_session_matches_a_subagent_by_its_child_and_deletes_child_rows()
             child_session_id: "ses_child".into(),
             agent: "general".into(),
             description: "d".into(),
+            outstanding: None,
         }),
         Box::pin(futures::future::pending()),
     );
@@ -224,7 +226,7 @@ async fn cancel_session_matches_a_subagent_by_its_child_and_deletes_child_rows()
 }
 
 fn subagent(parent: &str, child: &str, description: &str) -> JobRecovery {
-    JobRecovery::Subagent { parent_session_id: parent.into(), child_session_id: child.into(), agent: "explore".into(), description: description.into() }
+    JobRecovery::Subagent { parent_session_id: parent.into(), child_session_id: child.into(), agent: "explore".into(), description: description.into(), outstanding: None }
 }
 
 fn background(id: &str, recovery: JobRecovery, notification_id: Option<&str>, run: futures::future::BoxFuture<'static, Result<String, String>>) -> oc_core::job::StartInput {

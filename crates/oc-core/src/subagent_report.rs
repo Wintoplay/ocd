@@ -171,8 +171,8 @@ impl Settlement {
                 }
             }
         };
-        let formatted = crate::job::format_body(&body, &self.session_id, &self.running);
-        let (notification_id, recovery, started_at) = match &self.job {
+        // The outbox keeps the raw body and a snapshot of the work still running; delivery formats it (#64026).
+        let (notification_id, mut recovery, started_at) = match &self.job {
             SubagentReportState::Background { notification_id, recovery, started_at } => {
                 (notification_id.clone(), recovery.clone(), Some(*started_at))
             }
@@ -183,17 +183,21 @@ impl Settlement {
                     child_session_id: self.session_id.clone(),
                     agent: child.agent.unwrap_or_else(|| "subagent".into()),
                     description: child.title.unwrap_or_else(|| "Subagent".into()),
+                    outstanding: None,
                 },
                 None,
             ),
         };
+        if let JobRecovery::Subagent { outstanding, .. } = &mut recovery {
+            *outstanding = Some(self.running.clone());
+        }
         let completed = status == JobStatus::Completed;
         let report = SubagentOutboxReport {
             notification_id,
             recovery,
             status,
-            output: completed.then(|| formatted.clone()),
-            error: (!completed).then_some(formatted),
+            output: completed.then(|| body.clone()),
+            error: (!completed).then_some(body),
             started_at,
         };
         Jobs::record_subagent_report(c, &report)?;

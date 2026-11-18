@@ -787,8 +787,10 @@ pub struct SubagentNotice {
     pub metadata: serde_json::Map<String, Value>,
 }
 
-/// `SubagentCompletion.deliver`'s notice for a finished period (`None` while running). The model-facing tag says
-/// `running` for a completed report that lists background work still running; the metadata keeps the real status.
+/// `SubagentCompletion.deliver`'s notice for a finished period (`None` while running). The body is formatted from the
+/// recovery's `outstanding` snapshot, and the model-facing tag says `running` for a completed report with work still
+/// outstanding; the metadata keeps the real status. Older rows lack the snapshot and replay their recorded status
+/// with their full body (2.3.1, #64026).
 pub fn subagent_notice(
     status: JobStatus,
     output: Option<String>,
@@ -796,7 +798,7 @@ pub fn subagent_notice(
     notification_id: Option<String>,
     recovery: &JobRecovery,
 ) -> Option<SubagentNotice> {
-    let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } = recovery else { return None };
+    let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description, outstanding } = recovery else { return None };
     if status == JobStatus::Running {
         return None;
     }
@@ -805,7 +807,9 @@ pub fn subagent_notice(
         JobStatus::Error => error.unwrap_or_else(|| "Subagent failed".into()),
         _ => output.or(error).unwrap_or_else(|| "Subagent cancelled".into()),
     };
-    let state = if status == JobStatus::Completed && body.contains(STILL_RUNNING) { "running" } else { status.as_str() };
+    let outstanding = outstanding.as_deref().unwrap_or_default();
+    let state = if status == JobStatus::Completed && !outstanding.is_empty() { "running" } else { status.as_str() };
+    let body = format_body(&body, child_session_id, outstanding);
     let mut metadata = serde_json::Map::new();
     metadata.insert("source".into(), "subagent".into());
     metadata.insert("childID".into(), child_session_id.clone().into());
@@ -872,7 +876,7 @@ pub fn outstanding(app: &crate::app::App, session_id: &str, active: &[String]) -
             JobRecovery::Image { session_id, path, model } => {
                 json!({ "kind": "image", "sessionID": session_id, "path": path, "model": model })
             }
-            JobRecovery::Subagent { parent_session_id, child_session_id, agent, description } => json!({
+            JobRecovery::Subagent { parent_session_id, child_session_id, agent, description, .. } => json!({
                 "kind": "subagent",
                 "sessionID": parent_session_id,
                 "childSessionID": child_session_id,
@@ -1022,6 +1026,7 @@ mod completion_tests {
             child_session_id: "ses_deliver_child".into(),
             agent: "explore".into(),
             description: "Deliver report".into(),
+            outstanding: None,
         }
     }
 
@@ -1061,14 +1066,16 @@ mod completion_tests {
         let text = |status, output: Option<&str>, error: Option<&str>| {
             subagent_notice(status, output.map(str::to_string), error.map(str::to_string), None, &r).map(|n| n.text)
         };
-        let running = subagent_notice(
-            JobStatus::Completed,
-            Some("All green\n\nBackground work still running:\n- shell (shell_1): bun test".into()),
-            None,
-            Some("msg_n".into()),
-            &r,
-        )
-        .unwrap();
+        // 2.3.1 (#64026): the state and the still-running list come from the outstanding-work snapshot.
+        let JobRecovery::Subagent { parent_session_id, child_session_id, agent, description, .. } = r.clone() else { unreachable!() };
+        let snapshot = JobRecovery::Subagent {
+            outstanding: Some(vec![json!({"kind": "shell", "sessionID": child_session_id, "shellID": "shell_1", "command": "bun test"})]),
+            parent_session_id,
+            child_session_id,
+            agent,
+            description,
+        };
+        let running = subagent_notice(JobStatus::Completed, Some("All green".into()), None, Some("msg_n".into()), &snapshot).unwrap();
         assert_eq!(
             running.text,
             "<subagent sessionID=\"ses_deliver_child\" state=\"running\" description=\"Deliver report\">\nAll green\n\nBackground work still running:\n- shell (shell_1): bun test\n</subagent>"
@@ -1083,6 +1090,12 @@ mod completion_tests {
         // A running job has nothing to report.
         assert!(text(JobStatus::Running, None, None).is_none());
         assert_eq!(text(JobStatus::Completed, Some("All done"), None).unwrap(), "<subagent sessionID=\"ses_deliver_child\" state=\"completed\" description=\"Deliver report\">\nAll done\n</subagent>");
+        // An older row without the snapshot replays its recorded status and keeps its full body.
+        let old = "All green\n\nBackground work still running:\n- shell (shell_1): bun test";
+        assert_eq!(
+            text(JobStatus::Completed, Some(old), None).unwrap(),
+            format!("<subagent sessionID=\"ses_deliver_child\" state=\"completed\" description=\"Deliver report\">\n{old}\n</subagent>")
+        );
         let output = "Subagent cancelled\n\nBackground work still running:\n- shell (shell_1): bun test";
         assert_eq!(
             text(JobStatus::Cancelled, Some(output), None).unwrap(),
