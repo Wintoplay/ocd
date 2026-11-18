@@ -109,6 +109,7 @@ impl Tool for GlobTool {
         let search = self.ripgrep.glob(GlobInput { cwd: &root, pattern: &input.pattern, limit: limit + 1, hidden: input.hidden == Some(true), follow: false });
         let entries = match tokio::time::timeout(Duration::from_millis(DEFAULT_SEARCH_TIMEOUT_MS), search).await {
             Err(_) => return Err(timeout_error()),
+            Ok(Err(crate::ripgrep::RipgrepError::InvalidGlob(message))) => return Err(ToolError::new(format!("Invalid glob in pattern {message}"))),
             Ok(Err(error)) => return Err(ToolError::with_cause(leaf, ErrorCause::Error(error.to_string()))),
             Ok(Ok(entries)) => entries,
         };

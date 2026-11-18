@@ -146,6 +146,7 @@ impl Tool for GrepTool {
         });
         let matches = match tokio::time::timeout(Duration::from_millis(DEFAULT_SEARCH_TIMEOUT_MS), search).await {
             Err(_) => return Err(timeout_error()),
+            Ok(Err(RipgrepError::InvalidGlob(message))) => return Err(ToolError::new(format!("Invalid glob in include {message}"))),
             Ok(Err(RipgrepError::InvalidPattern(message))) => return Err(ToolError::new(format!("Invalid regex pattern: {message}"))),
             Ok(Err(RipgrepError::Failed(message))) => return Err(ToolError::with_cause(leaf, ErrorCause::Error(message))),
             Ok(Ok(matches)) => matches,

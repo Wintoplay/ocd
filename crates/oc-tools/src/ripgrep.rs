@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use base64::Engine;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::Mutex;
@@ -19,12 +20,14 @@ pub enum RipgrepError {
     Failed(String),
     /// `Ripgrep.InvalidPatternError` (rg stderr, trimmed).
     InvalidPattern(String),
+    /// `Ripgrep.InvalidGlobError` (#63960): rg's description of a filename glob it cannot parse.
+    InvalidGlob(String),
 }
 
 impl std::fmt::Display for RipgrepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RipgrepError::Failed(m) | RipgrepError::InvalidPattern(m) => f.write_str(m),
+            RipgrepError::Failed(m) | RipgrepError::InvalidPattern(m) | RipgrepError::InvalidGlob(m) => f.write_str(m),
         }
     }
 }
@@ -141,6 +144,16 @@ pub fn grep_args(input: &GrepInput<'_>) -> Vec<String> {
     args
 }
 
+/// `rawText`: rg reports data that is not valid UTF-8 as base64 `bytes` instead of `text` (#62249).
+fn raw_text(data: Option<&Value>) -> Option<String> {
+    let data = data?;
+    if let Some(text) = data.get("text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.get("bytes")?.as_str()?).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Parse one `rg --json` line; `Ok(None)` for non-match records.
 pub fn parse_grep_line(line: &str) -> Result<Option<GrepMatch>, RipgrepError> {
     let json: Value = serde_json::from_str(line).map_err(|_| RipgrepError::Failed("Invalid ripgrep JSON output".into()))?;
@@ -149,31 +162,35 @@ pub fn parse_grep_line(line: &str) -> Result<Option<GrepMatch>, RipgrepError> {
     }
     let invalid = || RipgrepError::Failed("Invalid ripgrep match output".into());
     let data = json.get("data").ok_or_else(invalid)?;
-    let path = data.pointer("/path/text").and_then(Value::as_str).ok_or_else(invalid)?;
-    let text = data.pointer("/lines/text").and_then(Value::as_str).ok_or_else(invalid)?;
+    let path = raw_text(data.get("path")).ok_or_else(invalid)?;
+    let text = raw_text(data.get("lines")).ok_or_else(invalid)?;
     let line = data.get("line_number").and_then(Value::as_u64).filter(|n| *n > 0).ok_or_else(invalid)?;
     let offset = data.get("absolute_offset").and_then(Value::as_u64).ok_or_else(invalid)?;
     let mut submatches = Vec::new();
     for sub in data.get("submatches").and_then(Value::as_array).ok_or_else(invalid)? {
         submatches.push(Submatch {
-            text: sub.pointer("/match/text").and_then(Value::as_str).ok_or_else(invalid)?.to_string(),
+            text: raw_text(sub.get("match")).ok_or_else(invalid)?,
             start: sub.get("start").and_then(Value::as_u64).ok_or_else(invalid)?,
             end: sub.get("end").and_then(Value::as_u64).ok_or_else(invalid)?,
         });
     }
     submatches.truncate(MAX_SUBMATCHES);
-    let text = if js::utf16_len(text) > MAX_LINE_CHARS { truncate_line(text) } else { text.to_string() };
-    Ok(Some(GrepMatch { path: normalize_path(path), line, offset, text, submatches }))
+    let text = if js::utf16_len(&text) > MAX_LINE_CHARS { truncate_line(&text) } else { text };
+    Ok(Some(GrepMatch { path: normalize_path(&path), line, offset, text, submatches }))
 }
 
 const MAX_LINE_CHARS: usize = 2_000;
 
-/// `Buffer.from(text.slice(0, MAX_LINE_CHARS), "utf8").toString() + "..."`: a cut inside a
-/// surrogate pair leaves a lone high surrogate, which UTF-8 encoding turns into U+FFFD.
+/// `TextBoundary.head(text, MAX_LINE_CHARS) + "..."`: the cut never splits a character (#63967).
 fn truncate_line(text: &str) -> String {
-    let prefix = js::utf16_prefix(text, MAX_LINE_CHARS);
-    let split = js::utf16_len(prefix) < MAX_LINE_CHARS;
-    format!("{prefix}{}...", if split { "\u{FFFD}" } else { "" })
+    format!("{}...", js::utf16_prefix(text, MAX_LINE_CHARS))
+}
+
+/// `^(?:rg: )?error parsing glob `: rg's report of a filename glob it cannot parse. rg 13 omits the program name, and
+/// ignore-file diagnostics start with a path and line number instead.
+fn invalid_glob(stderr: &str) -> Option<String> {
+    let rest = stderr.strip_prefix("rg: ").unwrap_or(stderr).strip_prefix("error parsing glob ")?;
+    Some(rest.trim_end().to_string())
 }
 
 /// `RipgrepBinary.verify`: a download is only written and run when it matches the pinned hash
@@ -397,6 +414,11 @@ impl Ripgrep {
         let status = child.wait().await.map_err(|e| RipgrepError::Failed(e.to_string()))?;
         let code = status.code().unwrap_or(-1);
         let stderr = stderr_task.await.unwrap_or_default();
+        if code == 2
+            && let Some(message) = invalid_glob(&stderr)
+        {
+            return Err(RipgrepError::InvalidGlob(message));
+        }
         if pattern.is_some() && code == 2 && is_invalid_pattern(&stderr) {
             return Err(RipgrepError::InvalidPattern(stderr.trim().to_string()));
         }
@@ -460,15 +482,37 @@ mod tests {
         assert!(parse_grep_line("nope").is_err());
     }
 
+    /// ripgrep.test.ts "ends oversized line previews on a whole character" (2.3.1, #63967).
     #[test]
-    fn truncates_long_lines_like_a_utf8_round_trip() {
+    fn truncates_long_lines_on_a_whole_character() {
         let long = "a".repeat(2_500);
         assert_eq!(truncate_line(&long), format!("{}...", "a".repeat(2_000)));
-        // The cut falls inside the emoji's surrogate pair: the lone high surrogate becomes U+FFFD.
-        let split = format!("{}😀tail", "a".repeat(1_999));
-        assert_eq!(truncate_line(&split), format!("{}\u{FFFD}...", "a".repeat(1_999)));
-        let whole = format!("{}😀tail", "a".repeat(1_998));
-        assert_eq!(truncate_line(&whole), format!("{}😀...", "a".repeat(1_998)));
+        for (count, shown) in [(1_998, format!("{}😀...", "x".repeat(1_998))), (1_999, format!("{}...", "x".repeat(1_999))), (2_000, format!("{}...", "x".repeat(2_000)))] {
+            assert_eq!(truncate_line(&format!("{}😀tail\n", "x".repeat(count))), shown);
+        }
+    }
+
+    /// ripgrep.test.ts "greps lines that are not valid UTF-8" (2.3.1, #62249): rg's base64 `bytes` decode lossily.
+    #[test]
+    fn keeps_matches_that_are_not_valid_utf8() {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let line = format!(
+            r#"{{"type":"match","data":{{"path":{{"bytes":"{}"}},"lines":{{"bytes":"{}"}},"line_number":1,"absolute_offset":0,"submatches":[{{"match":{{"text":"needle"}},"start":0,"end":6}},{{"match":{{"bytes":"{}"}},"start":7,"end":11}}]}}}}"#,
+            b64(b"./lat\xe9.txt"),
+            b64(b"needle caf\xe9\n"),
+            b64(b"caf\xe9")
+        );
+        let m = parse_grep_line(&line).unwrap().unwrap();
+        assert_eq!((m.path.as_str(), m.text.as_str()), ("lat\u{FFFD}.txt", "needle caf\u{FFFD}\n"));
+        assert_eq!(m.submatches.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["needle", "caf\u{FFFD}"]);
+    }
+
+    #[test]
+    fn recognizes_invalid_glob_reports() {
+        assert_eq!(invalid_glob("rg: error parsing glob '[': unclosed character class; missing ']'\n").as_deref(), Some("'[': unclosed character class; missing ']'"));
+        assert_eq!(invalid_glob("error parsing glob '[': x").as_deref(), Some("'[': x"));
+        assert_eq!(invalid_glob("./.ignore: line 1: error parsing glob '[z-a]': invalid range; 'z' > 'a'"), None);
     }
 
     // ripgrep.test.ts "RipgrepBinary.verify"
@@ -513,5 +557,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(one.len(), 1);
+        // ripgrep.test.ts / tool-search.test.ts (2.3.1, #63960): a malformed filename glob is its own error.
+        let glob = ripgrep.glob(GlobInput { cwd: dir.path(), pattern: "[", limit: 10, hidden: false, follow: false }).await.unwrap_err();
+        assert!(matches!(&glob, RipgrepError::InvalidGlob(m) if m.starts_with("'[': ")), "{glob:?}");
+        let include = ripgrep
+            .grep(GrepInput { cwd: dir.path(), pattern: "hello", file: None, include: Some("["), literal: false, case_sensitive: None, limit: 10 })
+            .await
+            .unwrap_err();
+        assert_eq!(include, glob);
+        // A malformed ignore file and a broken symlink still leave the matching files.
+        #[cfg(unix)]
+        {
+            let tree = tempfile::tempdir().unwrap();
+            std::fs::write(tree.path().join("visible.ts"), "needle\n").unwrap();
+            std::fs::write(tree.path().join(".ignore"), "[z-a]\n").unwrap();
+            std::os::unix::fs::symlink("missing", tree.path().join("broken")).unwrap();
+            let files = ripgrep.glob(GlobInput { cwd: tree.path(), pattern: "*.ts", limit: 10, hidden: false, follow: true }).await.unwrap();
+            assert_eq!(files, vec!["visible.ts"]);
+        }
     }
 }

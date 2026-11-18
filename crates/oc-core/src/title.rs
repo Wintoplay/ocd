@@ -16,12 +16,12 @@ const MAX_LENGTH: usize = 100;
 const MAX_CONTEXT_LENGTH: usize = 8_000;
 const MAX_FIRST_MESSAGE_LENGTH: usize = 2_000;
 
+/// A generated title of at most 100 UTF-16 code units; the cut never splits a character (2.3.1, #63967).
 pub fn truncate(v: &str) -> String {
-    let chars: Vec<char> = v.chars().collect();
     if v.encode_utf16().count() <= MAX_LENGTH {
         return v.to_string();
     }
-    format!("{}...", chars.iter().take(MAX_LENGTH - 3).collect::<String>())
+    format!("{}...", oc_tools::util::js::utf16_prefix(v, MAX_LENGTH - 3))
 }
 
 /// `isExactRootFallback`: no title, or exactly `New session - {ISO(created)}`.
@@ -289,16 +289,14 @@ fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// JS `s.slice(0, n)` on UTF-16 units.
+/// `TextBoundary.head`: the first `n` UTF-16 code units, without half a character.
 fn js_head(s: &str, n: usize) -> String {
-    let units: Vec<u16> = s.encode_utf16().collect();
-    if units.len() <= n { s.to_string() } else { String::from_utf16_lossy(&units[..n]) }
+    oc_tools::util::js::utf16_prefix(s, n).to_string()
 }
 
-/// JS `s.slice(-n)` on UTF-16 units (`n` > 0).
+/// `TextBoundary.tail`: the last `n` UTF-16 code units, without half a character.
 fn js_tail(s: &str, n: usize) -> String {
-    let units: Vec<u16> = s.encode_utf16().collect();
-    if units.len() <= n { s.to_string() } else { String::from_utf16_lossy(&units[units.len() - n..]) }
+    oc_tools::util::js::utf16_suffix(s, n).to_string()
 }
 
 /// The re-title input for an already titled session: the original request and the newest conversation that fits.
@@ -412,5 +410,25 @@ mod tests {
         assert!(text.contains(&format!("Original request:\n{}\n\n", "f".repeat(2_000))));
         assert!(!text.contains(&"f".repeat(2_001)));
         assert_eq!(text.encode_utf16().count(), MAX_CONTEXT_LENGTH);
+    }
+
+    /// session-title.test.ts "keeps the clipped regeneration context well formed" (2.3.1, #63967): both cuts fall
+    /// inside an emoji, and neither keeps half of it.
+    #[test]
+    fn clipped_regeneration_context_keeps_whole_characters() {
+        let first = format!("x{}", "😀".repeat(1_500));
+        let later = msg(json!({"type": "user", "id": "u2", "time": {"created": 1}, "text": format!("x{}", "😀".repeat(5_000))}));
+        let text = conversation_text("u1", &first, &[later]);
+        let length = text.encode_utf16().count();
+        assert!(length <= 8_000 && length > 7_900, "{length}");
+        assert!(text.contains(&format!("Original request:\nx{}\n\n", "😀".repeat(999))));
+    }
+
+    /// "clips a long generated title without splitting an emoji after N letters" (2.3.1, #63967).
+    #[test]
+    fn clips_a_long_title_without_splitting_an_emoji() {
+        for (prefix, stored) in [(95, format!("{}😀...", "a".repeat(95))), (96, format!("{}...", "a".repeat(96))), (97, format!("{}...", "a".repeat(97)))] {
+            assert_eq!(truncate(&format!("{}😀{}", "a".repeat(prefix), "b".repeat(20))), stored);
+        }
     }
 }

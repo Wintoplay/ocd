@@ -190,14 +190,51 @@ impl Tool for WebSearchTool {
             Err(_) => return Err(ToolError::with_cause(fallback, ErrorCause::Error(String::new()))),
         };
         Ok(ToolResult::text(to_model_content(&response.results))
-            .with_output(json!({"provider": response.provider_id, "results": response.results}))
+            .with_output(structured(&response.results))
             .with_metadata(meta(vec![("provider", json!(response.provider_id))])))
     }
+}
+
+/// The structured output (2.3.1, #64471): the results, flat; the provider stays in the metadata.
+fn structured(results: &[SearchResult]) -> Value {
+    Value::Array(
+        results
+            .iter()
+            .map(|hit| {
+                let mut item = serde_json::Map::new();
+                item.insert("url".into(), json!(hit.url));
+                if let Some(title) = &hit.title {
+                    item.insert("title".into(), json!(title));
+                }
+                if let Some(content) = &hit.content {
+                    item.insert("content".into(), json!(content));
+                }
+                if let Some(published) = hit.published {
+                    item.insert("published".into(), json!(published));
+                }
+                Value::Object(item)
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tool-websearch.test.ts "returns flat results and keeps the provider in metadata" (2.3.1, #64471).
+    #[test]
+    fn flat_structured_output() {
+        assert_eq!(structured(&[]), json!([]));
+        let results = vec![
+            SearchResult { url: "https://effect.website".into(), title: Some("Effect".into()), content: Some("parallel results".into()), published: Some(1_784_937_600_000) },
+            SearchResult { url: "https://b".into(), title: None, content: None, published: None },
+        ];
+        assert_eq!(
+            serde_json::to_string(&structured(&results)).unwrap(),
+            r#"[{"url":"https://effect.website","title":"Effect","content":"parallel results","published":1784937600000},{"url":"https://b"}]"#
+        );
+    }
 
     #[test]
     fn content_format() {

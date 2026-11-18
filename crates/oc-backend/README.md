@@ -33,7 +33,7 @@ engine.environment(session_id)               // app.environments entry (PUT /api
 | `sessions` | `session.*` handlers: create/remove (children, interrupt, `Bus.remove`)/update/fork (instruction state + entries)/prompt (attachments via `oc_core::attachment`, skills)/synthetic/compact (input id honoured)/interrupt (resume semantics)/inbox/move/messages/context/revert stage-clear-commit (oc-git `Snapshots`)/diff (`SessionDiff.turn`)/instruction entries/skill activation/commands (built-ins + config templates with `` !`cmd` ``) |
 | `store` | SQL equivalents of `SessionStore.list/messages/message/context`, instruction entries, saved permissions, `Bus.remove`, event-log reads |
 | `catalog` | skills (via `oc_core::plugins::Plugins::skills`) and the command registry (`init`, `review`, MCP prompts → plugin `command` transforms → config commands; plugin commands are `CommandDef::Plugin(handle)`) |
-| `fs` + `fuzzy` | `fs.read` (confined, realpath), `fs.list` (dirs first, locale order), `fs.write`, `fs.find` (gitignore-aware walk + fuzzy ranking) |
+| `fs` + `fuzzy` | `fs.read` (confined, realpath), `fs.list` (dirs first, locale order), `fs.write`, `fs.find` (gitignore-aware walk that keeps hidden files but nothing in `.git`, like 2.3.1's `--hidden`, + fuzzy ranking) |
 | `stats` | `SessionStats.get` |
 | `shells` | `ShellSelect.list` (unix) |
 | `persistent` | persistent-PTY attachments → oc-server WebSocket attachments |

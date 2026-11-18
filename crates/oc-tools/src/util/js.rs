@@ -62,9 +62,21 @@ pub fn utf16_prefix_end(s: &str, units: usize) -> usize {
     s.len()
 }
 
-/// JS `string.slice(0, units)`.
+/// JS `string.slice(0, units)` without half a surrogate pair: `TextBoundary.head` (2.3.1, #63967).
 pub fn utf16_prefix(s: &str, units: usize) -> &str {
     &s[..utf16_prefix_end(s, units)]
+}
+
+/// The last `units` UTF-16 code units of `s` without half a surrogate pair: `TextBoundary.tail` (2.3.1, #63967).
+pub fn utf16_suffix(s: &str, units: usize) -> &str {
+    let mut count = 0;
+    for (index, c) in s.char_indices().rev() {
+        count += c.len_utf16();
+        if count > units {
+            return &s[index + c.len_utf8()..];
+        }
+    }
+    s
 }
 
 /// JS `Number.prototype.toString()` for the values that appear in messages.
@@ -118,6 +130,25 @@ pub fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// text-boundary.test.ts (2.3.1): every head and tail keeps whole characters within the limit.
+    #[test]
+    fn heads_and_tails_keep_whole_characters() {
+        for text in ["", "ascii", "ab😀cd", "😀é€\u{FFFD}😀"] {
+            let length = utf16_len(text);
+            for limit in 0..=length + 1 {
+                for part in [utf16_prefix(text, limit), utf16_suffix(text, limit)] {
+                    assert!(utf16_len(part) <= limit);
+                    assert!(utf16_len(part) + 1 >= limit.min(length));
+                }
+                assert!(text.starts_with(utf16_prefix(text, limit)));
+                assert!(text.ends_with(utf16_suffix(text, limit)));
+            }
+        }
+        assert_eq!(utf16_prefix("😀", 1), "");
+        assert_eq!(utf16_suffix("a😀", 1), "");
+        assert_eq!(utf16_suffix("a😀", 2), "😀");
+    }
+
     use super::*;
 
     #[test]

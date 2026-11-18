@@ -92,17 +92,19 @@ pub fn write(key: &str, path: &str, data: &[u8]) -> Result<Value, ApiError> {
     Ok(json!({"path": target.display().to_string()}))
 }
 
-/// `rg --files` equivalent: respects ignore files, skips hidden entries and `.git`.
+/// `rg --files --hidden --glob=!**/.git/**` equivalent: respects ignore files and keeps hidden entries (2.3.1,
+/// #62577), but nothing inside a `.git` directory.
 fn scan(root: &Path, limit: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let walker = ignore::WalkBuilder::new(root).hidden(true).follow_links(false).build();
+    let walker = ignore::WalkBuilder::new(root).hidden(false).follow_links(false).build();
     for item in walker.flatten() {
         if !item.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let Ok(rel) = item.path().strip_prefix(root) else { continue };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if rel.split('/').any(|p| p == ".git") {
+        let parts: Vec<&str> = rel.split('/').collect();
+        if parts[..parts.len() - 1].contains(&".git") {
             continue;
         }
         out.push(rel);
