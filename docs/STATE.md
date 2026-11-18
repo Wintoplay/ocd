@@ -7,13 +7,13 @@ Goal (user request): an exact behavioral replica of **opencode v2** in Rust — 
 `docs/PORTING.md`. Specs: `docs/spec/01..08` (~18k lines, all complete).
 
 ## Upstream reference
-- Repo `anomalyco/opencode`, tag `v2.3.0`, commit `a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`, MIT (`LICENSE-opencode`).
+- Repo `anomalyco/opencode`, tag `v2.3.1`, commit `c769de83007e3584b5b395176c9fcde2d3231e88`, MIT (`LICENSE-opencode`).
   The port started from branch `v2` at `4617210822bdbb31e5749751afbfb4584ccedac8` (2.0.26) and caught up with
   2.1.4 (`docs/UPGRADE-2.1.4.md`), 2.2.2 (`docs/UPGRADE-2.2.2.md`), 2.2.5 (`docs/UPGRADE-2.2.5.md`), 2.2.7
-  (`docs/UPGRADE-2.2.7.md`) and 2.3.0 (`docs/UPGRADE-2.3.0.md`) in batches; the specs in `docs/spec/` still
+  (`docs/UPGRADE-2.2.7.md`), 2.3.0 (`docs/UPGRADE-2.3.0.md`) and 2.3.1 (`docs/UPGRADE-2.3.1.md`) in batches; the specs in `docs/spec/` still
   cite the 4617210 sources. The 2.2 tags are not descendants of `v2.1.4`: compare trees, not commit logs.
 - Read-only checkout (may vanish with the session scratchpad; re-clone if missing):
-  `git clone https://github.com/anomalyco/opencode.git && git -C opencode checkout v2.3.0`
+  `git clone https://github.com/anomalyco/opencode.git && git -C opencode checkout v2.3.1`
   (was at `$OCD_SCRATCH/src/opencode`).
 - Toolchain: rustup in `~/.cargo` (Rust 1.99, edition 2024). Always `export PATH=$HOME/.cargo/bin:$PATH`.
   Machine: 8 cores, 13 GB RAM. No git commits (user's global rule: only commit when asked; never add AI attribution).
@@ -94,6 +94,12 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-18: CAUGHT UP WITH 2.3.1 (`docs/UPGRADE-2.3.1.md`): four reviews, seven batches (foundation with the three
+  automation migrations, Code Mode, core tools, providers/server, TUI/ACP, automations, process-daemon shells on
+  `@opencode/pty` 0.6.0 protocol 9) and fixes for a macOS test race, Windows file names, a Windows stack overflow (large
+  futures boxed; 8 MiB main-thread stack on Windows) and two final parity diffs. ocd reports 2.3.1; releases and the
+  web UI build from v2.3.1 (`c769de8`). Tests 2,876 passed; side by side 257 of 263 identical. Not ported:
+  full_codemode, video generation, the Console artifact provider, automation event triggers, MCP Events.
 - 2026-11-18: 2.3.1 CATCH-UP, PROVIDERS AND SERVER (Q3): reasoning replay on OpenAI Chat routes (#64243,
   `openai_chat.rs` `lower_assistant`: a declared field other than `reasoning_details` drops replayed details/opaque,
   `reasoning_details` never gets the text written over the array; `tests/wire_2_3_1.rs` compiles 512 replays with

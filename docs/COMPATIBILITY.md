@@ -2,11 +2,11 @@
 
 [← README](../README.md)
 
-ocd targets opencode **2.3.0** (`anomalyco/opencode`, tag `v2.3.0`, commit `a6b15d3`). It was first ported from
-branch `v2` at commit `4617210` (2.0.26). It then caught up with 2.1.4, 2.2.2, 2.2.5, 2.2.7 and 2.3.0 in batches, listed with
+ocd targets opencode **2.3.1** (`anomalyco/opencode`, tag `v2.3.1`, commit `c769de8`). It was first ported from
+branch `v2` at commit `4617210` (2.0.26). It then caught up with 2.1.4, 2.2.2, 2.2.5, 2.2.7, 2.3.0 and 2.3.1 in batches, listed with
 what each one checked in [UPGRADE-2.1.4.md](UPGRADE-2.1.4.md), [UPGRADE-2.2.2.md](UPGRADE-2.2.2.md),
-[UPGRADE-2.2.5.md](UPGRADE-2.2.5.md), [UPGRADE-2.2.7.md](UPGRADE-2.2.7.md) and [UPGRADE-2.3.0.md](UPGRADE-2.3.0.md). Wherever it has to look like opencode,
-ocd reports version 2.3.0.
+[UPGRADE-2.2.5.md](UPGRADE-2.2.5.md), [UPGRADE-2.2.7.md](UPGRADE-2.2.7.md), [UPGRADE-2.3.0.md](UPGRADE-2.3.0.md) and [UPGRADE-2.3.1.md](UPGRADE-2.3.1.md). Wherever it has to look like opencode,
+ocd reports version 2.3.1.
 
 - [How it is compared](#how-it-is-compared)
 - [Same as upstream](#same-as-upstream)
@@ -16,7 +16,7 @@ ocd reports version 2.3.0.
 
 ## How it is compared
 
-- **Side by side:** both binaries run the same 258 scenarios, and `scripts/parity.py` diffs their outputs. Results
+- **Side by side:** both binaries run the same 263 scenarios, and `scripts/parity.py` diffs their outputs. Results
   are in [PARITY.md](PARITY.md). The scenarios cover:
   - the agent loop, sessions, permissions and forms;
   - the read-only endpoints and 74 error cases;
@@ -27,6 +27,8 @@ ocd reports version 2.3.0.
   - the 2.2.7 changes: `run`, MCP OAuth, Copilot Auto, tools, the API and config;
   - the 2.3.0 changes: freeform tools, subagent reports, the step lifecycle, Code Mode search and `fetch`,
     MCP OAuth refresh, pasted sign-ins and client certificates;
+  - the 2.3.1 changes: the automation migrations and automations, `Buffer` and argument crossing in Code Mode,
+    shell timeouts, read shapes, readable 500s, reasoning replay, ACP background shells and daemon shells across a restart;
   - the 2.3.1 Code Mode changes: `Buffer`, arguments crossing as copies, plugin renames and nested permission rows;
   - the editor integration (ACP) following subagents and background shells after a turn;
   - the 2.3.1 changes: the API (automation, video and blob routes) and config keys;
@@ -35,11 +37,12 @@ ocd reports version 2.3.0.
   - local model discovery for LM Studio, Ollama and vLLM against mock servers.
 - **Model requests:** every request ocd sends to the model is compared too: system prompt, tool definitions,
   headers and prompt-cache markers.
-- **Result:** 241 of the 246 scenarios are identical. The other five differ in ways that are expected or harmless:
+- **Result:** 257 of the 263 scenarios are identical. The other six differ in ways that are expected or harmless:
   - the intended renames;
   - the upstream test build's database file name;
   - two timing races that also vary between runs of upstream (one is the title rename racing a failed step);
-  - the order of tool-failure events for calls that fail instantly, which upstream gets from its runtime's scheduler.
+  - the order of tool-failure events for calls that fail instantly, which upstream gets from its runtime's scheduler;
+  - the order of two directories with the same score in fuzzy file search.
 
 - **Per-crate tests:** each crate has its own test suite, many replaying recorded upstream data.
 
