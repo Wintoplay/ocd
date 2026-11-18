@@ -18,7 +18,7 @@ export PATH=$HOME/.cargo/bin:$PATH
 cargo build -p ocd                          # debug build is enough
 python3 scripts/parity.py --list            # scenarios and groups
 python3 scripts/parity.py -q                # everything (about 25 minutes with a debug build)
-python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230 auth230 subagent tls230
+python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230 auth230 subagent tls230 codemode231
 python3 scripts/parity.py 'loop_*' cli_run  # by name or glob
 ```
 
@@ -154,6 +154,7 @@ iterator's `next`.
 | tls230 | 2.3.0 provider client certificates (`scripts/parity/tls230.py`): an HTTPS OpenAI-compatible server that requires a client certificate signed by a CA made with `openssl` for the run (trusted through `NODE_EXTRA_CA_CERTS`), called through `/generate/text`, `/generate/decisions` and sessions: a certificate presented (its common name echoed), none, a missing `{file:}`, a plain HTTP endpoint with an unusable key; another certificate's key, a certificate as the key, a wrong or missing passphrase, a scrypt-encrypted key, a redirect; PKCS#1, PKCS#8 encrypted with PBES2 AES and 3DES and PKCS#12 3DES, legacy OpenSSL AES and 3DES, SEC1 P-384, Ed25519, a chain, a passphrase for a plain key; a decision model; the fixture AI SDK provider (certificate, none, redirect); in sessions the first failure of each kind (retried as a transport error) |
 | freeform230 | 2.3.0 freeform tool input against the mock's Responses and Chat endpoints (`scripts/parity/freeform230.py`; the mock streams `custom_tool_call` items): `execute` and `patch` as custom tools (free text, and the Lark patch grammar) on a model configured with `capabilities.freeform`, custom calls run with their object input, the stored parts, the files the patch wrote, and the replay of the calls as `custom_tool_call`/`custom_tool_call_output` in later requests; the formats a model lists (`["text"]`, `[]`, unset) deciding which tools go out custom; `openai/gpt-5.4-mini` freeform from the bundled models.dev catalog (and its `/api/model` capabilities); Chat Completions custom tools and a streamed `custom` call. Every request body (custom tools in full, function tools as one digest each, input/messages in full) is compared |
 | codemode230 | 2.3.0 Code Mode (`scripts/parity/codemode230.py`): `search` over the built-in and fake MCP tools (whole and partial words, plurals, a namespace filter), an unknown tool's suggestion and namespace calls naming up to three tools, a compact JSON result; streaming `fetch` against mock routes that send chunks 80 ms apart (a reader, `for await` with a streaming `TextDecoder`, a second whole-body read failing, the response's keys and `Headers`, `bodyUsed`), a redirect whose open body the mock sees discarded, and a body left open at the program's end that the mock sees cancelled |
+| codemode231 | 2.3.1 Code Mode (`scripts/parity/codemode231.py`): `Buffer` (text in each encoding, number reads and writes, views, Node's error codes, the `buffer` module, a Buffer returned and logged, a logging-only program with no `null` line); arguments of fake MCP calls crossing as host copies then JSON (a `toJSON` not run, functions left out, promises awaited, Dates/Sets/URLs/errors converted; an iterator, a symbol, `tools`, a Uint8Array and a Buffer refused; a rejected promise), `search("text")` and its input error's suggestion, the reworded diagnostics; a plugin (`crates/oc-plugin/tests/fixtures/codemode-rename-plugin`) renaming calls inside a program to another Code Mode tool (structured output returned) or to a direct or unknown tool (not available); a nested `worktree_remove` asking `edit`, whose `permission.asked` names the `execute` call as its source |
 
 ## Results
 
@@ -186,6 +187,13 @@ has one more `session.tool.progress` than upstream, a race with the 100 ms progr
 nested MCP calls finish in about 34 ms, before the trailing update is due, while the debug build's take about 80 ms
 plus the program's teardown (measured in-program with `Date.now()`), so its trailing update fires first. The
 throttle is the same as upstream's (`codemode/tool.ts` `record`/`publish`).
+
+**Code Mode features of 2.3.1 (debug build, 2026-11-18):** the new group `codemode231` and the Code Mode
+scenarios `codemode230_*`, `tools227_codemode`, `session225_codemode_*` and `tools22_repair_codemode_mcp` against
+the 2.3.1 release (`up-dist-2.3.1`): every Code Mode part, tool result, permission request and model request is
+identical in all ten. Each still differs by one ephemeral `artifact.updated` event that 2.3.1 publishes when a
+location loads (another batch's catch-up), which also renumbers the later event ids. Left out of the scenario:
+`search.name`, which the source names `searchCall` (as ocd does) but the minified release build names `R`.
 
 **Subagent lifecycle (debug build, 2026-11-17):** the new `subagent` group and the `acp` group against the local
 v2.3.0 build (`up-dist-2.3.0`), both through the isolation guard: **8 of 9 identical**. `acp` 3 of 3 (the root's answer
