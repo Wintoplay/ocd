@@ -1495,6 +1495,9 @@ struct TurnState {
     children: HashMap<String, Child>,
     /// Children created during the turn that have not ended yet (`openChildren`).
     open_children: HashSet<String>,
+    /// Background shells that will wake their session, with the inbox ID of their notice once it is queued
+    /// (`shells`, 2.3.1).
+    shells: HashMap<String, Option<String>>,
     asks: HashSet<String>,
     finish: Option<String>,
     usage_turn: Option<[i64; 5]>,
@@ -1670,9 +1673,18 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
     if sid != ctx.session && child.is_none() {
         return (vec![], None);
     }
-    // A follower (no start ID) starts streaming at any root delivery, such as a subagent report starting a turn.
-    if sid == ctx.session && ty == "session.inbox.delivered" && ctx.start.as_deref().is_none_or(|start| s(&data, "inboxID") == start) {
-        st.started = true;
+    if ty == "session.inbox.enqueued" {
+        shell_noticed(st, &data);
+        return (vec![], None);
+    }
+    if ty == "session.inbox.delivered" || ty == "session.inbox.cancelled" {
+        let inbox = s(&data, "inboxID");
+        st.shells.retain(|_, notice| notice.as_deref() != Some(inbox));
+        // A follower (no start ID) starts streaming at any root delivery, such as a subagent report or a shell's
+        // notice starting a turn.
+        if sid == ctx.session && ty == "session.inbox.delivered" && ctx.start.as_deref().is_none_or(|start| inbox == start) {
+            st.started = true;
+        }
         return (vec![], None);
     }
     if child.is_none() && !st.started {
@@ -1732,6 +1744,28 @@ fn fold(st: &mut TurnState, event: &Value, ctx: &Ctx) -> (Vec<Out>, Option<&'sta
         }
         _ => (session_event(st, ty, &data, event, ctx, None), None),
     }
+}
+
+/// What a prompt inherits from the turn before it (`open`): its children, open children and background shells.
+fn inherit(previous: &TurnState) -> TurnState {
+    TurnState { children: previous.children.clone(), open_children: previous.open_children.clone(), shells: previous.shells.clone(), ..Default::default() }
+}
+
+/// `pending`: whether work that outlives the turn, such as a background child or shell, can still wake the session.
+fn pending(st: &TurnState) -> bool {
+    !st.open_children.is_empty() || !st.shells.is_empty()
+}
+
+/// `shellNoticed`: a background shell's notice wakes the session once delivered, so the shell stays pending until
+/// then. Only a job's notice wakes it: a user's shell command queues one without a job ID that waits for the next
+/// prompt.
+fn shell_noticed(st: &mut TurnState, data: &Value) {
+    if data.pointer("/item/type").and_then(Value::as_str) != Some("synthetic") {
+        return;
+    }
+    let Some(metadata) = data.pointer("/item/payload/metadata") else { return };
+    let (Some(shell), Some(_)) = (metadata.get("shellID").and_then(Value::as_str), metadata.get("jobID").and_then(Value::as_str)) else { return };
+    st.shells.insert(shell.into(), Some(s(data, "inboxID").into()));
 }
 
 fn record(st: &mut TurnState, t: Option<&Value>) {
@@ -1827,6 +1861,13 @@ fn session_event(st: &mut TurnState, ty: &str, data: &Value, event: &Value, ctx:
         "session.tool.success" => {
             let id = s(data, "id");
             let t = st.tools.remove(&tool_key(id)).unwrap_or(Tracked { session: sid.clone(), id: id.into(), name: "tool".into(), input: json!({}), metadata: json!({}) });
+            // A shell moved to the background reports its end through a notice that wakes the session. A command
+            // that exits at once can queue its notice first; keep the notice it already has.
+            if data.pointer("/metadata/status").and_then(Value::as_str) == Some("running")
+                && let Some(shell) = data.pointer("/metadata/shellID").and_then(Value::as_str)
+            {
+                st.shells.entry(shell.into()).or_insert(None);
+            }
             let update = with_update("tool_call_update", completed_update(id, &t.name, &t.input, data.get("content").unwrap_or(&json!([])), data.get("metadata"), &ctx.cwd));
             send(with_completed_diffs(update, &t.name, &t.input, data.get("metadata"), &ctx.cwd))
         }
@@ -1918,7 +1959,7 @@ impl Agent {
             return cancelled_result();
         }
         let ctx = Ctx { session: id.to_string(), cwd: cwd.to_string(), start: Some(prepared.start_id.clone()), caps };
-        // `open`: a follower left by the previous turn stops, and this turn inherits its children.
+        // `open`: a follower left by the previous turn stops, and this turn inherits its children and shells.
         let mut st = self.take_background(id, scope).await;
         // ask worker
         let shared = Arc::new(AskShared { settled: Mutex::new(HashSet::new()), notify: tokio::sync::Notify::new() });
@@ -1985,8 +2026,8 @@ impl Agent {
         let _ = ask_tx.send(Ask::Barrier(btx));
         let _ = brx.await;
         drop(ask_tx);
-        // `handoff`: children outlive the turn (and a cancelled one), so their updates, asks and the turns their
-        // reports start still reach the client.
+        // `handoff`: children and background shells outlive the turn (and a cancelled one), so their updates, asks and
+        // the turns their reports and notices wake still reach the client.
         self.hand_off(id, scope, stream, st.clone(), ctx.clone(), responded);
         let terminal = if interrupted { "interrupted" } else { terminal };
         if terminal != "interrupted"
@@ -2076,7 +2117,7 @@ impl Agent {
     }
 
     /// `open`: take over what the previous turn of this attachment left: stop its follower and inherit its
-    /// children and open children.
+    /// children, open children and background shells.
     async fn take_background(&self, id: &str, scope: &Arc<watch::Sender<bool>>) -> TurnState {
         let previous = {
             let mut backgrounds = self.backgrounds.lock();
@@ -2095,18 +2136,18 @@ impl Agent {
             let _ = handle.await;
         }
         let inherited = previous.state.lock();
-        TurnState { children: inherited.children.clone(), open_children: inherited.open_children.clone(), ..Default::default() }
+        inherit(&inherited)
     }
 
-    /// `handoff`: with children still open, forks the follower into the session's scope once the prompt's response
-    /// was sent; otherwise keeps the turn's children for the next prompt. Nothing is kept for a session that was
-    /// detached or attached again.
+    /// `handoff`: with children or background shells still pending, forks the follower into the session's scope once
+    /// the prompt's response was sent; otherwise keeps the turn's children for the next prompt. Nothing is kept for a
+    /// session that was detached or attached again.
     fn hand_off(self: &Arc<Self>, id: &str, scope: &Arc<watch::Sender<bool>>, stream: EventStream, st: TurnState, ctx: Ctx, responded: watch::Receiver<bool>) {
         let current = self.sessions.lock().get(id).is_some_and(|a| Arc::ptr_eq(&a.scope, scope));
         if !current || *scope.borrow() {
             return;
         }
-        if st.open_children.is_empty() {
+        if !pending(&st) {
             if !st.children.is_empty() {
                 self.backgrounds.lock().insert(id.into(), Background { scope: scope.clone(), state: Arc::new(Mutex::new(st)), follower: None });
             }
@@ -2115,14 +2156,15 @@ impl Agent {
         let state = Arc::new(Mutex::new(TurnState { started: false, ..st }));
         let (stop_tx, stop) = watch::channel(false);
         let ctx = Ctx { start: None, ..ctx };
-        let handle = tokio::spawn(self.clone().follow_children(stream, state.clone(), ctx, scope.subscribe(), stop, responded));
+        let handle = tokio::spawn(self.clone().follow_background(stream, state.clone(), ctx, scope.subscribe(), stop, responded));
         self.backgrounds.lock().insert(id.into(), Background { scope: scope.clone(), state, follower: Some((stop_tx, handle)) });
     }
 
-    /// `followChildren`: after the prompt's response, folds the feed (children, and root turns their reports start)
-    /// until a root turn ends with no child open, then waits for the asks. Stops early when the session's scope
-    /// closes (close, delete, attached again), the next prompt takes over, or the feed ends.
-    async fn follow_children(
+    /// `followBackground`: after the prompt's response, folds the feed (children, and root turns their reports or
+    /// background shells' notices start) until a root turn ends with nothing pending, then waits for the asks. Stops
+    /// early when the session's scope closes (close, delete, attached again), the next prompt takes over, or the feed
+    /// ends.
+    async fn follow_background(
         self: Arc<Self>,
         mut stream: EventStream,
         state: Arc<Mutex<TurnState>>,
@@ -2150,13 +2192,13 @@ impl Agent {
                 _ = closed.wait_for(|closed| *closed) => break,
                 _ = stop.wait_for(|s| *s) => break,
             };
-            let (outs, terminal, open) = {
+            let (outs, terminal, waiting) = {
                 let mut st = state.lock();
                 let (outs, terminal) = fold(&mut st, &event, &ctx);
-                (outs, terminal, st.open_children.len())
+                (outs, terminal, pending(&st))
             };
             self.emit(&ctx, outs, &ask_tx, &shared);
-            if terminal.is_some() && open == 0 {
+            if terminal.is_some() && !waiting {
                 let (btx, brx) = oneshot::channel();
                 let _ = ask_tx.send(Ask::Barrier(btx));
                 tokio::select! {
@@ -3017,6 +3059,187 @@ mod tests {
             assert_eq!(project_child(&ctx, &st.children["ses_b"]), !child_updates);
             assert!(!project_child(&ctx, &child("ses_old", Some("msg_older"))));
         }
+    }
+
+    fn ev(ty: &str, data: Value) -> Value {
+        json!({"id": "", "type": ty, "data": data})
+    }
+
+    /// wire-fixture.ts `backgroundShell` (2.3.1): the calls of a shell the model ran in the background.
+    fn background_shell(sid: &str, shell: &str) -> Vec<Value> {
+        let call = format!("call_{shell}");
+        vec![
+            ev("session.tool.input.started", json!({"sessionID": sid, "assistantMessageID": "msg_tools", "id": call, "name": "shell"})),
+            ev("session.tool.called", json!({"sessionID": sid, "assistantMessageID": "msg_tools", "id": call, "input": {"command": "build", "background": true}, "executed": false})),
+            ev("session.tool.success", json!({"sessionID": sid, "assistantMessageID": "msg_tools", "id": call, "metadata": {"shellID": shell, "status": "running"}, "content": [{"type": "text", "text": "backgrounded"}], "executed": true})),
+        ]
+    }
+
+    /// wire-fixture.ts `shellNotice` (2.3.1): a finished shell's notice. A background job's carries its job ID; a
+    /// user's shell command's has none.
+    fn shell_notice(sid: &str, inbox: &str, shell: &str, job: bool) -> Value {
+        let mut metadata = json!({"source": "shell", "shellID": shell});
+        if job {
+            metadata["jobID"] = json!(shell);
+        }
+        ev("session.inbox.enqueued", json!({"sessionID": sid, "inboxID": inbox, "item": {"type": "synthetic", "payload": {"text": format!("<shell id=\"{shell}\" state=\"completed\">"), "metadata": metadata}, "delivery": "steer"}}))
+    }
+
+    fn delivered(sid: &str, inbox: &str) -> Value {
+        ev("session.inbox.delivered", json!({"sessionID": sid, "inboxID": inbox}))
+    }
+
+    fn succeeded(sid: &str) -> Value {
+        ev("session.execution.succeeded", json!({"sessionID": sid}))
+    }
+
+    fn text_delta(sid: &str, message: &str, delta: &str) -> Value {
+        ev("session.text.delta", json!({"sessionID": sid, "assistantMessageID": message, "ordinal": 0, "delta": delta}))
+    }
+
+    /// Folds `events` from a fresh state; returns the state, the updates and the first terminal.
+    fn fold_all(st: &mut TurnState, ctx: &Ctx, events: &[Value]) -> (Vec<Value>, Option<&'static str>) {
+        let mut updates = vec![];
+        let mut terminal = None;
+        for e in events {
+            let (outs, t) = fold(st, e, ctx);
+            terminal = terminal.or(t);
+            updates.extend(outs.into_iter().filter_map(|o| match o {
+                Out::Update(u) => Some(u),
+                _ => None,
+            }));
+        }
+        (updates, terminal)
+    }
+
+    /// translate.test.ts (2.3.1, #64262): background shells keep the turn's work pending until their notice is
+    /// delivered or cancelled; a user's shell command (no job ID) is never pending.
+    #[test]
+    fn background_shells_stay_pending_until_their_notice_settles() {
+        let root = "ses_root";
+        let ctx = Ctx { session: root.into(), cwd: "/workspace".into(), start: Some("msg_input".into()), caps: Caps::default() };
+        let live = |events: Vec<Value>| [vec![delivered(root, "msg_input")], events].concat();
+        let shell = || background_shell(root, "sh_bg");
+        let rows: Vec<(&str, Vec<Value>, Option<&str>, bool)> = vec![
+            ("keeps a background shell pending after its turn ends", live([shell(), vec![succeeded(root)]].concat()), Some("succeeded"), true),
+            (
+                "keeps a background shell pending until its queued notice is delivered",
+                live([shell(), vec![shell_notice(root, "msg_notice", "sh_bg", true), succeeded(root)]].concat()),
+                Some("succeeded"),
+                true,
+            ),
+            (
+                "settles a background shell once its notice is delivered",
+                live([shell(), vec![shell_notice(root, "msg_notice", "sh_bg", true), delivered(root, "msg_notice")]].concat()),
+                None,
+                false,
+            ),
+            (
+                "settles a background shell whose notice is cancelled",
+                live([shell(), vec![shell_notice(root, "msg_notice", "sh_bg", true), ev("session.inbox.cancelled", json!({"sessionID": root, "inboxID": "msg_notice"}))]].concat()),
+                None,
+                false,
+            ),
+            (
+                "settles a shell that exits before its call's result arrives",
+                live([vec![shell_notice(root, "msg_notice", "sh_fast", true)], background_shell(root, "sh_fast"), vec![delivered(root, "msg_notice")]].concat()),
+                None,
+                false,
+            ),
+            (
+                "leaves a user's shell command, whose notice waits for the next prompt, out of pending work",
+                live(vec![shell_notice(root, "msg_user_shell", "sh_user", false), succeeded(root)]),
+                Some("succeeded"),
+                false,
+            ),
+            (
+                "keeps a finished child's background shell pending",
+                live(
+                    [
+                        vec![
+                            ev("session.created", json!({"sessionID": "ses_child", "parentID": root, "title": "Explore", "location": {"directory": "/workspace"}})),
+                            ev("session.execution.started", json!({"sessionID": "ses_child"})),
+                        ],
+                        background_shell("ses_child", "sh_child"),
+                        vec![succeeded("ses_child"), succeeded(root)],
+                    ]
+                    .concat(),
+                ),
+                Some("succeeded"),
+                true,
+            ),
+        ];
+        for (name, events, terminal, expected) in rows {
+            let mut st = TurnState::default();
+            let (_, t) = fold_all(&mut st, &ctx, &events);
+            assert_eq!(t, terminal, "{name}");
+            assert_eq!(pending(&st), expected, "{name}");
+        }
+        // The shell's call itself still completes for the client.
+        let mut st = TurnState::default();
+        let (updates, _) = fold_all(&mut st, &ctx, &live(shell()));
+        assert_eq!(updates.last().map(|u| (s(u, "sessionUpdate").to_string(), s(u, "status").to_string())), Some(("tool_call_update".into(), "completed".into())));
+        assert_eq!(st.shells, HashMap::from([("sh_bg".to_string(), None)]));
+    }
+
+    /// turn.test.ts "streams resumed turns after background shells finish" (2.3.1, #64262): a prompt whose turn ends
+    /// with a background shell running hands off; the turn the shell's notice wakes is streamed. A second shell whose
+    /// notice is queued in its own turn wakes the session after it, and that turn is streamed too. The next prompt
+    /// inherits the shells of the turn before it.
+    #[test]
+    fn streams_turns_woken_by_background_shells() {
+        let sid = "ses_root";
+        let prompt = |start: &str| Ctx { session: sid.into(), cwd: "/workspace".into(), start: Some(start.into()), caps: Caps::default() };
+        let turn = |inbox: &str, events: Vec<Value>| [vec![delivered(sid, inbox)], events, vec![succeeded(sid)]].concat();
+        let chunks = |updates: &[Value]| -> Vec<(String, String)> {
+            updates
+                .iter()
+                .filter(|u| s(u, "sessionUpdate") == "agent_message_chunk")
+                .map(|u| (s(u, "messageId").to_string(), u.pointer("/content/text").and_then(Value::as_str).unwrap_or("").to_string()))
+                .collect()
+        };
+        let mut streamed = vec![];
+
+        // "first": the turn ends while its shell runs, so the prompt hands off to a follower.
+        let ctx = prompt("msg_first");
+        let mut st = TurnState::default();
+        let (_, terminal) = fold_all(&mut st, &ctx, &turn("msg_first", background_shell(sid, "sh_first")));
+        assert_eq!(terminal, Some("succeeded"));
+        assert!(pending(&st));
+        let follower = Ctx { start: None, ..ctx.clone() };
+        let mut st = TurnState { started: false, ..st };
+        let woken = [vec![shell_notice(sid, "msg_notice_first", "sh_first", true)], turn("msg_notice_first", vec![text_delta(sid, "msg_reaction_1", "first reaction")])].concat();
+        let mut stopped = false;
+        for e in &woken {
+            assert!(!stopped, "the follower stops at the woken turn's end");
+            let (updates, terminal) = fold_all(&mut st, &follower, std::slice::from_ref(e));
+            streamed.extend(updates);
+            stopped = terminal.is_some() && !pending(&st);
+        }
+        assert!(stopped);
+
+        // "second": the next prompt inherits the (now empty) shells; its shell's notice is queued as the turn ends and
+        // wakes the session afterwards.
+        let mut st = inherit(&st);
+        assert!(st.shells.is_empty() && !st.started);
+        let ctx = prompt("msg_second");
+        let (_, terminal) =
+            fold_all(&mut st, &ctx, &turn("msg_second", [background_shell(sid, "sh_second"), vec![shell_notice(sid, "msg_notice_second", "sh_second", true)]].concat()));
+        assert_eq!(terminal, Some("succeeded"));
+        assert_eq!(st.shells, HashMap::from([("sh_second".to_string(), Some("msg_notice_second".to_string()))]));
+        // A prompt taking over from the follower keeps waiting on the shell.
+        assert_eq!(inherit(&st).shells, st.shells);
+        let follower = Ctx { start: None, ..ctx.clone() };
+        let mut st = TurnState { started: false, ..st };
+        let (updates, terminal) = fold_all(&mut st, &follower, &turn("msg_notice_second", vec![text_delta(sid, "msg_reaction_2", "second reaction")]));
+        streamed.extend(updates);
+        assert_eq!(terminal, Some("succeeded"));
+        assert!(!pending(&st));
+
+        assert_eq!(
+            chunks(&streamed),
+            [("msg_reaction_1".to_string(), "first reaction".to_string()), ("msg_reaction_2".to_string(), "second reaction".to_string())]
+        );
     }
 
     #[test]

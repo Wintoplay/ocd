@@ -499,3 +499,75 @@ fn acp_follows_a_child_past_cancel_and_stops_on_close() {
     acp.close();
     acp2.close();
 }
+
+fn update_with(text: &'static str) -> impl Fn(&Value) -> bool {
+    move |v| {
+        v.get("method") == Some(&json!("session/update"))
+            && v.pointer("/params/update/sessionUpdate") == Some(&json!("agent_message_chunk"))
+            && v.pointer("/params/update/content/text").and_then(Value::as_str).is_some_and(|t| t.contains(text))
+    }
+}
+
+/// background-turn.subprocess.test.ts "streams turns woken by background shells and keeps the session usable" (2.3.1,
+/// #64262): a prompt ends while its background shell still runs; the shell's notice later wakes a turn the client is
+/// shown. A shell that is done before its turn is streams its reaction whether it lands in that turn or wakes
+/// another, and the session takes the next prompt as usual. The outputs (`SLOW-2`, `FAST-2`) are computed, so the
+/// command text in the history never matches them.
+#[test]
+fn acp_streams_turns_woken_by_background_shells() {
+    use oc_tools::shell::select;
+    let env = common::Env::new();
+    let shell = select::resolve(select::Priority::Compat, None, None);
+    // The slow command runs until the test creates `release`, so it ends after end_turn; the fast one exits at once.
+    let (slow, fast) = if select::ps(&shell) {
+        ("while (!(Test-Path release)) { Start-Sleep -Milliseconds 50 }; \"SLOW-$(1+1)\"", "\"FAST-$(1+1)\"")
+    } else {
+        ("while [ ! -f release ]; do sleep 0.05; done; echo SLOW-$((1+1))", "echo FAST-$((1+1))")
+    };
+    let launched = |n| Turn { matches: "Output is streaming to", ..text_turn("", &format!("launched {n}")) };
+    let (port, script) = scripted_provider(vec![
+        text_turn("SLOW-2", "slow shell reaction"),
+        text_turn("FAST-2", "fast shell reaction"),
+        text_turn("FOLLOW-UP-PROMPT", "follow-up reply"),
+        tool_turn("run the slow shell", "call_slow", "shell", json!({"command": slow, "description": "Slow", "background": true})),
+        tool_turn("run the fast shell", "call_fast", "shell", json!({"command": fast, "description": "Fast", "background": true})),
+        launched(1),
+        launched(2),
+    ]);
+    let mut acp = Client::start(&env, port, json!({}));
+    let sid = acp.open_session(&env);
+    let prompt = |acp: &mut Client, text: &str| {
+        let id = acp.start_request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}));
+        let response = acp.response(id);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        id
+    };
+
+    // The prompt ends while its shell still runs; the shell's notice later wakes a turn the client is shown.
+    prompt(&mut acp, "run the slow shell");
+    let launched = acp.wait(30, update_with("launched 1")).expect("the first turn's answer");
+    let completed = |v: &Value| {
+        v.get("method") == Some(&json!("session/update"))
+            && v.pointer("/params/update/toolCallId") == Some(&json!("call_slow"))
+            && v.pointer("/params/update/status") == Some(&json!("completed"))
+    };
+    assert!(acp.wait(30, completed).is_some(), "the slow shell's call completes");
+    assert!(!used(&script, 0), "the slow shell ended before it was released");
+    std::fs::write(env.path("work/release"), "").unwrap();
+    let reaction = acp.wait(60, update_with("slow shell reaction")).expect("the turn the slow shell woke is streamed");
+    assert_eq!(reaction["params"]["sessionId"], json!(sid));
+    assert_ne!(reaction["params"]["update"]["messageId"], launched["params"]["update"]["messageId"]);
+
+    // A shell that is done before its turn is: its reaction streams whether it lands in that turn or wakes another.
+    prompt(&mut acp, "run the fast shell");
+    assert!(acp.wait(60, update_with("fast shell reaction")).is_some(), "the fast shell's reaction is streamed");
+
+    let next = prompt(&mut acp, "FOLLOW-UP-PROMPT");
+    assert!(acp.wait(30, update_with("follow-up reply")).is_some());
+    acp.drain(500);
+    for text in ["slow shell reaction", "fast shell reaction", "follow-up reply"] {
+        assert_eq!(acp.seen.iter().filter(|v| update_with(text)(v)).count(), 1, "{text}");
+    }
+    assert!(acp.after(next).iter().all(|v| !v.to_string().contains("(script exhausted)")));
+    acp.close();
+}

@@ -155,18 +155,21 @@ exited unexpectedly (...)`), and file diffs (`acp/permission.ts`): permission re
 `diff` preview per file (`N files` title for several) and completed edit/patch calls (live and in
 history replay) append a `diff` per changed file, the old text rebuilt by reversing the recorded
 patch against the file (jsdiff `parsePatch`/`reversePatch`/`applyPatch`, ported in
-`oc_tools::jsdiff`) or, for the patch tool's trimmed diffs, from its hunks. Background following of
-child sessions (`turn.ts` `handoff`/`followChildren`, 2.3.0): when a turn ends (or is cancelled) with child
-sessions still open, a follower takes over its event feed in the session's scope once the prompt's
-response was sent. It folds the tracked children's events (and their children's), sends their
-`opencode/session/child_update` notifications and their permission/form asks (forms without a
-`toolCallId`), and streams the root's own turns that the children's `<subagent>` reports start (any root
-`session.inbox.delivered` starts one). Without the child capability, only children of the current
-prompt's turn are projected as session updates; asks are routed only for children that have not ended.
-It stops once a root turn ends with no child open and their asks are answered, when the session is
-closed, deleted or attached again (an ask in progress then gets its fallback answer), or when the next
-prompt takes over: that prompt inherits the follower's children and open children (also kept when the
-turn left children that all ended).
+`oc_tools::jsdiff`) or, for the patch tool's trimmed diffs, from its hunks. Background following of child
+sessions and shells (`turn.ts` `handoff`/`followBackground`, 2.3.0 and 2.3.1): when a turn ends (or is
+cancelled) with child sessions still open or background shells pending, a follower takes over its event feed
+in the session's scope once the prompt's response was sent. It folds the tracked children's events (and
+their children's), sends their `opencode/session/child_update` notifications and their permission/form asks
+(forms without a `toolCallId`), and streams the root's own turns that the children's `<subagent>` reports or
+the shells' notices start (any root `session.inbox.delivered` starts one). A shell is pending (`shells`,
+2.3.1) from a `session.tool.success` whose metadata has `status: "running"` and a `shellID` (root or tracked
+child) until the inbox item of its notice (a `session.inbox.enqueued` synthetic item with `shellID` and
+`jobID`; a user's `!` command has no job ID and is ignored) is delivered or cancelled. Without the child
+capability, only children of the current prompt's turn are projected as session updates; asks are routed
+only for children that have not ended. It stops once a root turn ends with nothing pending and their asks
+are answered, when the session is closed, deleted or attached again (an ask in progress then gets its
+fallback answer), or when the next prompt takes over: that prompt inherits the follower's children, open
+children and shells (also kept when the turn left children that all ended).
 
 ## Notes / deviations
 
@@ -235,7 +238,8 @@ turn left children that all ended).
   fallback, headers, 404 `no-store`, API still 401) and rejects an unreadable override;
   `web_ui::tests` cover the lookup order;
 * `tests/acp.rs`: ACP initialize/authenticate/new/prompt/list/unknown-method, `_session/steering` on an idle session
-  and with bad params, closing an unprompted and a prompted session, and EOF exit over stdio.
+  and with bad params, closing an unprompted and a prompted session, and EOF exit over stdio; following a background
+  child after the turn and past a cancel, and (2.3.1) the turns background shells wake after the turn.
 * `tests/upgrade.rs` (Unix): `ocd upgrade` of a copy of the binary against a local GitHub stand-in
   (`tests/common/releases.rs`, `OCD_TEST_RELEASES_API` and `OCD_TEST_BUILD_VERSION`, both test only): same,
   newer, older and explicit versions, local builds, checksum and missing-asset failures, a binary that does not

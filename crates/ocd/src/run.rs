@@ -958,6 +958,12 @@ fn put(m: &mut Map<String, Value>, k: &str, v: Option<&Value>) {
 }
 
 /// `terminalOutcome(event)`
+/// After a cancel, whether every job still pending is one the API can't cancel (image and, 2.3.1, Code Mode jobs):
+/// waiting on them would only hold the exit.
+fn only_uncancellable(jobs: &[Value]) -> bool {
+    !jobs.is_empty() && jobs.iter().all(|j| matches!(j.get("kind").and_then(Value::as_str), Some("image" | "codemode")))
+}
+
 fn terminal_outcome(event: &Value) -> Option<Outcome> {
     let id = oc_schema::id::message_from_event(event.get("id").and_then(Value::as_str).unwrap_or(""));
     let data = event.get("data").unwrap_or(&Value::Null);
@@ -1479,10 +1485,9 @@ impl Shared {
             let generation = self.generation();
             client.call("experimental.session.wait", Req::new().path("sessionID", sid)).await.map_err(|e| e.to_string())?;
             let pending = self.background().await?;
-            // Image jobs can't be cancelled through the API, so waiting on them would only hold the exit.
             match pending {
                 None => return Ok(()),
-                Some(p) if !p.is_empty() && p.iter().all(|j| j.get("kind").and_then(Value::as_str) == Some("image")) => return Ok(()),
+                Some(p) if only_uncancellable(&p) => return Ok(()),
                 _ => {}
             }
             self.ended(generation).await?;
@@ -1901,6 +1906,17 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // noninteractive.ts (2.3.1, #64343): a cancelled run does not wait on image or Code Mode jobs.
+    #[test]
+    fn cancel_does_not_wait_on_image_or_codemode_jobs() {
+        let job = |kind: &str| json!({"id": format!("job_{kind}"), "kind": kind});
+        assert!(only_uncancellable(&[job("image")]));
+        assert!(only_uncancellable(&[job("codemode"), job("image")]));
+        assert!(!only_uncancellable(&[job("codemode"), job("shell")]));
+        assert!(!only_uncancellable(&[job("subagent")]));
+        assert!(!only_uncancellable(&[]));
+    }
 
     #[test]
     fn model_refs() {
