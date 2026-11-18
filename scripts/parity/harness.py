@@ -161,6 +161,10 @@ class Normalizer:
 LOCAL_PROVIDERS = {name: {"settings": {"baseURL": "http://127.0.0.1:9/v1"}} for name in ("lmstudio", "ollama", "vllm")}
 
 
+DEAD_PROXY = "http://127.0.0.1:9"
+PROXY_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy")
+
+
 def isolated_env(state_root, extra=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("OPENCODE")}
     for key, sub in [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"),
@@ -200,7 +204,15 @@ def isolated_env(state_root, extra=None):
         "TZ": "UTC",
         "LANG": "C.UTF-8",
     })
+    # SAFETY: every connection that is not to a loopback mock goes to a dead proxy, whatever the calling shell sets,
+    # so a scenario whose provider config falls through to a real service (e.g. the free tier) can't reach it.
+    # Scenarios may extend NO_PROXY but not point the proxy anywhere else.
+    env.update({key: DEAD_PROXY for key in PROXY_KEYS})
+    env.update({"NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1"})
     env.update(extra or {})
+    for key in PROXY_KEYS:
+        if env.get(key) != DEAD_PROXY:
+            raise RuntimeError(f"parity scenarios must keep {key} at the dead proxy {DEAD_PROXY}")
     return env
 
 
