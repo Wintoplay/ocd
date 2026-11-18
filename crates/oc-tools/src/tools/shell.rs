@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::file_access::{self, Kind};
 use crate::host::{JobBlockResult, JobRecovery, JobStart, JobStatus, ShellInvocation, SyntheticMessage};
 use crate::shell::result::{self as shell_result, Output};
+use crate::shell::daemon::{Placement, ToolCall};
 use crate::shell::service::ShellService;
 use crate::shell::{parse, select};
 use crate::tool::{DefinitionContext, ErrorCause, Tool, ToolContext, ToolDefinition, ToolError, ToolOptions, ToolResult, decode, meta};
@@ -54,9 +55,10 @@ pub fn description(shell: Option<&str>) -> String {
     parts.join(" ")
 }
 
+/// A finished command's result as its call or job reports it (`Output`).
 #[derive(Debug, Clone, PartialEq, Default)]
-struct ShellOutput {
-    base: Output,
+pub struct ShellOutput {
+    pub base: Output,
     shell_id: Option<String>,
     running: bool,
     /// Seconds from the command's start to its end (or to now, for a command still running).
@@ -169,7 +171,9 @@ struct StopOnDrop {
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        if !self.armed {
+        // A server handing its daemon over leaves the command (and its job) running for the next server, which takes
+        // the call over and moves the command to the background.
+        if !self.armed || self.service.handoff_prepared() {
             return;
         }
         let _ = self.service.stop(&self.id, oc_schema::message::ShellStatus::Killed);
@@ -261,6 +265,63 @@ impl ShellTool {
     }
 }
 
+/// A shell command's job run and the structured result it settles with (`startJob`).
+pub struct ShellJob {
+    pub run: futures::future::BoxFuture<'static, Result<String, String>>,
+    pub settled: tokio::sync::watch::Receiver<Option<ShellOutput>>,
+}
+
+/// `startJob`'s run: waits for the command's result and renders it. Dropping the run before it settles (its job
+/// cancelled or its registry closing) stops the command, keeping it and its output file, unless the server is
+/// handing its daemon over. `timeout` is the call's final timeout, for the timed-out notice.
+pub fn job(service: Arc<ShellService>, started: oc_schema::message::ShellInfo, max_lines: usize, max_bytes: usize, timeout: Option<Arc<AtomicU64>>) -> ShellJob {
+    let (settled_tx, settled) = tokio::sync::watch::channel::<Option<ShellOutput>>(None);
+    let guard = StopOnDrop { service: service.clone(), id: started.id.clone(), armed: true, job: None };
+    let run = async move {
+        // The whole guard moves into the run, so dropping the run drops it.
+        let mut guard = guard;
+        let result = service.result(&started, max_lines, max_bytes).await;
+        guard.armed = false;
+        if result.capture.is_none() {
+            return Err("Command failed".to_string());
+        }
+        let completed = result.info.time.completed.unwrap_or_else(crate::util::now_ms);
+        let truncated = result.capture.as_ref().is_some_and(|c| c.truncated);
+        let output = ShellOutput {
+            base: shell_result::output(&result),
+            wall_time_seconds: wall_time_seconds(result.info.time.started, completed),
+            output_path: truncated.then(|| result.info.file.clone()),
+            ..Default::default()
+        };
+        let text = result_messages(&output, timeout.map(|t| t.load(Ordering::SeqCst))).join("\n\n");
+        let _ = settled_tx.send(Some(output));
+        Ok(text)
+    };
+    ShellJob { run: Box::pin(run), settled }
+}
+
+/// `backgroundToolResult`: the tool result of a call whose command moved to the background, narrowed to what a
+/// backgrounded command reports so it can be published as is: its content and metadata.
+pub fn background_tool_result(info: &oc_schema::message::ShellInfo) -> (Vec<ToolContent>, oc_schema::Metadata) {
+    let mut metadata = meta(vec![("shellID", json!(info.id)), ("status", json!("running")), ("truncated", json!(false))]);
+    if let Some(pid) = info.pid {
+        metadata.insert("pid".into(), json!(pid));
+    }
+    let content = [background_text(info, None), BACKGROUND_INSTRUCTION.to_string()].into_iter().map(|text| ToolContent::Text { text }).collect();
+    (content, metadata)
+}
+
+/// The notice a background command's settled job leaves its session (`notify`): the job's rendered output when it
+/// completed, its error, or `Cancelled`.
+pub fn job_notice(shell_id: &str, job: &crate::host::JobInfo, command: &str, settled: Option<&ShellOutput>) -> shell_result::Notification {
+    let text = match (settled, job.status) {
+        (Some(_), _) => job.output.clone().unwrap_or_default(),
+        (None, JobStatus::Error) => job.error.clone().unwrap_or_else(|| "Command failed".into()),
+        _ => "Cancelled".into(),
+    };
+    shell_result::notification(shell_id, Some(&job.id), command, job.status.as_str(), &text, settled.map(|o| &o.base))
+}
+
 fn spawn_notifier(ctx: &ToolContext, job_id: String, shell_id: String, command: String, settled: tokio::sync::watch::Receiver<Option<ShellOutput>>) {
     let host = ctx.host.clone();
     let session_id = ctx.session_id.clone();
@@ -282,13 +343,7 @@ fn spawn_notifier(ctx: &ToolContext, job_id: String, shell_id: String, command: 
         } else {
             None
         };
-        let text = match (&output, info.status) {
-            // The job's own output: the result text as the job rendered it (`info.output`).
-            (Some(_), _) => info.output.clone().unwrap_or_default(),
-            (None, JobStatus::Error) => info.error.clone().unwrap_or_else(|| "Command failed".into()),
-            _ => "Cancelled".into(),
-        };
-        let note = shell_result::notification(&shell_id, Some(&job_id), &command, info.status.as_str(), &text, output.as_ref().map(|o| &o.base));
+        let note = job_notice(&shell_id, &info, &command, output.as_ref());
         let _ = host
             .session_synthetic(SyntheticMessage {
                 id: info.notification_id.clone(),
@@ -374,9 +429,20 @@ impl Tool for ShellTool {
             invocation.timeout = 0;
         }
 
+        let placement = Placement {
+            project_id: ctx.project_id.clone(),
+            directory: ctx.directory.to_string_lossy().into_owned(),
+            workspace_id: ctx.workspace_id.clone(),
+            tool_call: Some(ToolCall {
+                session_id: ctx.session_id.clone(),
+                assistant_message_id: ctx.message_id.clone(),
+                call_id: ctx.call_id.clone(),
+            }),
+            waited: !background,
+        };
         let info = self
             .service
-            .spawn(&invocation, meta(vec![("sessionID", json!(ctx.session_id))]), &ctx.project_id)
+            .create(&invocation, meta(vec![("sessionID", json!(ctx.session_id))]), &placement)
             .await
             .map_err(|m| ToolError::with_cause(leaf.clone(), ErrorCause::Error(m)))?;
         ctx.progress(meta(vec![("shellID", json!(info.id))]));
@@ -407,36 +473,11 @@ impl ShellTool {
                 None => std::future::pending().await,
             }
         };
-        let (settled_tx, settled_rx) = tokio::sync::watch::channel::<Option<ShellOutput>>(None);
-        let service = self.service.clone();
-        let started = info.clone();
-        let max_lines = ctx.config.max_lines();
-        let max_bytes = ctx.config.max_bytes();
         // `finalTimeout`: the limit the invocation ended up with, cleared once the command moves to the background,
         // so the notices say how long it waited.
         let final_timeout = Arc::new(AtomicU64::new(final_timeout));
-        let job_timeout = final_timeout.clone();
-        let guard = StopOnDrop { service: service.clone(), id: info.id.clone(), armed: true, job: None };
-        let run = async move {
-            // The whole guard moves into the run, so dropping the run drops it.
-            let mut guard = guard;
-            let result = service.result(&started, max_lines, max_bytes).await;
-            guard.armed = false;
-            if result.capture.is_none() {
-                return Err("Command failed".to_string());
-            }
-            let completed = result.info.time.completed.unwrap_or_else(crate::util::now_ms);
-            let truncated = result.capture.as_ref().is_some_and(|c| c.truncated);
-            let output = ShellOutput {
-                base: shell_result::output(&result),
-                wall_time_seconds: wall_time_seconds(result.info.time.started, completed),
-                output_path: truncated.then(|| result.info.file.clone()),
-                ..Default::default()
-            };
-            let text = result_messages(&output, Some(job_timeout.load(Ordering::SeqCst))).join("\n\n");
-            let _ = settled_tx.send(Some(output));
-            Ok(text)
-        };
+        let ShellJob { run, settled: settled_rx } =
+            job(self.service.clone(), info.clone(), ctx.config.max_lines(), ctx.config.max_bytes(), Some(final_timeout.clone()));
         let job = ctx
             .host
             .job_start(JobStart {
@@ -445,7 +486,7 @@ impl ShellTool {
                 title: Some(info.command.clone()),
                 metadata: meta(vec![("sessionID", json!(ctx.session_id)), ("shellID", json!(info.id))]),
                 recovery: Some(JobRecovery::Shell { session_id: ctx.session_id.clone(), shell_id: info.id.clone(), command: info.command.clone() }),
-                run: Box::pin(run),
+                run,
             })
             .await
             .map_err(|m| ToolError::with_cause(leaf.clone(), ErrorCause::Error(m)))?;
@@ -479,11 +520,7 @@ impl ShellTool {
                 _ => Ok(None),
             },
             _ = stopped() => return Err(self.cancelled(&ctx, &info, &job.id).await),
-            _ = ctx.cancel.cancelled() => {
-                let _ = ctx.host.job_cancel(&job.id).await;
-                let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
-                return Err(ToolError::interrupted());
-            }
+            _ = ctx.cancel.cancelled() => return Err(self.interrupted(&ctx, &job.id, &info).await),
         };
         match blocked {
             Ok(Some(JobBlockResult::Backgrounded(_))) => {
@@ -519,14 +556,20 @@ impl ShellTool {
                         return Ok(self.timed_out(&ctx, &job.id, &info, limit, &final_timeout, rx));
                     }
                 }
-                _ = ctx.cancel.cancelled() => {
-                    let _ = ctx.host.job_cancel(&job.id).await;
-                    let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
-                    return Err(ToolError::interrupted());
-                }
+                _ = ctx.cancel.cancelled() => return Err(self.interrupted(&ctx, &job.id, &info).await),
             }
         };
         Ok(tool_result(output, Some(final_timeout.load(Ordering::SeqCst))))
+    }
+
+    /// An interrupt (other than the user's stop) cancels the job, which stops the command, unless the server is
+    /// handing its daemon over: then the command and its job keep running for the next server.
+    async fn interrupted(&self, ctx: &ToolContext, job_id: &str, info: &oc_schema::message::ShellInfo) -> ToolError {
+        if !self.service.handoff_prepared() {
+            let _ = ctx.host.job_cancel(job_id).await;
+            let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
+        }
+        ToolError::interrupted()
     }
 
     /// The call of a foreground command its timeout moved to the background: the command runs on without a limit

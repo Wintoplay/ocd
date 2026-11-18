@@ -53,18 +53,28 @@ pub fn default_services(app: &Arc<App>) -> oc_tools::tools::Services {
         Arc::default();
     let sink: oc_tools::shell::service::EventSink = Arc::new(move |ev| {
         use oc_tools::shell::service::ShellEvent as E;
+        // A daemon command names its location (also for one taken back after a restart, which was never created
+        // here).
+        let named = |location: &Option<oc_tools::shell::service::ShellLocation>| {
+            location.as_ref().map(|l| oc_schema::types::LocationRef { directory: l.directory.clone(), workspace_id: l.workspace_id.clone() })
+        };
         let location = match &ev {
-            E::Created { info } => {
-                let session = info.metadata.get("sessionID").and_then(Value::as_str);
-                let location = session
-                    .and_then(|s| bus.db().session_get(s).ok().flatten())
-                    .map(|s| s.location)
-                    .unwrap_or_else(|| oc_schema::types::LocationRef { directory: info.cwd.clone(), workspace_id: None });
+            E::Created { info, location } => {
+                let location = named(location).unwrap_or_else(|| {
+                    let session = info.metadata.get("sessionID").and_then(Value::as_str);
+                    session
+                        .and_then(|s| bus.db().session_get(s).ok().flatten())
+                        .map(|s| s.location)
+                        .unwrap_or_else(|| oc_schema::types::LocationRef { directory: info.cwd.clone(), workspace_id: None })
+                });
                 locations.lock().insert(info.id.clone(), location.clone());
                 Some(location)
             }
-            E::Exited { id, .. } => locations.lock().get(id).cloned(),
-            E::Deleted { id } => locations.lock().remove(id),
+            E::Exited { id, location, .. } => named(location).or_else(|| locations.lock().get(id).cloned()),
+            E::Deleted { id, location } => {
+                let recorded = locations.lock().remove(id);
+                named(location).or(recorded)
+            }
         };
         let (kind, data) = shell_event(&ev);
         bus.publish(kind, data, location);
@@ -81,10 +91,10 @@ pub fn default_services(app: &Arc<App>) -> oc_tools::tools::Services {
 fn shell_event(ev: &oc_tools::shell::service::ShellEvent) -> (&'static str, Value) {
     use oc_tools::shell::service::ShellEvent as E;
     match ev {
-        // Upstream 2.3.0 runs commands in its process daemon, which announces the command with the `pid` it was
-        // started with (core/src/shell.ts `Shell.Event.Created, { info: run.info }`).
-        E::Created { info } => ("shell.created", serde_json::json!({"info": info})),
-        E::Exited { id, exit, status } => {
+        // A daemon command is announced with the `pid` and start time the daemon gave it (core/src/shell.ts
+        // `Shell.Event.Created, { info: run.info }`); a spawned one with its own.
+        E::Created { info, .. } => ("shell.created", serde_json::json!({"info": info})),
+        E::Exited { id, exit, status, .. } => {
             // `exit` is omitted when the command has no exit code (killed, timed out, signalled).
             let mut data = serde_json::json!({ "id": id });
             if let Some(exit) = exit {
@@ -93,6 +103,6 @@ fn shell_event(ev: &oc_tools::shell::service::ShellEvent) -> (&'static str, Valu
             data["status"] = serde_json::json!(status);
             ("shell.exited", data)
         }
-        E::Deleted { id } => ("shell.deleted", serde_json::json!({"id": id})),
+        E::Deleted { id, .. } => ("shell.deleted", serde_json::json!({"id": id})),
     }
 }

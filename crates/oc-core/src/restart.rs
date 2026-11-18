@@ -4,8 +4,9 @@
 //! attempt. Wakes from replayed reports wait until every suspended session counted its attempt; directly driven
 //! children resume like root sessions; recovered subagent jobs start last.
 //!
-//! Not ported: shell commands that survive the restart in the process daemon (`ShellTool.reattach`,
-//! `settleBackgroundedCalls`); ocd runs shells itself, so a running shell row is reported cancelled.
+//! Shell commands that survived the restart in the process daemon are taken back: a running shell job is watched
+//! again (`ShellTool.reattach`), and a foreground shell call the previous server left unsettled is settled as moved
+//! to the background (`settleBackgroundedCalls`). A shell job whose command is gone is reported cancelled.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -81,6 +82,177 @@ impl Engine {
         let meta = json!({"notice": "restart"}).as_object().cloned();
         let _ = self.app.sessions.synthetic(id, None, RESTART_TEXT.into(), Some("Continuing after restart".into()), meta, None).await;
         Ok(true)
+    }
+
+    /// `shellOf(sessionID)`: the shell service once the session's location took back the commands the daemon still
+    /// runs for it, with the location's output limits; `None` for a session that is gone, a remote workspace or a
+    /// directory that is gone (whose commands are reported like any lost background work).
+    async fn shell_of(&self, session_id: &str) -> Option<(usize, usize)> {
+        let session = self.app.sessions.get(session_id).ok()?;
+        if session.location.workspace_id.is_some() || !std::path::Path::new(&session.location.directory).is_dir() {
+            return None;
+        }
+        // Commands are kept under the location's canonical directory, as the shell tool started them.
+        let location = self.location(&session.location.directory).await.ok()?;
+        self.shell.recover(&location.directory.to_string_lossy(), None, &session.project_id).await;
+        let limits = oc_config::fold::tool_output(&location.entries).map(|t| (t.max_lines, t.max_bytes));
+        let (lines, bytes) = limits.unwrap_or_default();
+        Some((
+            lines.map(|v| v as usize).unwrap_or(oc_tools::tool_output::MAX_LINES),
+            bytes.map(|v| v as usize).unwrap_or(oc_tools::tool_output::MAX_BYTES),
+        ))
+    }
+
+    /// `ShellTool.reattach`: watches a command taken over from a previous server as a background job of its session,
+    /// and notifies the session when it finishes, as for a command the model ran in the background. A finished
+    /// command's notice is admitted before this returns.
+    async fn reattach_shell(
+        self: &Arc<Self>,
+        notices: &Notices,
+        session_id: &str,
+        info: oc_schema::message::ShellInfo,
+        notification_id: Option<String>,
+        limits: (usize, usize),
+    ) {
+        let job = oc_tools::tools::shell::job(self.shell.clone(), info.clone(), limits.0, limits.1, None);
+        let started = self.app.jobs.start_input(crate::job::StartInput {
+            id: info.id.clone(),
+            kind: "shell".into(),
+            title: Some(info.command.clone()),
+            metadata_session: Some(session_id.to_string()),
+            recovery: Some(JobRecovery::Shell { session_id: session_id.into(), shell_id: info.id.clone(), command: info.command.clone() }),
+            notification_id,
+            background: true,
+            run: job.run,
+        });
+        let finished = self.shell.get(&info.id).is_ok_and(|current| current.status != oc_schema::message::ShellStatus::Running);
+        let notify = {
+            let app = self.app.clone();
+            let mut settled = job.settled;
+            let (job_id, shell_id, command, session) = (started.id.clone(), info.id.clone(), info.command.clone(), session_id.to_string());
+            async move {
+                let job = app.jobs.wait(&job_id).await?;
+                if job.status == JobStatus::Running {
+                    return None;
+                }
+                let output = if job.status == JobStatus::Completed {
+                    settled.wait_for(Option::is_some).await.ok().and_then(|o| o.clone())
+                } else {
+                    None
+                };
+                let note = oc_tools::tools::shell::job_notice(&shell_id, &job, &command, output.as_ref());
+                Some((SubagentNotice { id: job.notification_id.clone(), session_id: session, text: note.text, description: command, metadata: note.metadata }, job.notification_id))
+            }
+        };
+        if finished {
+            if let Some((notice, notification)) = notify.await {
+                // A session deleted while its command ran has no one left to tell.
+                match notices.synthetic(&self.app, notice).await {
+                    Ok(()) | Err(Admission::NotFound(_)) => {
+                        if let Some(id) = notification {
+                            self.app.jobs.complete_background(&id);
+                        }
+                    }
+                    Err(error) => tracing::warn!(id = %info.id, error = %error, "failed to report a recovered shell command"),
+                }
+            }
+            return;
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let Some((notice, notification)) = notify.await else { return };
+            let session = notice.session_id.clone();
+            let admitted = engine
+                .app
+                .sessions
+                .synthetic(&session, notice.id, notice.text, Some(notice.description), Some(notice.metadata), None)
+                .await;
+            match admitted {
+                Ok(_) => engine.wake_owner(&session),
+                Err(Admission::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(sessionID = %session, error = %error, "failed to report a recovered shell command");
+                    return;
+                }
+            }
+            if let Some(id) = notification {
+                engine.app.jobs.complete_background(&id);
+            }
+        });
+    }
+
+    /// `recoverShellJob`: a shell job the previous server left running is watched again if its command is still
+    /// known (running, or finished during the restart); otherwise it is reported as lost.
+    async fn recover_shell_job(self: &Arc<Self>, bg: &Background, notices: &Notices, reattached: &mut HashSet<String>) {
+        let JobRecovery::Shell { session_id, shell_id, .. } = &bg.recovery else { return };
+        if bg.status == JobStatus::Running
+            && let Some(limits) = self.shell_of(session_id).await
+            && let Ok(info) = self.shell.get(shell_id)
+        {
+            reattached.insert(info.id.clone());
+            self.reattach_shell(notices, session_id, info, Some(bg.notification_id.clone()), limits).await;
+            return;
+        }
+        self.recover_shell(bg).await;
+    }
+
+    /// `settleBackgroundedCalls`: a server that stopped (shut down or killed) during a foreground shell call leaves
+    /// the call unsettled, its command still running in the daemon. Settle the call as moved to the background and
+    /// watch the command.
+    async fn settle_backgrounded_calls(self: &Arc<Self>, session_id: &str, notices: &Notices, reattached: &HashSet<String>) -> anyhow::Result<()> {
+        let messages = self.app.db.session_messages(session_id)?;
+        let since = messages
+            .iter()
+            .filter(|(_, m)| matches!(m, oc_schema::Message::Compaction(c) if matches!(c.status, oc_schema::message::CompactionStatus::Completed { .. })))
+            .map(|(seq, _)| *seq)
+            .max();
+        let calls: Vec<(String, String, bool)> = messages
+            .iter()
+            .filter(|(seq, _)| since.is_none_or(|since| *seq >= since))
+            .filter_map(|(_, m)| match m {
+                oc_schema::Message::Assistant(a) if a.time.completed.is_none() => Some(a),
+                _ => None,
+            })
+            .flat_map(|a| {
+                a.content.iter().filter_map(|part| match part {
+                    oc_schema::message::AssistantContent::Tool { id, name, executed, state: oc_schema::message::ToolState::Running { .. }, .. }
+                        if name == "shell" =>
+                    {
+                        Some((a.id.clone(), id.clone(), executed == &Some(true)))
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        if calls.is_empty() {
+            return Ok(());
+        }
+        let Some(limits) = self.shell_of(session_id).await else { return Ok(()) };
+        for (assistant, call, executed) in calls {
+            let tool_call = oc_tools::shell::daemon::ToolCall {
+                session_id: session_id.into(),
+                assistant_message_id: assistant.clone(),
+                call_id: call.clone(),
+            };
+            let Some(info) = self.shell.by_tool_call(&tool_call) else { continue };
+            let (content, metadata) = oc_tools::tools::shell::background_tool_result(&info);
+            self.app.bus.commit_one(SessionEvent::ToolSuccess {
+                session_id: session_id.into(),
+                assistant_message_id: assistant,
+                id: call,
+                content,
+                metadata: Some(metadata),
+                executed,
+                native: None,
+            })?;
+            // Backgrounded but stopped before the call was settled: its job row was already reattached (and, for a
+            // command that already finished, may even be done).
+            if reattached.contains(&info.id) {
+                continue;
+            }
+            self.reattach_shell(notices, session_id, info, None, limits).await;
+        }
+        Ok(())
     }
 
     async fn recover_shell(&self, bg: &Background) {
@@ -221,15 +393,23 @@ impl Engine {
     async fn sweep(self: &Arc<Self>, pending: &[Background], children: &HashSet<String>, notices: &Notices) -> anyhow::Result<usize> {
         let coordinator = self.app.coordinator();
         let recoverable = |bg: &Background| !self.app.jobs.get(&bg.id).is_some_and(|j| j.status == JobStatus::Running);
-        // Shell and tool outcomes first, and only then recovered children.
+        // Shell and tool outcomes first, then calls a killed server left unsettled, and only then recovered children,
+        // whose first resume would otherwise fail their own unsettled shell calls.
+        let mut reattached = HashSet::new();
         for bg in pending.iter().filter(|b| !matches!(b.recovery, JobRecovery::Subagent { .. })) {
             if !recoverable(bg) {
                 continue;
             }
             match bg.recovery {
-                JobRecovery::Shell { .. } => self.recover_shell(bg).await,
+                JobRecovery::Shell { .. } => self.recover_shell_job(bg, notices, &mut reattached).await,
                 JobRecovery::Image { .. } => self.recover_image(bg).await,
                 JobRecovery::Subagent { .. } => {}
+            }
+        }
+        let suspended: Vec<String> = notices.suspended.lock().iter().cloned().collect();
+        for session in suspended {
+            if let Err(error) = self.settle_backgrounded_calls(&session, notices, &reattached).await {
+                tracing::warn!(sessionID = %session, error = %error, "failed to settle backgrounded shell calls");
             }
         }
         let mut resumable = Vec::new();

@@ -165,16 +165,16 @@ impl Engine {
             });
             // Hourly retention sweeps (`tool-output.ts`, `shell.ts`).
             let data = self.app.global.data.clone();
+            let shell = Arc::downgrade(&self.shell);
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
                 loop {
                     tick.tick().await;
                     let d = data.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        oc_tools::tool_output::cleanup(&d);
-                        oc_tools::shell::service::ShellService::cleanup(&d);
-                    })
-                    .await;
+                    let _ = tokio::task::spawn_blocking(move || oc_tools::tool_output::cleanup(&d)).await;
+                    // Keeps the files of commands the process daemon still runs.
+                    let Some(shell) = shell.upgrade() else { return };
+                    shell.cleanup_all().await;
                 }
             });
         }

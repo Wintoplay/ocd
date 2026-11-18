@@ -66,6 +66,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 [dev-dependencies]
+oc-persistent-pty = { path = "../oc-persistent-pty", features = ["testing"] }
 tokio-tungstenite = "0.29"
 tempfile = "3"
 axum.workspace = true

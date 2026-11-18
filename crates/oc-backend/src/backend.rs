@@ -1518,8 +1518,20 @@ impl Backend for Engine {
 
     async fn shell_list(&self, ctx: &RequestContext, _req: ShellListRequest) -> Result<Vec<ShellInfo>, ApiError> {
         let loc = self.locations.get(&ctx.location.directory).await?;
+        // Booting the location's Shell takes back the commands the daemon still runs for it.
+        let directory = loc.location.directory.to_string_lossy().into_owned();
+        self.shell().recover(&directory, ctx.location.workspace_id.as_deref(), loc.project_id()).await;
         let owned = self.shell_owner.lock().clone();
-        self.shell().list().into_iter().filter(|s| owned.get(&s.id) == Some(&loc.key)).map(conv).collect()
+        let shell = self.shell();
+        shell
+            .list()
+            .into_iter()
+            .filter(|s| match owned.get(&s.id) {
+                Some(owner) => owner == &loc.key,
+                None => shell.location_of(&s.id).is_some_and(|l| l.directory == directory),
+            })
+            .map(conv)
+            .collect()
     }
 
     async fn shell_create(&self, ctx: &RequestContext, req: ShellCreateRequest) -> Result<ShellInfo, ApiError> {
@@ -1548,7 +1560,14 @@ impl Backend for Engine {
         };
         self.app.plugins.shell_before(&loc.key, &mut invocation).await.map_err(ApiError::defect)?;
         // Core errors become defects (500), like upstream's `Effect.orDie`.
-        let info = self.shell().spawn(&invocation, metadata, loc.project_id()).await.map_err(ApiError::defect)?;
+        let placement = oc_tools::shell::daemon::Placement {
+            project_id: loc.project_id().to_string(),
+            directory: loc.location.directory.to_string_lossy().into_owned(),
+            workspace_id: ctx.location.workspace_id.clone(),
+            tool_call: None,
+            waited: false,
+        };
+        let info = self.shell().create(&invocation, metadata, &placement).await.map_err(ApiError::defect)?;
         self.shell_owner.lock().insert(info.id.clone(), loc.key.clone());
         conv(info)
     }
@@ -1967,9 +1986,13 @@ impl Engine {
     /// Shell commands are per location upstream: one created elsewhere is not found here.
     async fn owned_shell(&self, ctx: &RequestContext, id: &str) -> Result<(), ApiError> {
         let loc = self.locations.get(&ctx.location.directory).await?;
+        let directory = loc.location.directory.to_string_lossy().into_owned();
+        self.shell().recover(&directory, ctx.location.workspace_id.as_deref(), loc.project_id()).await;
         let Ok(info) = self.shell().get(id) else { return Err(ApiError::shell_not_found(id)) };
         let owner = self.shell_owner.lock().get(id).cloned();
-        let owner = match owner {
+        // A command taken back from the daemon belongs to the location it was started in.
+        let recovered = self.shell().location_of(id).filter(|l| l.directory == directory).map(|_| loc.key.clone());
+        let owner = match owner.or(recovered) {
             Some(owner) => Some(owner),
             // A background shell the shell tool started belongs to its session's location (upstream's
             // location-scoped Shell service), so `run` can remove it when it cancels.

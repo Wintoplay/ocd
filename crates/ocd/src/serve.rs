@@ -204,6 +204,7 @@ async fn run_service(
             Ok((s, engine)) => {
                 // The managed service owns restart continuity.
                 oc_backend::resume_suspended(&engine);
+                oc_backend::prefetch_pty(&engine).await;
                 break s;
             }
             Err(e) if addr_in_use(&e) => {

@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 pub const MISSING: &str = "Shell command output is no longer available.";
 
 /// Captured tail (`capture`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Capture {
     pub output: String,
     pub truncated: bool,
+    /// Why a command was killed when no exit code or signal of its own tells, e.g. the process daemon stopped.
+    pub killed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +29,7 @@ pub struct Output {
     pub exit: Option<i64>,
     pub signal: Option<String>,
     pub timeout: Option<bool>,
+    pub killed: Option<String>,
 }
 
 pub fn output(result: &ShellResult) -> Output {
@@ -36,6 +39,7 @@ pub fn output(result: &ShellResult) -> Output {
         exit: result.info.exit,
         signal: result.info.signal.clone(),
         timeout: (result.info.status == ShellStatus::Timeout).then_some(true),
+        killed: result.capture.as_ref().and_then(|c| c.killed.clone()),
     }
 }
 
@@ -72,6 +76,9 @@ pub fn interrupted(result: &ShellResult) -> Interrupted {
 /// `ShellResult.notice(output, timeout)`: how the command ended, for the model. `timeout` is the limit in ms that
 /// applied (none or 0 leaves out how long it waited).
 pub fn notice(output: &Output, timeout: Option<u64>) -> Option<String> {
+    if let Some(killed) = &output.killed {
+        return Some(killed.clone());
+    }
     if output.timeout == Some(true) {
         let waited = match timeout.filter(|t| *t > 0) {
             Some(t) => format!(" after {} seconds", crate::util::js::number(t as f64 / 1_000.0)),
@@ -183,6 +190,9 @@ pub fn metadata(output: &Output) -> Metadata {
     if let Some(timeout) = output.timeout {
         map.insert("timeout".into(), json!(timeout));
     }
+    if output.killed.is_some() {
+        map.insert("killed".into(), json!(true));
+    }
     map
 }
 
@@ -238,6 +248,20 @@ pub struct Written {
     pub line_starts: [u64; 2],
 }
 
+/// What is known of a daemon command's output file: its newlines and last line starts can be unknown (a file too
+/// large to count, a line starting further back than the scan), and the daemon can have stopped writing it early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tail {
+    pub size: u64,
+    pub newlines: Option<u64>,
+    pub line_starts: [Option<u64>; 2],
+    /// `outputError`: why the file stopped early.
+    pub stopped_early: Option<String>,
+}
+
+/// `LINE_START_SCAN_LIMIT`: how far back a line start is looked for.
+pub const LINE_START_SCAN_LIMIT: u64 = 1024 * 1024;
+
 /// The first byte of the bounded tail: the last `max_bytes` of the file.
 pub fn capture_start(size: u64, max_bytes: usize) -> u64 {
     size.saturating_sub(max_bytes as u64)
@@ -267,7 +291,18 @@ fn format_size(bytes: u64) -> String {
 /// starts mid-line drops that partial line so the line numbers stay exact, or names how much of it is shown when it is
 /// the only line.
 pub fn capture_tail(window: &[u8], written: Written, max_lines: usize, max_bytes: usize, file: &str) -> Capture {
-    let start = capture_start(written.size, max_bytes);
+    let tail = Tail {
+        size: written.size,
+        newlines: Some(written.newlines),
+        line_starts: written.line_starts.map(Some),
+        stopped_early: None,
+    };
+    capture_tail_of(window, &tail, max_lines, max_bytes, file)
+}
+
+/// [`capture_tail`] over what is known of a daemon command's file.
+pub fn capture_tail_of(window: &[u8], tail: &Tail, max_lines: usize, max_bytes: usize, file: &str) -> Capture {
+    let start = capture_start(tail.size, max_bytes);
     let before = start.saturating_sub(1);
     let page = String::from_utf8_lossy(&window[char_boundary(window, (start - before) as usize).min(window.len())..]).into_owned();
     let partial = start > 0 && window.first() != Some(&b'\n');
@@ -276,20 +311,29 @@ pub fn capture_tail(window: &[u8], written: Written, max_lines: usize, max_bytes
     if ends_with_newline {
         lines.pop();
     }
-    let total = written.newlines + u64::from(!ends_with_newline);
+    let total = tail.newlines.map(|newlines| newlines + u64::from(!ends_with_newline));
     let suffix = format!("full output saved to {file}]");
+    // After a write error the daemon kept running the command, but its file stopped early.
+    let stopped_early = match &tail.stopped_early {
+        Some(error) => format!("\n\n[output file {file} stopped early: {error}]"),
+        None => String::new(),
+    };
     if partial && lines.len() == 1 {
-        let line_start = if ends_with_newline { written.line_starts[0] } else { written.line_starts[1] };
-        let line_size = written.size - u64::from(ends_with_newline) - line_start;
+        let line_start = if ends_with_newline { tail.line_starts[0] } else { tail.line_starts[1] };
+        let end = tail.size - u64::from(ends_with_newline);
+        let line_size = match line_start {
+            Some(line_start) => format_size(end - line_start),
+            None => format!("over {}", format_size(end.min(LINE_START_SCAN_LIMIT))),
+        };
         let shown = lines[0].len() as u64;
+        let line = match total {
+            Some(total) => format!("line {total}"),
+            None => "the last line".to_string(),
+        };
         return Capture {
-            output: format!(
-                "{}\n\n[showing the last {} of line {total} ({}); {suffix}",
-                lines[0],
-                format_size(shown),
-                format_size(line_size)
-            ),
+            output: format!("{}\n\n[showing the last {} of {line} ({line_size}); {suffix}{stopped_early}", lines[0], format_size(shown)),
             truncated: true,
+            killed: None,
         };
     }
     if start > 0 || lines.len() > max_lines {
@@ -300,12 +344,20 @@ pub fn capture_tail(window: &[u8], written: Written, max_lines: usize, max_bytes
             n if n > 0 => &lines[lines.len() - n as usize..],
             n => &lines[(n.unsigned_abs() as usize).min(lines.len())..],
         };
-        return Capture {
-            output: format!("{}\n\n[showing lines {}-{total} of {total}; {suffix}", kept.join("\n"), total + 1 - kept.len() as u64),
-            truncated: true,
+        let output = match total {
+            Some(total) => format!(
+                "{}\n\n[showing lines {}-{total} of {total}; {suffix}{stopped_early}",
+                kept.join("\n"),
+                total + 1 - kept.len() as u64
+            ),
+            None => format!("{}\n\n[showing the last {} lines; {suffix}{stopped_early}", kept.join("\n"), kept.len()),
         };
+        return Capture { output, truncated: true, killed: None };
     }
-    Capture { output: if page.is_empty() { "(no output)".into() } else { page }, truncated: false }
+    // One blank line before the notice, whether or not the output ended with a newline.
+    let shown = if !stopped_early.is_empty() { page.strip_suffix('\n').unwrap_or(&page) } else { &page };
+    let shown = if shown.is_empty() { "(no output)" } else { shown };
+    Capture { output: format!("{shown}{stopped_early}"), truncated: false, killed: None }
 }
 
 pub fn value(output: &Output) -> Value {
@@ -345,10 +397,10 @@ mod tests {
 
     #[test]
     fn tail_truncation() {
-        assert_eq!(capture_of(b"a\nb\n", 2000, 51200), Capture { output: "a\nb\n".into(), truncated: false });
-        assert_eq!(capture_of(b"", 2000, 51200), Capture { output: "(no output)".into(), truncated: false });
+        assert_eq!(capture_of(b"a\nb\n", 2000, 51200), Capture { output: "a\nb\n".into(), truncated: false, killed: None });
+        assert_eq!(capture_of(b"", 2000, 51200), Capture { output: "(no output)".into(), truncated: false, killed: None });
         let c = capture_of(b"1\n2\n3\n4\n", 2, 51200);
-        assert_eq!(c, Capture { output: "3\n4\n\n[showing lines 3-4 of 4; full output saved to /f]".into(), truncated: true });
+        assert_eq!(c, Capture { output: "3\n4\n\n[showing lines 3-4 of 4; full output saved to /f]".into(), truncated: true, killed: None });
         // A window that starts on a line boundary keeps its first line.
         let c = capture_of(b"aaaa\nx\ny", 2000, 3);
         assert_eq!(c.output, "x\ny\n\n[showing lines 2-3 of 3; full output saved to /f]");
@@ -452,7 +504,7 @@ mod tests {
     fn interrupted_names_the_output_file_and_the_shell_even_when_the_output_fits() {
         let result = ShellResult {
             info: stopped_info(ShellStatus::Killed),
-            capture: Some(Capture { output: "partial\n".into(), truncated: false }),
+            capture: Some(Capture { output: "partial\n".into(), truncated: false, killed: None }),
         };
         assert_eq!(
             interrupted(&result),
@@ -467,7 +519,7 @@ mod tests {
     #[test]
     fn interrupted_keeps_a_truncated_tails_own_notice() {
         let output = "tail\n\n[showing lines 9-10 of 10; full output saved to /tmp/sh_result.out]";
-        let result = ShellResult { info: stopped_info(ShellStatus::Killed), capture: Some(Capture { output: output.into(), truncated: true }) };
+        let result = ShellResult { info: stopped_info(ShellStatus::Killed), capture: Some(Capture { output: output.into(), truncated: true, killed: None }) };
         assert_eq!(
             interrupted(&result),
             Interrupted {
@@ -482,7 +534,7 @@ mod tests {
     fn interrupted_says_once_there_was_no_output_and_that_a_command_still_stopping_is_not_done() {
         let result = ShellResult {
             info: stopped_info(ShellStatus::Running),
-            capture: Some(Capture { output: "(no output)".into(), truncated: false }),
+            capture: Some(Capture { output: "(no output)".into(), truncated: false, killed: None }),
         };
         let notice = "[no output; output file: /tmp/sh_result.out]\n\nCommand interrupted by the user (shell ID: sh_result); it is still being stopped.";
         assert_eq!(interrupted(&result), Interrupted { output: String::new(), notice: notice.into(), message: notice.into() });

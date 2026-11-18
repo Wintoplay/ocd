@@ -62,8 +62,10 @@ pub async fn start(
         // With the session runner a configuration change rebuilds the location's services right away.
         engine.app.plugins.local.follow_rebuilds();
     }
-    // Adopt an inherited persistent-PTY handoff at boot.
-    engine.persistent().await;
+    // Adopt an inherited persistent-PTY handoff at boot. Local shell commands run in the same daemon (when its
+    // binary is available), so the next server takes back the ones a restart handoff leaves running.
+    let pty = engine.persistent().await.clone();
+    engine.shell().attach_daemon(pty);
     let server = oc_server::serve(engine.clone() as Arc<dyn oc_server::Backend>, opts).await?;
     server.set_ready();
     start_v1_import(&engine);
@@ -73,6 +75,12 @@ pub async fn start(
     // Automations run from any server process (`service`, `serve` or `--standalone`); the table holds their state.
     automations::start(&engine);
     Ok((server, engine))
+}
+
+/// Installs the pinned `opencode-pty` binary in the background when it is missing, so the managed service runs
+/// later shell commands in the process daemon (upstream embeds the binary).
+pub async fn prefetch_pty(engine: &Arc<Engine>) {
+    engine.persistent().await.prefetch();
 }
 
 /// Restart continuity (`installRestartContinuity`): resume sessions whose execution claim survived the last

@@ -28,7 +28,14 @@ impl Engine {
         let mut metadata = serde_json::Map::new();
         metadata.insert("sessionID".into(), session_id.into());
         metadata.insert("background".into(), true.into());
-        let started = match self.shell.spawn(&invocation, metadata, &session.project_id).await {
+        let placement = oc_tools::shell::daemon::Placement {
+            project_id: session.project_id.clone(),
+            directory: location.directory.to_string_lossy().into_owned(),
+            workspace_id: session.location.workspace_id.clone(),
+            tool_call: None,
+            waited: false,
+        };
+        let started = match self.shell.create(&invocation, metadata, &placement).await {
             Ok(info) => info,
             Err(e) => {
                 let mut meta = serde_json::Map::new();

@@ -246,8 +246,11 @@ impl Permissions {
             let _ = tx.send(Err(PermissionError::Declined));
             return rx;
         }
-        self.ctx.publish("permission.asked", serde_json::to_value(&request).unwrap());
+        // Registered before it is announced, so a reply that follows the event at once finds it (`pending.set`, then
+        // `publish`).
+        let event = serde_json::to_value(&request).unwrap();
         self.pending.lock().insert(request.id.clone(), Pending { request, agent, tx });
+        self.ctx.publish("permission.asked", event);
         rx
     }
 

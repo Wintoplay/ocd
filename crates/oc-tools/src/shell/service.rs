@@ -1,7 +1,9 @@
 //! Non-interactive shell command processes (`core/src/shell.ts`).
 //!
-//! Each command spawns once, streams combined stdout+stderr into
-//! `<data>/shell/<projectID>/<id>.out`, and keeps the last 25 exited commands observable.
+//! Each command runs once, its combined stdout+stderr in `<data>/shell/<projectID>/<id>.out`, and the last 25 exited
+//! commands stay observable. A local command runs in the process daemon when one is attached and its binary is
+//! available (see [`super::daemon`]), so it outlives a planned server restart; otherwise, and for remote workspaces,
+//! this service spawns it itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,8 @@ use oc_schema::message::{ShellInfo, ShellOutput, ShellStatus, ShellTime};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
-use super::result::{ShellResult, Written, capture_start, capture_tail};
+use super::daemon::{CreateRun, Daemon, Placement, Run, ToolCall};
+use super::result::{ShellResult, Tail, Written, capture_start, capture_tail, capture_tail_of};
 
 /// `Signal number → name`, as a process killed by it reports it.
 pub fn signal_name(signal: i32) -> String {
@@ -32,12 +35,20 @@ pub struct NotFound {
     pub id: String,
 }
 
-/// Bus events (`Shell.Event.*`).
+/// The location a daemon command belongs to (its events carry it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellLocation {
+    pub directory: String,
+    pub workspace_id: Option<String>,
+}
+
+/// Bus events (`Shell.Event.*`). A daemon command's events name its location; a spawned command's leave it to the
+/// sink (`None`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
-    Created { info: ShellInfo },
-    Exited { id: String, exit: Option<i64>, status: ShellStatus },
-    Deleted { id: String },
+    Created { info: ShellInfo, location: Option<ShellLocation> },
+    Exited { id: String, exit: Option<i64>, status: ShellStatus, location: Option<ShellLocation> },
+    Deleted { id: String, location: Option<ShellLocation> },
 }
 
 pub type EventSink = Arc<dyn Fn(ShellEvent) + Send + Sync>;
@@ -71,6 +82,14 @@ pub struct ShellService {
     commands: Mutex<HashMap<String, Arc<Active>>>,
     exit_order: Mutex<Vec<String>>,
     events: Option<EventSink>,
+    /// The process daemon's commands, once a server attached the daemon.
+    daemon: std::sync::OnceLock<Arc<Daemon>>,
+}
+
+/// A command this service knows: spawned here, or run by the daemon.
+enum Command {
+    Spawned(Arc<Active>),
+    Daemon(Arc<super::daemon::Place>, Arc<Run>),
 }
 
 impl Active {
@@ -168,7 +187,56 @@ mod windows_job {
 impl ShellService {
     /// `data` = global data dir.
     pub fn new(data: PathBuf, events: Option<EventSink>) -> Arc<Self> {
-        Arc::new(Self { data, commands: Mutex::new(HashMap::new()), exit_order: Mutex::new(Vec::new()), events })
+        Arc::new(Self {
+            data,
+            commands: Mutex::new(HashMap::new()),
+            exit_order: Mutex::new(Vec::new()),
+            events,
+            daemon: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Runs local commands in the process daemon from now on (when its binary is available). Once per service.
+    pub fn attach_daemon(&self, pty: oc_persistent_pty::PersistentPty) {
+        let _ = self.daemon.set(Daemon::new(pty, self.data.clone(), self.events.clone()));
+    }
+
+    pub fn daemon(&self) -> Option<&Arc<Daemon>> {
+        self.daemon.get()
+    }
+
+    /// `handoffPrepared`: whether the server is handing its daemon commands over to the next one, which takes them
+    /// over; a command a call or job is dropped from must then keep running.
+    pub fn handoff_prepared(&self) -> bool {
+        self.daemon.get().is_some_and(|daemon| daemon.handoff_prepared())
+    }
+
+    /// Takes back the commands the daemon still runs for a location (once per server); a no-op without a daemon or
+    /// for a remote workspace.
+    pub async fn recover(&self, directory: &str, workspace_id: Option<&str>, project_id: &str) {
+        if let Some(daemon) = self.daemon.get()
+            && workspace_id.is_none()
+        {
+            daemon.at(directory, workspace_id, project_id).await;
+        }
+    }
+
+    /// `byToolCall`: the daemon command a tool call started, while it is known here.
+    pub fn by_tool_call(&self, call: &ToolCall) -> Option<ShellInfo> {
+        self.daemon.get().and_then(|daemon| daemon.by_tool_call(call))
+    }
+
+    /// The location of a daemon command (spawned commands have none recorded here).
+    pub fn location_of(&self, id: &str) -> Option<ShellLocation> {
+        self.daemon.get().and_then(|daemon| daemon.find(id)).map(|(place, _)| place.location())
+    }
+
+    fn lookup(&self, id: &str) -> Option<Command> {
+        if let Some(active) = self.commands.lock().get(id).cloned() {
+            return Some(Command::Spawned(active));
+        }
+        let (place, run) = self.daemon.get()?.find(id)?;
+        Some(Command::Daemon(place, run))
     }
 
     pub fn output_dir(&self, project_id: &str) -> PathBuf {
@@ -195,7 +263,7 @@ impl ShellService {
         }
         // Every shell reports exactly one exit; removing a running one ends it as killed (ce15cd882).
         if running {
-            self.emit(ShellEvent::Exited { id: id.to_string(), exit: None, status: ShellStatus::Killed });
+            self.emit(ShellEvent::Exited { id: id.to_string(), exit: None, status: ShellStatus::Killed, location: None });
         }
         command.done.send_if_modified(|done| {
             if done.is_none() {
@@ -206,27 +274,48 @@ impl ShellService {
             }
         });
         let _ = std::fs::remove_file(&command.file);
-        self.emit(ShellEvent::Deleted { id: id.to_string() });
+        self.emit(ShellEvent::Deleted { id: id.to_string(), location: None });
     }
 
+    /// Forgets a command and deletes its file; a running one is killed. A daemon command is forgotten in the
+    /// daemon first (on a task of its own, so it completes whoever waits).
     pub fn remove(&self, id: &str) -> Result<(), NotFound> {
-        self.require(id)?;
-        self.remove_command(id);
+        match self.lookup(id).ok_or_else(|| NotFound { id: id.to_string() })? {
+            Command::Spawned(_) => self.remove_command(id),
+            Command::Daemon(place, _) => {
+                let id = id.to_string();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move { place.remove(&id).await });
+                }
+            }
+        }
         Ok(())
     }
 
     /// Running commands only.
     pub fn list(&self) -> Vec<ShellInfo> {
-        self.commands.lock().values().map(|c| c.info.lock().clone()).filter(|i| i.status == ShellStatus::Running).collect()
+        let mut list: Vec<ShellInfo> = self.commands.lock().values().map(|c| c.info.lock().clone()).collect();
+        if let Some(daemon) = self.daemon.get() {
+            for place in daemon.places() {
+                list.extend(place.list().iter().map(|run| run.info()));
+            }
+        }
+        list.retain(|i| i.status == ShellStatus::Running);
+        list
     }
 
     pub fn get(&self, id: &str) -> Result<ShellInfo, NotFound> {
-        Ok(self.require(id)?.info.lock().clone())
+        match self.lookup(id).ok_or_else(|| NotFound { id: id.to_string() })? {
+            Command::Spawned(active) => Ok(active.info.lock().clone()),
+            Command::Daemon(_, run) => Ok(run.info()),
+        }
     }
 
     pub async fn wait(&self, id: &str) -> Result<ShellInfo, NotFound> {
-        let command = self.require(id)?;
-        let mut rx = command.done.subscribe();
+        let mut rx = match self.lookup(id).ok_or_else(|| NotFound { id: id.to_string() })? {
+            Command::Spawned(active) => active.done.subscribe(),
+            Command::Daemon(_, run) => run.done(),
+        };
         loop {
             if let Some(done) = rx.borrow().clone() {
                 return done;
@@ -239,6 +328,10 @@ impl ShellService {
 
     /// Replace the running command's timeout from now; zero clears it.
     pub fn timeout(&self, id: &str, duration_ms: u64) -> Result<ShellInfo, NotFound> {
+        if let Some(Command::Daemon(place, run)) = self.lookup(id) {
+            place.timeout(&run, duration_ms);
+            return Ok(run.info());
+        }
         let command = self.require(id)?;
         let info = command.info.lock().clone();
         if info.status != ShellStatus::Running {
@@ -255,6 +348,10 @@ impl ShellService {
     /// at once; [`ShellService::wait`] observes the exit. Ignored once the command has ended or is already stopping
     /// (`Shell.stop`, 2.3.0).
     pub fn stop(&self, id: &str, reason: ShellStatus) -> Result<ShellInfo, NotFound> {
+        if let Some(Command::Daemon(place, run)) = self.lookup(id) {
+            place.stop(&run, reason);
+            return Ok(run.info());
+        }
         let command = self.require(id)?;
         let info = command.info.lock().clone();
         if info.status != ShellStatus::Running {
@@ -277,9 +374,17 @@ impl ShellService {
     /// cut, and ends before one the limit would cut, holding back a valid prefix at the end of a running command's
     /// output (#63984).
     pub fn output(&self, id: &str, cursor: Option<u64>, limit: Option<u64>) -> Result<ShellOutput, NotFound> {
-        let command = self.require(id)?;
-        let running = command.info.lock().status == ShellStatus::Running;
-        let size = command.size.load(Ordering::SeqCst);
+        let (running, size, file) = match self.lookup(id).ok_or_else(|| NotFound { id: id.to_string() })? {
+            Command::Spawned(command) => {
+                (command.info.lock().status == ShellStatus::Running, command.size.load(Ordering::SeqCst), command.file.clone())
+            }
+            // A daemon command's file is the only record of its output, so its size is the file's; a missing file
+            // is empty.
+            Command::Daemon(_, run) => {
+                let file = run.file();
+                (run.info().status == ShellStatus::Running, file_size(&file), file)
+            }
+        };
         let cursor = cursor.unwrap_or(0);
         let limit = limit.unwrap_or(65536);
         if cursor >= size {
@@ -291,7 +396,7 @@ impl ShellService {
         }
         // A UTF-8 character can straddle either edge by up to three bytes.
         let offset = start.saturating_sub(3);
-        let bytes = read_range(&command.file, offset, size.min(start.saturating_add(limit).saturating_add(3)) - offset).unwrap_or_default();
+        let bytes = read_range(&file, offset, size.min(start.saturating_add(limit).saturating_add(3)) - offset).unwrap_or_default();
         let (output, cursor) = output_page(&bytes, offset, start, limit, running);
         Ok(ShellOutput { output, cursor, size, truncated: false })
     }
@@ -321,18 +426,73 @@ impl ShellService {
                 info
             }
         };
-        let capture = self.require(&info.id).ok().map(|command| {
-            let written = Written {
-                size: command.size.load(Ordering::SeqCst),
-                newlines: command.newlines.load(Ordering::SeqCst),
-                line_starts: *command.line_starts.lock(),
-            };
-            // Read the byte before the window too, to tell whether the window starts on a line boundary.
-            let before = capture_start(written.size, max_bytes).saturating_sub(1);
-            let window = read_range(&command.file, before, written.size - before).unwrap_or_default();
-            capture_tail(&window, written, max_lines, max_bytes, &info.file)
-        });
+        let capture = match self.lookup(&info.id) {
+            None => None,
+            Some(Command::Spawned(command)) => {
+                let written = Written {
+                    size: command.size.load(Ordering::SeqCst),
+                    newlines: command.newlines.load(Ordering::SeqCst),
+                    line_starts: *command.line_starts.lock(),
+                };
+                // Read the byte before the window too, to tell whether the window starts on a line boundary.
+                let before = capture_start(written.size, max_bytes).saturating_sub(1);
+                let window = read_range(&command.file, before, written.size - before).unwrap_or_default();
+                Some(capture_tail(&window, written, max_lines, max_bytes, &info.file))
+            }
+            Some(Command::Daemon(_, run)) => Some(daemon_capture(&run, &info.file, max_lines, max_bytes)),
+        };
         ShellResult { info, capture }
+    }
+
+    /// `create(input)`: runs a prepared invocation in the daemon when it is attached and available and the location
+    /// has no workspace, else spawns it here. Only a daemon that could not be reached or started falls back to
+    /// spawning; a request the daemon rejected (or whose reply was lost, so it may have run) fails.
+    pub async fn create(self: &Arc<Self>, invocation: &ShellInvocation, metadata: Metadata, placement: &Placement) -> Result<ShellInfo, String> {
+        let mut invocation = invocation.clone();
+        // Absolute for local commands, so the command reports the same cwd wherever it runs.
+        if placement.workspace_id.is_none() {
+            invocation.cwd = resolve(&placement.directory, &invocation.cwd);
+        }
+        let daemon = self.daemon.get().filter(|daemon| placement.workspace_id.is_none() && daemon.available()).cloned();
+        if let Some(daemon) = daemon {
+            let place = daemon.at(&placement.directory, None, &placement.project_id).await;
+            let id = oc_schema::id::shell();
+            let dir = self.output_dir(&placement.project_id);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let info = ShellInfo {
+                id: id.clone(),
+                status: ShellStatus::Running,
+                command: invocation.command.clone(),
+                cwd: invocation.cwd.clone(),
+                shell: invocation.shell.clone(),
+                file: dir.join(format!("{id}.out")).to_string_lossy().into_owned(),
+                pid: None,
+                exit: None,
+                signal: None,
+                metadata: metadata.clone(),
+                time: ShellTime { started: crate::util::now_ms(), completed: None },
+            };
+            let created = place
+                .create(CreateRun {
+                    info,
+                    args: super::select::args(&invocation.shell, &invocation.command),
+                    // The daemon replaces the environment, so variables removed by hooks stay removed.
+                    env: invocation.env.clone(),
+                    timeout: invocation.timeout,
+                    tool_call: placement.tool_call.clone(),
+                    waited: placement.waited,
+                })
+                .await;
+            match created {
+                Ok(info) => return Ok(info),
+                Err(oc_persistent_pty::PipeError::Unavailable(error)) => {
+                    tracing::warn!(error = %error, "process daemon unavailable; spawning shell command instead");
+                }
+                // The daemon may have run it: never run it again here.
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        self.spawn(&invocation, metadata, &placement.project_id).await
     }
 
     /// Spawn a prepared invocation. Returns once the process is registered.
@@ -508,7 +668,7 @@ impl ShellService {
             if !service.commands.lock().contains_key(&snapshot.id) {
                 return;
             }
-            service.emit(ShellEvent::Exited { id: snapshot.id.clone(), exit: snapshot.exit, status: snapshot.status });
+            service.emit(ShellEvent::Exited { id: snapshot.id.clone(), exit: snapshot.exit, status: snapshot.status, location: None });
             let evict: Vec<String> = {
                 let mut order = service.exit_order.lock();
                 order.push(snapshot.id.clone());
@@ -519,12 +679,29 @@ impl ShellService {
                 service.remove_command(&old);
             }
         });
-        self.emit(ShellEvent::Created { info: info.clone() });
+        self.emit(ShellEvent::Created { info: info.clone(), location: None });
         Ok(info)
     }
 
     /// Hourly sweep of `<data>/shell/*/sh_*.out` files older than 7 days.
     pub fn cleanup(data: &Path) {
+        crate::tool_output::retention_cleanup(&Self::output_files(data), RETENTION);
+    }
+
+    /// [`ShellService::cleanup`], keeping the files of commands the daemon still runs and forgetting finished
+    /// daemon processes whose file is gone or that ended long ago (`Shell.cleanup`). Never starts the daemon.
+    pub async fn cleanup_all(&self) {
+        match self.daemon.get() {
+            Some(daemon) => daemon.cleanup(RETENTION).await,
+            None => {
+                let data = self.data.clone();
+                let _ = tokio::task::spawn_blocking(move || Self::cleanup(&data)).await;
+            }
+        }
+    }
+
+    /// Every `<data>/shell/*/sh_*.out` file.
+    pub fn output_files(data: &Path) -> Vec<PathBuf> {
         let directory = data.join(DIRECTORY);
         let re = regex::Regex::new(r"^sh_[0-9a-f]{12}.*\.out$").unwrap();
         let mut files = Vec::new();
@@ -539,7 +716,7 @@ impl ShellService {
                 }
             }
         }
-        crate::tool_output::retention_cleanup(&files, RETENTION);
+        files
     }
 }
 
@@ -594,6 +771,88 @@ fn split_character(bytes: &[u8], cut: usize, running: bool) -> Option<Split> {
         return (running && valid).then_some(Split { start, end: None });
     }
     None
+}
+
+/// `path.resolve(directory, cwd)`: lexical, no symlinks resolved.
+fn resolve(directory: &str, cwd: &str) -> String {
+    let joined = Path::new(directory).join(cwd);
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if out.parent().is_some() {
+                    out.pop();
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
+fn file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// `countNewlines`: only for a command whose exit report is missing (still running, or lost with the daemon). Gives
+/// up on files over [`super::daemon::COUNT_NEWLINES_LIMIT`].
+fn count_newlines(path: &Path, size: u64) -> Option<u64> {
+    if size == 0 {
+        return Some(0);
+    }
+    if size > super::daemon::COUNT_NEWLINES_LIMIT {
+        return None;
+    }
+    let bytes = read_range(path, 0, size).unwrap_or_default();
+    Some(bytes.iter().filter(|b| **b == b'\n').count() as u64)
+}
+
+/// `lineStartsOf`: where the last two lines start, read back from the end; a start further back than the scan limit
+/// is unknown.
+fn line_starts_of(path: &Path, size: u64) -> [Option<u64>; 2] {
+    let mut starts: Vec<u64> = Vec::new();
+    let mut end = size;
+    let floor = size.saturating_sub(super::result::LINE_START_SCAN_LIMIT);
+    while end > floor && starts.len() < 2 {
+        let from = floor.max(end.saturating_sub(65536));
+        let chunk = read_range(path, from, end - from).unwrap_or_default();
+        for index in (0..chunk.len()).rev() {
+            if starts.len() >= 2 {
+                break;
+            }
+            if chunk[index] == b'\n' {
+                starts.push(from + index as u64 + 1);
+            }
+        }
+        if chunk.is_empty() {
+            break;
+        }
+        end = from;
+    }
+    let unknown = if floor > 0 { None } else { Some(0) };
+    [starts.get(1).copied().or(unknown), starts.first().copied().or(unknown)]
+}
+
+/// The bounded tail of a daemon command's file: the daemon's line count when it reported one, the file's size, and
+/// why it was killed when nothing of its own tells.
+fn daemon_capture(run: &Run, file: &str, max_lines: usize, max_bytes: usize) -> super::result::Capture {
+    let path = Path::new(file);
+    let size = file_size(path);
+    let before = capture_start(size, max_bytes).saturating_sub(1);
+    let window = read_range(path, before, size - before).unwrap_or_default();
+    let newlines = run.output_lines().or_else(|| count_newlines(path, size));
+    let start = capture_start(size, max_bytes);
+    let partial = start > 0 && window.first() != Some(&b'\n');
+    // Only a single cut-off line needs the line starts.
+    let page = &window[1.min(window.len())..];
+    let newlines_in_page = page.iter().filter(|b| **b == b'\n').count();
+    let single = newlines_in_page == 0 || (newlines_in_page == 1 && page.ends_with(b"\n"));
+    let line_starts = if partial && single { line_starts_of(path, size) } else { [None, None] };
+    let tail = Tail { size, newlines, line_starts, stopped_early: run.output_error() };
+    let mut capture = capture_tail_of(&window, &tail, max_lines, max_bytes, file);
+    capture.killed = run.killed();
+    capture
 }
 
 fn read_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
@@ -768,9 +1027,9 @@ mod tests {
             .lock()
             .iter()
             .map(|e| match e {
-                ShellEvent::Created { info } => format!("created {}", info.id == running.id),
+                ShellEvent::Created { info, .. } => format!("created {}", info.id == running.id),
                 ShellEvent::Exited { id, status, .. } => format!("exited {} {status:?}", *id == running.id),
-                ShellEvent::Deleted { id } => format!("deleted {}", *id == running.id),
+                ShellEvent::Deleted { id, .. } => format!("deleted {}", *id == running.id),
             })
             .collect();
         assert_eq!(
