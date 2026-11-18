@@ -1,6 +1,6 @@
 //! `opencode-pty` executable resolution (`persistent-pty/binary.bun.ts`).
 //!
-//! Upstream's compiled build embeds the platform binary from npm `@opencode/pty-<suffix>@0.4.0`
+//! Upstream's compiled build embeds the platform binary from npm `@opencode/pty-<suffix>@0.6.0`
 //! as `{path, version, sha256}` and installs it into
 //! `<global.bin>/opencode-pty/<version>-<sha256[0..16]>/opencode-pty[.exe]`. The Rust port cannot embed
 //! it, so the same bytes are fetched from the npm registry tarball (pinned sha512 `integrity`
@@ -21,16 +21,16 @@ pub fn available() -> bool {
     AVAILABLE
 }
 
-/// Pinned `@opencode/pty` version (`packages/core/package.json`; the package moved from the
-/// `@opencode-ai` scope with 0.3.3, and 0.4.0 adds terminal renaming on the same protocol 7).
-pub const VERSION: &str = "0.4.0";
+/// Pinned `@opencode/pty` version (`packages/core/package.json` of 2.3.1; protocol 9, which adds pipe processes
+/// to the terminals; the package moved from the `@opencode-ai` scope with 0.3.3).
+pub const VERSION: &str = "0.6.0";
 pub const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
 /// Name of the executable (Windows only launches executables with their extension).
 pub const EXECUTABLE: &str = if cfg!(windows) { "opencode-pty.exe" } else { "opencode-pty" };
 /// Path of the executable inside this platform's package tarball.
 pub const TARBALL_ENTRY: &str = if cfg!(windows) { "package/bin/opencode-pty.exe" } else { "package/bin/opencode-pty" };
 
-/// One `@opencode/pty-<suffix>@0.4.0` platform package.
+/// One `@opencode/pty-<suffix>@0.6.0` platform package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformPackage {
     pub suffix: &'static str,
@@ -40,47 +40,47 @@ pub struct PlatformPackage {
     pub sha256: &'static str,
 }
 
-/// `bun.lock` integrity of each 0.4.0 tarball and the sha256 of its installed binary.
+/// `bun.lock` integrity of each 0.6.0 tarball and the sha256 of its installed binary.
 pub const PACKAGES: &[PlatformPackage] = &[
     PlatformPackage {
         suffix: "darwin-arm64",
-        integrity: "sha512-XzZZJcQeR42IRpxHbbPEo4AK7jdp9SpgPx234DZ6uLnl6yclXcixH70G2U88EhKtGAMyCPIXdBfvQf4OQTDvbQ==",
-        sha256: "a274eedcbaed5e38da8f9ed5c2db4a67ee361f03dc54841e18579e57437b114d",
+        integrity: "sha512-KDDVvVVcJJlb5vqtzqs/os1DxNwviKV1iwfjODww9y6qAl/Dx/IFZnqlDjp7sTwrAmX2HnJgqIqhwSii+QFRIw==",
+        sha256: "9a39dc481a87f89019451dacf0f0d8b8652618001b5e1adf7ce66b39efbd2fa4",
     },
     PlatformPackage {
         suffix: "darwin-x64",
-        integrity: "sha512-NvQfygGcsGmDCIUJ/VHLcS6SduC93Y/qP2hrHjtBpiL2sSQyeCDcifNhLvqY/wxGFNNZ4GeZwwZqe7rMEuBJbQ==",
-        sha256: "550c6aef01e158582ded596f59702347c575e2a1c238f93c7ef0e6a031489485",
+        integrity: "sha512-A97X8lI7EvEcLhIEPHi79hKZDlBpjO2hopL0ehphjzzQpoS8iCivY+6lo2+9Lf+B/sAHVQYWE4jqpymdM4l6nw==",
+        sha256: "9d2510f60e2df9e866f9b0e4d8ab7cedf8650a1fd0b2827fdf44717e95a2deb2",
     },
     PlatformPackage {
         suffix: "linux-arm64-gnu",
-        integrity: "sha512-VZXkYD+CT+zdodmTnKn9/VlmswksLPBLJryeBsG4IXUFXTsATr7+PVygJk96FxCh5nq68H3a/UJgyiIUMl1XCQ==",
-        sha256: "ca05a6a599953657ae405299a718c3ea6a859f56be56059e5be4a99487353bc0",
+        integrity: "sha512-XMLczimkpuY1fYxn1UmybhbRt7bvDL33qY3NcJq0xE3mNhFTT75SEneduG+3i56+WmIa2QXLrbvubvOWk/u9CQ==",
+        sha256: "7a0f3fa51d79d0688a2a9fb5a0f2b0676a147653f281e309bbbded511ac99cf4",
     },
     PlatformPackage {
         suffix: "linux-arm64-musl",
-        integrity: "sha512-hCx25Hn9sALdnkx2Y4aPGVw3glTbX61XRiJs+XETPPIO9QTaav4OS4k2JR2uHC6/u161xKdN82iJ+OYfwcGUSg==",
-        sha256: "1e5bdbc5c41967dae6a9fc6a0dbc1f8db28cb87b0002263dd933eae7ac1c4d8e",
+        integrity: "sha512-JjC0D3xhdr0ArDydPg1j0ubo0qypeGPM7fLYbjpvAn3HVgFwdHvhX8DmUqjZHsCtiBVZLGsu5o51vluLLN47/g==",
+        sha256: "3545488a399c55bebaaa185d4aa32ce542f09513d8209990d48b86931c592cbe",
     },
     PlatformPackage {
         suffix: "linux-x64-gnu",
-        integrity: "sha512-Xal/d0+xp6XE4iCGUAw4JTQ4uf5l8V0EIbeKq+e03cHJewOMKZk4fooQjxpZvQIToBHRtnCJAmd+EEhVxXiDDw==",
-        sha256: "637e67684fb4fbb787fdbb98cca22dd93a1146f15dd5206102391676703e99a9",
+        integrity: "sha512-OdeuIfAzBM78DNTBoqcwoDanmlokHg+/wPIIB38QbvTms1mNlbUZhILBOw7ra9EwUfSOy6jfcUlrBFLMKj1aOA==",
+        sha256: "3a781ac5ff8bc189d229149f73a9555c82d4bc8a27c7642240859411cc5f0049",
     },
     PlatformPackage {
         suffix: "linux-x64-musl",
-        integrity: "sha512-dBVtKZoVKAN6/E+65GrJksgRKzPkPHUjWZBzf3mRANXt2adpdbV+/M1AMfPCZSju2mN1j9rNu8MCrxwr+ugEig==",
-        sha256: "cacc8177acd6996483aee46130e39e3bffa78a13f78eb83b23e596eb522ed45c",
+        integrity: "sha512-8Vm4xBxMQZK212ccHdhVtkAgumueVODYJuazsXzw0yOp5jZhuGCNdxSHeTCItM/SuvoVgVV7c0yySrwszTXwTg==",
+        sha256: "0bf6545399c8668e730e3f3320eca89665fb546929020a0b389eea041e0d68ea",
     },
     PlatformPackage {
         suffix: "win32-arm64",
-        integrity: "sha512-IKJMUnS2aluWqRj13enMWomYtwbXq8rStcf/mUbxBoAGTDMtWR/ZrRmKb2ptR7KUqDjdSEa+8C8rczS7uGFl9g==",
-        sha256: "c719e793954b66d916e0d79f2824105c0b696641c02cea0ac1c294b4a983e390",
+        integrity: "sha512-lYPHn9pqM/0dpuDw+aqAx4k88oHEGM4lNvleQf0Pw+LF+aWTQjHtnx3LoUJEKAlYFOuCbNvLUr4SfAKwhPLsGQ==",
+        sha256: "c96c6e2f04ad9b078404c0ef84910161d8f6a110bbec7937f392d88fa1c0ddf5",
     },
     PlatformPackage {
         suffix: "win32-x64",
-        integrity: "sha512-P1QJLUX918/y8he8VEBSYoiN5bYhUnJtEaEpiE5fxoYsDP9nqAHXqIrGxTNNnda5jOBcCalxxy0WhL8qgeKOqQ==",
-        sha256: "d9d46df3f8af645db5a76afda2abdac1f1a4c1d30ff569eea90fdad8ad83ed53",
+        integrity: "sha512-Qb0dqKJyRqe8Q2olfiEc47UybtIUEH12SWag0PkVqDqXabWA3urvcO4+hhD4g/WDkm9F6lPzafiSddtjb2HMtA==",
+        sha256: "3ca87f140ff90483d40c73be836d33a507618a9eac99f95122a7d462b9f441a9",
     },
 ];
 
@@ -160,6 +160,19 @@ impl BinaryResolver {
         }
         let Some(package) = current_package() else { return Ok("opencode-pty".into()) };
         self.install(package).await.map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// The executable when it needs no download: `OPENCODE_PTY_BIN`, the installed pinned binary (validated), or
+    /// `opencode-pty` on `PATH` on targets without a package. `None` when it would have to be downloaded first.
+    pub fn installed(&self) -> Option<String> {
+        if let Some(path) = std::env::var("OPENCODE_PTY_BIN").ok().filter(|v| !v.is_empty()) {
+            return Some(path);
+        }
+        let Some(package) = current_package().filter(|_| AVAILABLE) else {
+            return which::which("opencode-pty").ok().map(|p| p.to_string_lossy().into_owned());
+        };
+        let destination = install_path(&self.bin, VERSION, package.sha256);
+        validate(&destination, package.sha256).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
     /// `install(bin, {version, sha256})`, fetching the bytes from npm when not cached.
@@ -413,11 +426,11 @@ mod tests {
     fn urls_and_paths() {
         assert_eq!(
             tarball_url("https://registry.npmjs.org/", "linux-x64-gnu", VERSION),
-            "https://registry.npmjs.org/@opencode/pty-linux-x64-gnu/-/pty-linux-x64-gnu-0.4.0.tgz"
+            "https://registry.npmjs.org/@opencode/pty-linux-x64-gnu/-/pty-linux-x64-gnu-0.6.0.tgz"
         );
         assert_eq!(
             install_path(Path::new("/c/bin"), VERSION, PACKAGES[4].sha256),
-            PathBuf::from("/c/bin/opencode-pty/0.4.0-637e67684fb4fbb7").join(EXECUTABLE)
+            PathBuf::from("/c/bin/opencode-pty/0.6.0-3a781ac5ff8bc189").join(EXECUTABLE)
         );
         assert_eq!(PACKAGES.len(), 8);
     }

@@ -1,13 +1,16 @@
 //! Client for opencode's persistent terminals (`packages/core/src/persistent-pty/**`).
 //!
-//! Terminals live in the external `opencode-pty` daemon (npm `@opencode/pty@0.4.0`,
-//! protocol 7) so they survive server restarts. [`PersistentPty`] is the service the HTTP
-//! `persistentPty.*` endpoints and the TUI terminal pane use; see `README.md`.
+//! Terminals and pipe processes (shell commands) live in the external `opencode-pty` daemon
+//! (npm `@opencode/pty@0.6.0`, protocol 9) so they survive server restarts. [`PersistentPty`] is
+//! the service the HTTP `persistentPty.*` endpoints, the TUI terminal pane and the shell service
+//! use; see `README.md`.
 
 pub mod binary;
 pub mod daemon;
 pub mod frame;
 pub mod handoff;
+#[cfg(all(unix, feature = "testing"))]
+pub mod testing;
 pub mod types;
 pub mod wire;
 pub mod ws;
@@ -15,6 +18,7 @@ pub mod ws;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
@@ -28,7 +32,10 @@ pub use handoff::Handoff;
 pub use types::{
     BusEvent, CreateInput, Cursor, Info, Output, ReadResult, Screen, Size, Snapshot, Status, UpdateInput, from_id, to_id,
 };
-pub use wire::{Role, StreamEvent};
+pub use wire::{Exited, Lifecycle, ProcessInfo, Role, StreamEvent};
+
+/// Metadata a client stores with a pipe process (`Metadata`).
+pub type Metadata = serde_json::Map<String, Value>;
 
 /// Service errors (`PersistentPty.UnavailableError` / `PersistentPty.NotFoundError`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,10 +49,147 @@ pub enum Error {
     /// `PersistentPty.InvalidCwdError`: maps to HTTP 400 `InvalidRequestError` (`kind: "invalid_cwd"`).
     #[error("{message}")]
     InvalidCwd { cwd: String, message: String },
-    /// `PersistentPty.UnsupportedError`: the running daemon lacks `feature` (HTTP 501
-    /// `PtyFeatureUnsupportedError`).
-    #[error("{feature} is not supported by the running terminal service")]
-    Unsupported { feature: String },
+}
+
+/// Errors of the pipe-process methods.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PipeError {
+    /// `PersistentPty.UnavailableError`: the daemon could not be reached or started; the request never ran, so
+    /// running the command some other way is safe.
+    #[error("{0}")]
+    Unavailable(String),
+    /// `PersistentPty.RequestError`: the daemon rejected the request, or its reply was lost after it was sent, so
+    /// it may have run.
+    #[error("{0}")]
+    Request(String),
+    /// `PersistentPty.ProcessNotFoundError`: an unknown id, a terminal, or no daemon running.
+    #[error("opencode-pty process {0} not found")]
+    NotFound(u64),
+}
+
+/// Only a failure before the request was sent is safe to retry somewhere else (`pipeError`).
+fn pipe_error(error: DaemonError) -> PipeError {
+    match error.kind {
+        ErrorKind::Request | ErrorKind::Response => PipeError::Request(error.message),
+        _ => PipeError::Unavailable(error.message),
+    }
+}
+
+fn unexpected_pipe(response: &wire::WireResponse) -> PipeError {
+    PipeError::Request(format!("unexpected opencode-pty response: {}", response.type_name()))
+}
+
+/// A signal for a pipe process (`Signal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Term,
+    Int,
+    Kill,
+}
+
+impl Signal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Signal::Term => "SIGTERM",
+            Signal::Int => "SIGINT",
+            Signal::Kill => "SIGKILL",
+        }
+    }
+}
+
+/// How a pipe process stands (`PipeInfo.lifecycle`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipeLifecycle {
+    Running,
+    Exited { exit_code: Option<u64>, signal: Option<String> },
+    Failed { message: String },
+}
+
+/// A non-PTY process run by the daemon, its output written to `output_path` (`PipeInfo`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeInfo {
+    pub id: u64,
+    pub pid: Option<u64>,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub group_id: String,
+    pub lifecycle: PipeLifecycle,
+    /// Bytes counted so far; the file can hold a little more. Pair only bytes up to here with `output_lines`.
+    pub output_tail: u64,
+    pub output_lines: u64,
+    pub output_path: String,
+    pub output_error: Option<String>,
+    pub metadata: Metadata,
+    pub started_at: u64,
+    pub exited_at: Option<u64>,
+}
+
+impl PipeInfo {
+    /// `toPipeInfo`; `None` for a terminal.
+    pub fn from_wire(value: &ProcessInfo) -> Option<Self> {
+        let pipe = value.pipe.as_ref()?;
+        Some(PipeInfo {
+            id: value.id,
+            pid: value.pid,
+            command: value.command.clone(),
+            cwd: value.cwd.clone(),
+            group_id: value.group_id.clone(),
+            lifecycle: match &value.lifecycle {
+                Lifecycle::Running => PipeLifecycle::Running,
+                Lifecycle::Exited { exit_code, signal } => {
+                    PipeLifecycle::Exited { exit_code: *exit_code, signal: signal.clone() }
+                }
+                Lifecycle::Failed { message } => PipeLifecycle::Failed { message: message.clone() },
+            },
+            output_tail: value.output_tail,
+            output_lines: pipe.output_lines,
+            output_path: pipe.output_path.clone(),
+            output_error: pipe.output_error.clone(),
+            metadata: pipe.metadata.clone(),
+            started_at: value.started_at,
+            exited_at: value.exited_at,
+        })
+    }
+}
+
+/// How a pipe process ended (`PipeExit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeExit {
+    pub exit_code: Option<u64>,
+    pub signal: Option<String>,
+    /// Runs past the file's size when `output_error` is set; use the file's real size instead.
+    pub final_offset: u64,
+    pub output_lines: u64,
+    pub output_error: Option<String>,
+    pub exited_at: u64,
+}
+
+impl From<Exited> for PipeExit {
+    fn from(value: Exited) -> Self {
+        PipeExit {
+            exit_code: value.exit_code,
+            signal: value.signal,
+            final_offset: value.final_offset,
+            output_lines: value.output_lines.unwrap_or(0),
+            output_error: value.output_error,
+            exited_at: value.exited_at,
+        }
+    }
+}
+
+/// `CreatePipeInput`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePipeInput {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Absolute.
+    pub cwd: String,
+    /// The child's whole environment; the daemon's own is not inherited.
+    pub env: HashMap<String, String>,
+    pub group_id: String,
+    /// Absolute; truncated on open, symlinks refused.
+    pub output_path: String,
+    pub metadata: Metadata,
 }
 
 /// Node `path.resolve(input)`: joined onto the process cwd when relative, then normalized
@@ -165,6 +309,13 @@ struct Inner {
     current: Mutex<HashMap<String, String>>,
     removing: Mutex<HashSet<String>>,
     shell: ShellFn,
+    /// When the prepared handoff's ticket expires (ms); 0 when none is prepared.
+    handoff_expires_at: AtomicI64,
+    /// The resolver behind the default binary; `None` when the binary was injected.
+    resolver: Option<BinaryResolver>,
+    /// Set once the binary was found without a download.
+    installed: std::sync::OnceLock<()>,
+    prefetching: std::sync::atomic::AtomicBool,
 }
 
 /// The persistent PTY service (`PersistentPty.Service`). Cheap to clone.
@@ -178,10 +329,11 @@ impl PersistentPty {
     /// old daemon is abandoned). Never fails; the daemon is spawned lazily on first `create`.
     pub async fn new(global: &oc_util::Global, options: Options) -> Self {
         let root = options.root.clone().unwrap_or_else(|| global.state.join("pty"));
-        let binary = options.binary.clone().unwrap_or_else(|| {
-            let resolver = BinaryResolver::new(global.bin.clone(), options.http.clone().unwrap_or_else(oc_util::http::client));
-            memoized_binary(resolver)
-        });
+        let resolver = options
+            .binary
+            .is_none()
+            .then(|| BinaryResolver::new(global.bin.clone(), options.http.clone().unwrap_or_else(oc_util::http::client)));
+        let binary = options.binary.clone().unwrap_or_else(|| memoized_binary(resolver.clone().expect("default resolver")));
         let shell = options.shell.clone().unwrap_or_else(|| {
             let bin = global.bin.clone();
             Arc::new(move || shell_environment(&bin))
@@ -196,6 +348,10 @@ impl PersistentPty {
                 current: Mutex::new(HashMap::new()),
                 removing: Mutex::new(HashSet::new()),
                 shell,
+                handoff_expires_at: AtomicI64::new(0),
+                resolver,
+                installed: std::sync::OnceLock::new(),
+                prefetching: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -203,6 +359,43 @@ impl PersistentPty {
     /// `available` (true on every platform since 2.1; reported as `capabilities.persistentPty`).
     pub fn available(&self) -> bool {
         AVAILABLE
+    }
+
+    /// Whether pipe processes can run in the daemon without downloading its binary first: a daemon is running, the
+    /// binary was injected, or it is installed (see [`BinaryResolver::installed`]). Upstream embeds the binary, so
+    /// its `available` is always true; the port downloads it once (on the first terminal, or [`Self::prefetch`]).
+    pub fn pipes_available(&self) -> bool {
+        if self.inner.installed.get().is_some() || self.inner.daemon.is_owner() {
+            return true;
+        }
+        let found = match &self.inner.resolver {
+            None => true,
+            Some(resolver) => resolver.installed().is_some(),
+        };
+        if found {
+            let _ = self.inner.installed.set(());
+        }
+        found
+    }
+
+    /// Downloads and installs the pinned binary in the background when it is missing, so later shell commands run
+    /// in the daemon. At most once per process; failures are only logged.
+    pub fn prefetch(&self) {
+        if self.pipes_available() || self.inner.prefetching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(resolver) = self.inner.resolver.clone() else { return };
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            match resolver.resolve().await {
+                Ok(_) => {
+                    if let Some(inner) = weak.upgrade() {
+                        let _ = inner.installed.set(());
+                    }
+                }
+                Err(error) => tracing::warn!(error = %error, "failed to install opencode-pty"),
+            }
+        });
     }
 
     /// `persistent-pty.added` / `persistent-pty.removed` events.
@@ -230,20 +423,42 @@ impl PersistentPty {
 
     /// `list(sessionID?)`: `[]` when no daemon is running.
     pub async fn list(&self, session_id: Option<&str>) -> Result<Vec<Info>> {
-        let Some(response) = self.inner.daemon.request_if_running(json!({ "op": "list" })).await? else {
+        let Some(response) = self.inner.daemon.request_if_running(json!({ "op": "list", "mode": "pty" })).await? else {
             return Ok(Vec::new());
         };
-        let wire::WireResponse::Terminals { terminals } = &response else { return Err(unexpected(&response)) };
-        Ok(terminals
+        let wire::WireResponse::Processes { processes } = &response else { return Err(unexpected(&response)) };
+        Ok(processes
             .iter()
             .map(Info::from_wire)
             .filter(|t| session_id.is_none_or(|s| t.session_id == s))
             .collect())
     }
 
-    /// `get(id)`.
+    /// `get(id)`. Any ID that is not one of ours names no terminal; every other method looks the terminal up here
+    /// first.
     pub async fn get(&self, id: &str) -> Result<Info> {
-        self.list(None).await?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(id.to_string()))
+        let found = match parse_id(id) {
+            Some(parsed) => self.lookup(parsed).await.map_err(|error| Error::Unavailable(error.message))?,
+            None => None,
+        };
+        match found {
+            Some(process) if process.mode == wire::Mode::Pty => Ok(Info::from_wire(&process)),
+            _ => Err(Error::NotFound(id.to_string())),
+        }
+    }
+
+    /// `lookup`: `get` fails only for an unknown id, and no running daemon has no processes.
+    async fn lookup(&self, id: u64) -> std::result::Result<Option<ProcessInfo>, DaemonError> {
+        match self.inner.daemon.request_if_running(json!({ "op": "get", "id": id })).await {
+            Ok(None) => Ok(None),
+            Ok(Some(wire::WireResponse::Process { process })) => Ok(Some(process)),
+            Ok(Some(other)) => Err(DaemonError::new(
+                ErrorKind::Response,
+                format!("unexpected opencode-pty response: {}", other.type_name()),
+            )),
+            Err(error) if error.kind == ErrorKind::Request => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn wire_id(id: &str) -> Result<u64> {
@@ -261,7 +476,7 @@ impl PersistentPty {
         let response = self
             .request(
                 json!({
-                    "op": "create",
+                    "op": "create_pty",
                     "program": program,
                     "args": input.args,
                     "cwd": cwd,
@@ -274,8 +489,8 @@ impl PersistentPty {
                 true,
             )
             .await?;
-        let wire::WireResponse::Created { terminal } = &response else { return Err(unexpected(&response)) };
-        let terminal = Info::from_wire(terminal);
+        let wire::WireResponse::Created { process } = &response else { return Err(unexpected(&response)) };
+        let terminal = Info::from_wire(process);
         self.publish(BusEvent::Added { session_id: session_id.to_string(), terminal: terminal.clone() });
         Ok(terminal)
     }
@@ -366,7 +581,7 @@ impl PersistentPty {
     pub async fn snapshot(&self, id: &str) -> Result<Snapshot> {
         self.get(id).await?;
         let response = self.request(json!({ "op": "snapshot", "id": Self::wire_id(id)? }), false).await?;
-        let wire::WireResponse::Snapshot { terminal, text, checkpoint_base64, cursor_x, cursor_y } = response else {
+        let wire::WireResponse::Snapshot { process: terminal, text, checkpoint_base64, cursor_x, cursor_y } = response else {
             return Err(unexpected(&response));
         };
         Ok(Snapshot {
@@ -402,7 +617,7 @@ impl PersistentPty {
             request["rows"] = lines.into();
         }
         let response = self.request(request, false).await?;
-        let wire::WireResponse::Rows { terminal, lines, cursor_x, cursor_y } = response else {
+        let wire::WireResponse::Rows { process: terminal, lines, cursor_x, cursor_y } = response else {
             return Err(unexpected(&response));
         };
         let info = Info::from_wire(&terminal);
@@ -436,12 +651,8 @@ impl PersistentPty {
     }
 
     /// `rename(id, title)`: sets (or with `None` clears) the user title; publishes `persistent-pty.updated`.
-    /// Daemons without the feature drop the connection on unknown requests, so it is checked first.
     pub async fn rename(&self, id: &str, title: Option<&str>) -> Result<Info> {
         let terminal = self.get(id).await?;
-        if !self.inner.daemon.supports("rename").await? {
-            return Err(Error::Unsupported { feature: "rename".into() });
-        }
         let response = self.request(json!({ "op": "rename", "id": Self::wire_id(id)?, "title": title }), false).await?;
         Self::expect_ok(response)?;
         let renamed = self.get(id).await?;
@@ -473,6 +684,7 @@ impl PersistentPty {
 
     /// `shutdown()`: stop the daemon and all terminals (explicit restart/stop/uninstall).
     pub async fn shutdown(&self) -> Result<()> {
+        self.inner.handoff_expires_at.store(0, Ordering::SeqCst);
         let response = self.inner.daemon.shutdown().await?;
         self.inner.current.lock().clear();
         match response {
@@ -483,7 +695,89 @@ impl PersistentPty {
 
     /// `handoff()`: prepare a restart handoff; `None` when no daemon is owned.
     pub async fn handoff(&self) -> Result<Option<Handoff>> {
-        Ok(self.inner.daemon.handoff().await?)
+        let prepared = self.inner.daemon.handoff().await?;
+        if let Some(handoff) = &prepared {
+            self.inner.handoff_expires_at.store(handoff.expires_at, Ordering::SeqCst);
+        }
+        Ok(prepared)
+    }
+
+    /// `handoffPrepared()`: whether a handoff to the next server is prepared and its ticket still valid. This
+    /// server is being replaced, so the daemon's processes should be left running for the next one. A shutdown
+    /// clears it.
+    pub fn handoff_prepared(&self) -> bool {
+        daemon::now_ms() < self.inner.handoff_expires_at.load(Ordering::SeqCst)
+    }
+
+    /// `createPipe(input)`: starts the daemon if needed. Fall back to another spawner only on
+    /// [`PipeError::Unavailable`].
+    pub async fn create_pipe(&self, input: CreatePipeInput) -> std::result::Result<PipeInfo, PipeError> {
+        let response = self
+            .inner
+            .daemon
+            .request(
+                json!({
+                    "op": "create_pipe",
+                    "program": input.program,
+                    "args": input.args,
+                    "cwd": input.cwd,
+                    "env": input.env,
+                    "group_id": input.group_id,
+                    "output_path": input.output_path,
+                    "metadata": input.metadata,
+                }),
+                true,
+            )
+            .await
+            .map_err(pipe_error)?;
+        match &response {
+            wire::WireResponse::Created { process } => PipeInfo::from_wire(process).ok_or_else(|| unexpected_pipe(&response)),
+            _ => Err(unexpected_pipe(&response)),
+        }
+    }
+
+    /// `waitPipe(id)`: resolves when the process exits, on its own connection with no timeout; dropping the future
+    /// closes it.
+    pub async fn wait_pipe(&self, id: u64) -> std::result::Result<PipeExit, PipeError> {
+        self.inner.daemon.wait(id).await.map(PipeExit::from).map_err(pipe_error)
+    }
+
+    /// `getPipe(id)`: [`PipeError::NotFound`] for an unknown id, a terminal, or when no daemon is running.
+    pub async fn get_pipe(&self, id: u64) -> std::result::Result<PipeInfo, PipeError> {
+        let found = self.lookup(id).await.map_err(|error| PipeError::Unavailable(error.message))?;
+        found.as_ref().and_then(PipeInfo::from_wire).ok_or(PipeError::NotFound(id))
+    }
+
+    async fn pipe_command(&self, value: Value) -> std::result::Result<(), PipeError> {
+        let response = self.inner.daemon.request(value, false).await.map_err(pipe_error)?;
+        if response == wire::WireResponse::Ok { Ok(()) } else { Err(unexpected_pipe(&response)) }
+    }
+
+    /// `signalPipe(id, signal)`: signals the process group without forgetting the process; `wait_pipe` then reports
+    /// the signal.
+    pub async fn signal_pipe(&self, id: u64, signal: Signal) -> std::result::Result<(), PipeError> {
+        self.pipe_command(json!({ "op": "signal", "id": id, "signal": signal.as_str() })).await
+    }
+
+    /// `setPipeMetadata(id, metadata)`: replaces the stored metadata.
+    pub async fn set_pipe_metadata(&self, id: u64, metadata: Metadata) -> std::result::Result<(), PipeError> {
+        self.pipe_command(json!({ "op": "set_metadata", "id": id, "metadata": metadata })).await
+    }
+
+    /// `terminatePipe(id)`: kills the process if it still runs and forgets it; the output file is left alone.
+    pub async fn terminate_pipe(&self, id: u64) -> std::result::Result<(), PipeError> {
+        self.pipe_command(json!({ "op": "terminate", "id": id })).await
+    }
+
+    /// `listPipes()`: never starts the daemon; empty when none is running.
+    pub async fn list_pipes(&self) -> std::result::Result<Vec<PipeInfo>, PipeError> {
+        let response =
+            self.inner.daemon.request_if_running(json!({ "op": "list", "mode": "pipe" })).await.map_err(pipe_error)?;
+        match response {
+            None => Ok(Vec::new()),
+            Some(wire::WireResponse::Processes { processes }) => Ok(processes.iter().filter_map(PipeInfo::from_wire).collect()),
+            Some(other) => Err(unexpected_pipe(&other)),
+        }
     }
 
     /// `attach(id, input)`: subscribe with replay from `cursor`. Call [`Attachment::activate`]
@@ -504,8 +798,9 @@ impl PersistentPty {
                 },
             )
             .await?;
+        let info = Info::from_wire(&attachment.terminal);
         if attachment.role == Role::Controller {
-            self.inner.current.lock().insert(attachment.terminal.group_id.clone(), id.to_string());
+            self.inner.current.lock().insert(info.session_id.clone(), id.to_string());
         }
         let weak = Arc::downgrade(&self.inner);
         let pty_id = id.to_string();
@@ -515,7 +810,7 @@ impl PersistentPty {
             }
         });
         Ok(Attachment {
-            info: Info::from_wire(&attachment.terminal),
+            info,
             role: attachment.role,
             generation: attachment.generation,
             replay: attachment.replay.clone(),
@@ -523,6 +818,11 @@ impl PersistentPty {
             hook,
         })
     }
+}
+
+/// `parseID`: the daemon id of one of our terminal IDs.
+fn parse_id(value: &str) -> Option<u64> {
+    from_id(value).ok()
 }
 
 /// `removeVisibleExit`: background, de-duplicated removal of a terminal seen exiting.

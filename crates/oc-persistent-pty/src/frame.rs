@@ -8,8 +8,8 @@
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// `ProtocolVersion` (`daemon.ts:8`).
-pub const PROTOCOL_VERSION: u64 = 7;
+/// `ProtocolVersion` (`daemon.ts:9`).
+pub const PROTOCOL_VERSION: u64 = 9;
 /// `MaxFrameBytes` (`daemon.ts:9`).
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// First byte of a binary subscription output frame.

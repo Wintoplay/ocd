@@ -265,8 +265,7 @@ unsafe extern "C" {
     fn libc_kill(pid: i32, signal: i32) -> i32;
 }
 
-/// Renaming against the real daemon: a 0.4.0 daemon reports the `rename` feature and keeps the user title; an
-/// older one (`OPENCODE_PTY_EXPECT_RENAME=0`, e.g. 0.3.3) is refused before anything is sent.
+/// Renaming against the real daemon keeps the user title.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn real_daemon_rename_and_remove_session() {
@@ -277,21 +276,73 @@ async fn real_daemon_rename_and_remove_session() {
     let input = CreateInput { command: Some("/bin/sh".into()), cwd: Some("/tmp".into()), title: "Terminal".into(), ..Default::default() };
     let info = pty.create("ses_rename", input).await.expect("create");
     assert_eq!(info.user_title, None);
-    let expect_rename = std::env::var("OPENCODE_PTY_EXPECT_RENAME").map(|v| v != "0").unwrap_or(true);
-    assert_eq!(pty.daemon().supports("rename").await.unwrap(), expect_rename);
-    if expect_rename {
-        let renamed = pty.rename(&info.id, Some("Build")).await.expect("rename");
-        assert_eq!(renamed.user_title.as_deref(), Some("Build"));
-        assert_eq!(pty.get(&info.id).await.unwrap().user_title.as_deref(), Some("Build"));
-        assert_eq!(pty.rename(&info.id, None).await.unwrap().user_title, None);
-    } else {
-        let error = pty.rename(&info.id, Some("Build")).await.unwrap_err();
-        assert_eq!(error, oc_persistent_pty::Error::Unsupported { feature: "rename".into() });
-        // The daemon is still reachable: the request was never sent.
-        assert_eq!(pty.list(Some("ses_rename")).await.unwrap().len(), 1);
-    }
+    let renamed = pty.rename(&info.id, Some("Build")).await.expect("rename");
+    assert_eq!(renamed.user_title.as_deref(), Some("Build"));
+    assert_eq!(pty.get(&info.id).await.unwrap().user_title.as_deref(), Some("Build"));
+    assert_eq!(pty.rename(&info.id, None).await.unwrap().user_title, None);
     pty.remove_session("ses_rename").await;
     assert!(pty.list(Some("ses_rename")).await.unwrap().is_empty());
+    pty.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Pipe processes against the real daemon: output file and line count, exit, the signal of a stopped process, the
+/// process-group kill after a failed exit, metadata, list/get/terminate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn real_daemon_pipes() {
+    use oc_persistent_pty::{CreatePipeInput, PipeLifecycle, Signal};
+    let root = std::env::temp_dir().join(format!("ocpty-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    std::fs::create_dir_all(&root).unwrap();
+    let exe = binary(&root).await;
+    let pty = PersistentPty::new(&global(&root), Options { binary: Some(fixed(exe)), ..Default::default() }).await;
+    let env: std::collections::HashMap<String, String> =
+        [("PATH".to_string(), std::env::var("PATH").unwrap_or_default()), ("NAME".to_string(), "pipe".to_string())].into();
+    let input = |command: &str, out: &str| CreatePipeInput {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), command.into()],
+        cwd: root.to_string_lossy().into_owned(),
+        env: env.clone(),
+        group_id: "proj".into(),
+        output_path: root.join(out).to_string_lossy().into_owned(),
+        metadata: serde_json::json!({"id": out}).as_object().cloned().unwrap(),
+    };
+    let created = pty.create_pipe(input("echo out $NAME; echo err 1>&2; exit 3", "a.out")).await.expect("create_pipe");
+    assert!(created.pid.is_some());
+    let exit = pty.wait_pipe(created.id).await.expect("wait");
+    assert_eq!((exit.exit_code, exit.signal.clone(), exit.output_lines), (Some(3), None, 2));
+    assert_eq!(std::fs::read_to_string(root.join("a.out")).unwrap(), "out pipe\nerr\n");
+    let info = pty.get_pipe(created.id).await.unwrap();
+    assert_eq!(info.lifecycle, PipeLifecycle::Exited { exit_code: Some(3), signal: None });
+    assert_eq!(info.metadata["id"], "a.out");
+    assert!(info.exited_at.is_some_and(|at| at >= info.started_at));
+    // Signalling an exited process is a no-op.
+    pty.signal_pipe(created.id, Signal::Term).await.unwrap();
+
+    let sleeping = pty.create_pipe(input("echo started; exec sleep 30", "b.out")).await.unwrap();
+    pty.set_pipe_metadata(sleeping.id, serde_json::json!({"stopReason": "killed"}).as_object().cloned().unwrap()).await.unwrap();
+    assert_eq!(pty.list_pipes().await.unwrap().len(), 2);
+    pty.signal_pipe(sleeping.id, Signal::Term).await.unwrap();
+    let exit = pty.wait_pipe(sleeping.id).await.unwrap();
+    assert_eq!((exit.exit_code, exit.signal.as_deref()), (None, Some("SIGTERM")));
+    assert_eq!(pty.get_pipe(sleeping.id).await.unwrap().metadata["stopReason"], "killed");
+
+    // A failed command's leftover background processes get SIGTERM from the daemon.
+    let marker = root.join("child.pid");
+    let leftover = format!("sleep 30 & echo $! > '{}'; exit 1", marker.display());
+    let failed = pty.create_pipe(input(&leftover, "c.out")).await.unwrap();
+    assert_eq!(pty.wait_pipe(failed.id).await.unwrap().exit_code, Some(1));
+    let child: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while unsafe { libc_kill(child, 0) } == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the failed command's process group survived");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    for pipe in pty.list_pipes().await.unwrap() {
+        pty.terminate_pipe(pipe.id).await.unwrap();
+    }
+    assert!(pty.list_pipes().await.unwrap().is_empty());
     pty.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

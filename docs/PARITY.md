@@ -318,6 +318,11 @@ build's database file name), `stop_retry_exhausted` and `loop_http_400` (upstrea
 (Effect's scheduler), the same five as against 2.2.7. The normalizer now masks 2.3.x versions and the shell PID
 inside `run --format json` lines.
 
+**Process daemon 0.6.0 (2026-11-18):** the harness installs the 0.6.0 `opencode-pty` from a 2.3.x checkout at
+`<cache>/opencode/bin/opencode-pty/0.6.0-3a781ac5ff8bc189/` for every scenario, where upstream 2.3.1 puts its embedded
+copy, so both binaries run terminals (and, since the 2.3.1 catch-up, shell commands) in the same daemon without a
+download. `session225_terminal_rename_and_delete` is identical against the 2.3.1 build.
+
 **Run after closing the 2.2.7 gaps (debug build, 2026-11-15):** all 216 scenarios against a fresh local v2.2.7
 build: **211 of 216 identical**, including the new `acp` (3), `local` (5) and `plugin_skill_files` scenarios. Left:
 the same five as the final run below (`cli_help`, `cli_inventory`, `stop_retry_exhausted`, `loop_http_400`,

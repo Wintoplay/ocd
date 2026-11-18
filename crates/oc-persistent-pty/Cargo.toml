@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# `testing`: an in-process fake daemon for other crates' tests.
+testing = []
+
 [dependencies]
 oc-util = { path = "../oc-util" }
 tokio.workspace = true
@@ -23,3 +27,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+oc-persistent-pty = { path = ".", features = ["testing"] }

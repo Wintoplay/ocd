@@ -1,154 +1,33 @@
-//! Transport behavior against an in-process fake daemon speaking protocol 7 over a Unix socket.
+//! Transport and service behaviour against the in-process protocol-9 fake (`oc_persistent_pty::testing`), ported
+//! from upstream's `persistent-pty-daemon.test.ts` and `persistent-pty-session.test.ts`.
 
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use oc_persistent_pty::frame::{FrameReader, encode, encode_payload, output_frame_payload};
-use oc_persistent_pty::{AttachInput, BinaryFn, Options, PersistentPty, Role, StreamEvent};
-use parking_lot::Mutex;
+use oc_persistent_pty::testing::{FakeDaemon, PID};
+use oc_persistent_pty::{
+    AttachInput, BinaryFn, CreatePipeInput, DaemonTransport, ErrorKind, Options, PersistentPty, PipeError, PipeLifecycle,
+    Role, Signal, StreamEvent,
+};
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
 
-#[derive(Default)]
-struct Fake {
-    token: Mutex<String>,
-    protocol: Mutex<u64>,
-    pong_pid: Mutex<Option<u64>>,
-    /// Fail the next N non-ping requests with "authentication failed" (and rotate the token).
-    auth_failures: AtomicUsize,
-    requests: Mutex<Vec<Value>>,
-    owner_close: Notify,
-    /// `features` the daemon reports in its pong (`None`: a pre-0.4.0 daemon that omits the field).
-    features: Mutex<Option<Vec<String>>>,
-    /// User titles set by `rename`.
-    titles: Mutex<std::collections::HashMap<u64, Value>>,
-}
-
-const PID: u64 = 4242;
-
-fn terminal(id: u64, group: &str) -> Value {
-    json!({
-        "id": id, "pid": 99, "title": "Terminal", "foreground_process": null, "group_id": group,
-        "command": ["/bin/sh"], "cwd": "/", "cols": 80, "rows": 24,
-        "lifecycle": {"status": "running"}, "output_head": 0, "output_tail": 5
-    })
-}
-
-fn write_registration(directory: &Path, fake: &Fake, socket: &Path) {
-    std::fs::create_dir_all(directory).unwrap();
-    let registration = json!({
-        "instance_id": "inst-1", "pid": PID, "protocol": *fake.protocol.lock(),
-        "socket": socket.to_string_lossy(), "token": *fake.token.lock(),
-    });
-    std::fs::write(directory.join("service.json"), registration.to_string()).unwrap();
-}
-
-async fn start_fake(directory: PathBuf, fake: Arc<Fake>) -> PathBuf {
-    let socket = std::env::temp_dir().join(format!("ocpty-fake-{}.sock", uuid::Uuid::new_v4()));
-    let listener = UnixListener::bind(&socket).unwrap();
-    write_registration(&directory, &fake, &socket);
-    let socket_path = socket.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
-            let fake = fake.clone();
-            let directory = directory.clone();
-            let socket_path = socket_path.clone();
-            tokio::spawn(async move { handle(stream, fake, directory, socket_path).await });
-        }
-    });
-    socket
-}
-
-async fn send(stream: &mut UnixStream, value: Value) {
-    stream.write_all(&encode(&value).unwrap()).await.unwrap();
-}
-
-async fn handle(mut stream: UnixStream, fake: Arc<Fake>, directory: PathBuf, socket: PathBuf) {
-    let (read, mut write) = stream.split();
-    let mut reader = FrameReader::new(read);
-    let Ok(Some(frame)) = reader.next().await else { return };
-    let envelope: Value = serde_json::from_slice(&frame).unwrap();
-    let request = envelope["request"].clone();
-    let op = request["op"].as_str().unwrap_or_default().to_string();
-    if op != "ping" && fake.auth_failures.load(Ordering::SeqCst) > 0 {
-        fake.auth_failures.fetch_sub(1, Ordering::SeqCst);
-        *fake.token.lock() = "rotated".into();
-        write_registration(&directory, &fake, &socket);
-        write.write_all(&encode(&json!({"type": "error", "message": "authentication failed"})).unwrap()).await.unwrap();
-        return;
-    }
-    if envelope["token"] != Value::String(fake.token.lock().clone()) {
-        write.write_all(&encode(&json!({"type": "error", "message": "authentication failed"})).unwrap()).await.unwrap();
-        return;
-    }
-    fake.requests.lock().push(request.clone());
-    match op.as_str() {
-        "ping" => {
-            let pid = fake.pong_pid.lock().unwrap_or(PID);
-            let mut pong = json!({"type": "pong", "instance_id": "inst-1", "pid": pid, "protocol": 7});
-            if let Some(features) = fake.features.lock().clone() {
-                pong["features"] = json!(features);
-            }
-            send(&mut stream, pong).await;
-        }
-        "rename" => {
-            let id = request["id"].as_u64().unwrap();
-            fake.titles.lock().insert(id, request["title"].clone());
-            send(&mut stream, json!({"type": "ok"})).await;
-        }
-        "own" => {
-            send(&mut stream, json!({"type": "owned"})).await;
-            let (read, mut write) = stream.split();
-            let mut reader = FrameReader::new(read);
-            loop {
-                tokio::select! {
-                    _ = fake.owner_close.notified() => return,
-                    frame = reader.next() => {
-                        let Ok(Some(frame)) = frame else { return };
-                        let envelope: Value = serde_json::from_slice(&frame).unwrap();
-                        fake.requests.lock().push(envelope["request"].clone());
-                        let response = json!({"type": "handoff", "ticket": "tick", "expires_at": 1_900_000_000_000u64});
-                        write.write_all(&encode(&response).unwrap()).await.unwrap();
-                    }
-                }
-            }
-        }
-        "list" => {
-            let titled = |id: u64, group: &str| {
-                let mut t = terminal(id, group);
-                if let Some(title) = fake.titles.lock().get(&id) {
-                    t["user_title"] = title.clone();
-                }
-                t
-            };
-            let terminals = json!([titled(1, "ses_a"), titled(2, "ses_b"), titled(3, "ses_a")]);
-            send(&mut stream, json!({"type": "terminals", "terminals": terminals})).await
-        }
-        "subscribe" => {
-            let attached = json!({
-                "type": "attached", "terminal": terminal(1, "ses_a"), "role": request["role"], "generation": 1,
-                "requested_offset": request["offset"], "available_offset": 0, "end_offset": 5, "truncated": false,
-                "replay_base64": "aGVsbG8="
-            });
-            send(&mut stream, attached).await;
-            stream.write_all(&encode_payload(&output_frame_payload(5, 8, b"abc")).unwrap()).await.unwrap();
-            send(&mut stream, json!({"type": "title_changed", "title": "vim"})).await;
-            send(&mut stream, json!({"type": "ok"})).await; // ignored by the pump
-            send(&mut stream, json!({"type": "exited", "exit_code": 0, "final_offset": 8})).await;
-        }
-        "terminate" | "write" | "resize" | "control" | "input" => send(&mut stream, json!({"type": "ok"})).await,
-        _ => send(&mut stream, json!({"type": "error", "message": format!("unsupported {op}")})).await,
-    }
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }
 
 fn no_spawn() -> BinaryFn {
     Arc::new(|| Box::pin(async { Err("spawning disabled in tests".to_string()) }))
+}
+
+fn binary(path: PathBuf) -> BinaryFn {
+    Arc::new(move || {
+        let path = path.to_string_lossy().into_owned();
+        Box::pin(async move { Ok(path) })
+    })
 }
 
 async fn service(root: &Path, id: &str) -> PersistentPty {
@@ -162,10 +41,33 @@ async fn service(root: &Path, id: &str) -> PersistentPty {
     .await
 }
 
+async fn transport(root: &Path, id: &str) -> DaemonTransport {
+    DaemonTransport::new(root.to_path_buf(), id.into(), no_spawn(), None).await
+}
+
 fn temp_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!("ocpty-fake-root-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     root
+}
+
+async fn poll(ready: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ready(), "condition never held");
+}
+
+/// A fake with the three terminals the service tests use (ses_a: 1 and 3, ses_b: 2).
+async fn with_terminals(directory: PathBuf) -> Arc<FakeDaemon> {
+    let fake = FakeDaemon::start(directory).await;
+    fake.add_terminal("ses_a");
+    fake.add_terminal("ses_b");
+    fake.add_terminal("ses_a");
+    fake
 }
 
 #[tokio::test]
@@ -175,51 +77,124 @@ async fn list_without_daemon_is_empty_and_create_reports_spawn_failure() {
     assert!(pty.list(None).await.unwrap().is_empty());
     let err = pty.create("ses", Default::default()).await.unwrap_err();
     assert_eq!(err, oc_persistent_pty::Error::Unavailable("spawning disabled in tests".into()));
-    // The failed spawn moved to a fresh runtime directory.
-    assert_ne!(pty.daemon().id(), "absent");
+    // A binary that cannot be spawned fails the same way again, so no fresh directory is tried.
+    assert_eq!(pty.daemon().id(), "absent");
+    // Without a daemon there are no pipes, and none is started for that.
+    assert!(matches!(pty.list_pipes().await, Ok(list) if list.is_empty()));
+    assert!(matches!(pty.get_pipe(1).await, Err(PipeError::NotFound(1))));
 }
 
 #[tokio::test]
 async fn protocol_and_registration_mismatches() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 6;
-    start_fake(root.join("d1"), fake.clone()).await;
+    let fake = FakeDaemon::start(root.join("d1")).await;
+    fake.state.lock().protocol = 7;
+    fake.write_registration();
     let pty = service(&root, "d1").await;
     let err = pty.daemon().discover(None).await.unwrap_err();
-    assert_eq!(err.message, "opencode-pty protocol mismatch: daemon=6, client=7");
+    assert_eq!(err.message, "opencode-pty protocol mismatch: daemon=7, client=9");
     assert_eq!(err.pid, Some(PID));
     // Protocol errors are not "connect" errors: list surfaces them.
-    assert_eq!(pty.list(None).await.unwrap_err().to_string(), "opencode-pty protocol mismatch: daemon=6, client=7");
+    assert_eq!(pty.list(None).await.unwrap_err().to_string(), "opencode-pty protocol mismatch: daemon=7, client=9");
 
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    *fake.pong_pid.lock() = Some(1);
-    start_fake(root.join("d2"), fake).await;
+    let fake = FakeDaemon::start(root.join("d2")).await;
+    fake.state.lock().pong_pid = Some(1);
     let pty = service(&root, "d2").await;
     assert_eq!(pty.daemon().discover(None).await.unwrap_err().message, "opencode-pty registration mismatch");
+
+    // Protocol 9 registrations list their features.
+    std::fs::create_dir_all(root.join("d3")).unwrap();
+    std::fs::write(
+        root.join("d3/service.json"),
+        json!({"instance_id": "i", "pid": PID, "protocol": 9, "socket": "/none", "token": "t"}).to_string(),
+    )
+    .unwrap();
+    let pty = service(&root, "d3").await;
+    assert_eq!(pty.daemon().discover(None).await.unwrap_err().kind, ErrorKind::Protocol);
+}
+
+/// "rejects incompatible daemons without replacing or killing them"
+#[tokio::test]
+async fn rejects_incompatible_daemons_without_replacing_them() {
+    let root = temp_root();
+    let mut existing = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    std::fs::create_dir_all(root.join("daemon")).unwrap();
+    std::fs::write(
+        root.join("daemon/service.json"),
+        json!({"instance_id": "old", "pid": existing.id(), "protocol": 7, "socket": "/unused", "token": "old", "features": []})
+            .to_string(),
+    )
+    .unwrap();
+    let daemon = DaemonTransport::new(root.clone(), "daemon".into(), binary("/missing/opencode-pty".into()), None).await;
+    let optional = daemon.request_if_running(json!({"op": "list", "mode": "pty"})).await.unwrap_err();
+    assert_eq!(
+        (optional.kind, optional.message.as_str()),
+        (ErrorKind::Protocol, "opencode-pty protocol mismatch: daemon=7, client=9")
+    );
+    assert_eq!(optional.pid, Some(existing.id() as u64));
+    let starting = daemon.request(json!({"op": "create_pty"}), true).await.unwrap_err();
+    assert_eq!(starting, optional);
+    assert!(existing.try_wait().unwrap().is_none());
+    existing.kill().unwrap();
+    existing.wait().unwrap();
+}
+
+/// "gives up at once on a daemon binary that speaks another protocol, and never starts it again"
+#[tokio::test]
+async fn gives_up_at_once_on_a_binary_that_speaks_another_protocol() {
+    let root = temp_root();
+    let spawns = root.join("spawns");
+    let script = root.join("old-opencode-pty");
+    std::fs::write(
+        &script,
+        [
+            "#!/bin/sh".to_string(),
+            format!("echo spawn >> '{}'", spawns.display()),
+            r#"mkdir -p "$3/$5""#.to_string(),
+            r#"printf '{"instance_id":"old","pid":%s,"protocol":7,"socket":"none","token":"t","features":[]}' $$ > "$3/$5/service.json""#
+                .to_string(),
+            "exec sleep 30".to_string(),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let daemon = DaemonTransport::new(root.join("runtime"), "daemon".into(), binary(script), None).await;
+    let started = std::time::Instant::now();
+    let first = daemon.request(json!({"op": "list", "mode": "pipe"}), true).await.unwrap_err();
+    assert_eq!(first.kind, ErrorKind::Protocol);
+    let second = daemon.request(json!({"op": "list", "mode": "pipe"}), true).await.unwrap_err();
+    assert_eq!(second.kind, ErrorKind::Protocol);
+    // Well under the 5 s spawn timeout: the daemon was not waited on again.
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(std::fs::read_to_string(&spawns).unwrap().trim().lines().count(), 1);
 }
 
 #[tokio::test]
 async fn owns_lists_attaches_and_hands_off() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    start_fake(root.join("d"), fake.clone()).await;
+    let fake = with_terminals(root.join("d")).await;
     let pty = service(&root, "d").await;
 
     let all = pty.list(None).await.unwrap();
-    assert_eq!(all.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["pty_persistent_1", "pty_persistent_2", "pty_persistent_3"]);
+    assert_eq!(
+        all.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        vec!["pty_persistent_1", "pty_persistent_2", "pty_persistent_3"]
+    );
     assert_eq!(pty.list(Some("ses_b")).await.unwrap().len(), 1);
     assert!(pty.daemon().is_owner());
     {
-        let requests = fake.requests.lock();
+        let requests = fake.requests();
         assert_eq!(requests[0], json!({"op": "ping"}));
         assert_eq!(requests[1], json!({"op": "own", "instance_id": "inst-1"}));
-        assert_eq!(requests[2], json!({"op": "list"}));
+        assert_eq!(requests[2], json!({"op": "list", "mode": "pty"}));
+    }
+    // `get` asks for the one process; IDs that are not ours name no terminal.
+    assert_eq!(pty.get("pty_persistent_2").await.unwrap().session_id, "ses_b");
+    assert!(fake.requests().contains(&json!({"op": "get", "id": 2})));
+    for id in ["pty_persistent_9", "pty_1", "pty_persistent_0", "pty_persistent_x"] {
+        assert_eq!(pty.get(id).await.unwrap_err(), oc_persistent_pty::Error::NotFound(id.into()));
     }
 
     let mut attachment = pty
@@ -229,7 +204,8 @@ async fn owns_lists_attaches_and_hands_off() {
     assert_eq!(attachment.replay.data, b"hello");
     assert_eq!(attachment.replay.requested_offset, 3);
     assert_eq!(attachment.replay.end_offset, 5);
-    let subscribe = fake.requests.lock().iter().find(|r| r["op"] == "subscribe").cloned().unwrap();
+    assert_eq!(attachment.info.session_id, "ses_a");
+    let subscribe = fake.ops("subscribe").pop().unwrap();
     assert_eq!(
         subscribe,
         json!({"op": "subscribe", "id": 1, "offset": 3, "attachment_id": "a1", "role": "controller", "takeover": true})
@@ -248,46 +224,50 @@ async fn owns_lists_attaches_and_hands_off() {
         ]
     );
     // The observed exit triggers a background terminate.
-    for _ in 0..100 {
-        if fake.requests.lock().iter().any(|r| r["op"] == "terminate") {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(fake.requests.lock().contains(&json!({"op": "terminate", "id": 1})));
+    poll(|| fake.requests().contains(&json!({"op": "terminate", "id": 1}))).await;
 
     // Controller attach selected the terminal; resize with attachment null.
     pty.resize("pty_persistent_2", 120, 40, None).await.unwrap();
-    assert!(fake.requests.lock().contains(&json!({"op": "resize", "id": 2, "attachment_id": null, "cols": 120, "rows": 40})));
+    assert!(fake.requests().contains(&json!({"op": "resize", "id": 2, "attachment_id": null, "cols": 120, "rows": 40})));
 
+    assert!(!pty.handoff_prepared());
     let handoff = pty.handoff().await.unwrap().unwrap();
     assert_eq!(handoff.directory, root.join("d").to_string_lossy());
     assert_eq!((handoff.instance_id.as_str(), handoff.ticket.as_str()), ("inst-1", "tick"));
-    assert_eq!(handoff.expires_at, 1_900_000_000_000);
-    assert!(fake.requests.lock().contains(&json!({"op": "prepare_handoff"})));
+    assert!(handoff.expires_at > now_ms());
+    assert!(fake.requests().contains(&json!({"op": "prepare_handoff"})));
+    assert!(pty.handoff_prepared());
 
     // Losing the owner connection drops the registration; the next request re-discovers and re-claims.
     fake.owner_close.notify_waiters();
-    for _ in 0..100 {
-        if !pty.daemon().is_owner() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(!pty.daemon().is_owner());
-    assert_eq!(pty.list(None).await.unwrap().len(), 3);
+    poll(|| !pty.daemon().is_owner()).await;
+    assert_eq!(pty.list(None).await.unwrap().len(), 2);
     assert!(pty.daemon().is_owner());
-    let owns = fake.requests.lock().iter().filter(|r| r["op"] == "own").count();
-    assert_eq!(owns, 2);
+    assert_eq!(fake.ops("own").len(), 2);
+
+    // A shutdown clears the prepared handoff.
+    pty.shutdown().await.unwrap();
+    assert!(!pty.handoff_prepared());
+}
+
+/// A prepared handoff counts only while its ticket is valid.
+#[tokio::test]
+async fn an_expired_handoff_is_not_prepared() {
+    let root = temp_root();
+    let fake = FakeDaemon::start(root.join("d")).await;
+    fake.state.lock().handoff_ttl = 50;
+    let pty = service(&root, "d").await;
+    pty.list(None).await.unwrap();
+    pty.handoff().await.unwrap().unwrap();
+    assert!(pty.handoff_prepared());
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!pty.handoff_prepared());
 }
 
 #[tokio::test]
 async fn authentication_failure_rediscovers_once() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    start_fake(root.join("d"), fake.clone()).await;
+    let fake = with_terminals(root.join("d")).await;
     let pty = service(&root, "d").await;
     assert_eq!(pty.list(None).await.unwrap().len(), 3);
     // Next list: auth fails once (token rotated on disk), retried with the new registration.
@@ -298,21 +278,190 @@ async fn authentication_failure_rediscovers_once() {
     assert_eq!(pty.list(None).await.unwrap_err().to_string(), "authentication failed");
 }
 
+/// "rediscovers a same-protocol daemon after its registration rotates" and "… when acquiring a subscription"
+#[tokio::test]
+async fn rediscovers_a_rotated_registration() {
+    let root = temp_root();
+    let fake = with_terminals(root.join("daemon")).await;
+    let daemon = transport(&root, "daemon").await;
+    daemon.request(json!({"op": "list", "mode": "pty"}), false).await.unwrap();
+    for (token, instance) in [("new-token", "new-instance"), ("newest-token", "newest-instance")] {
+        {
+            let mut state = fake.state.lock();
+            state.token = token.into();
+            state.instance = instance.into();
+        }
+        fake.write_registration();
+        let running = daemon.request_if_running(json!({"op": "list", "mode": "pty"})).await.unwrap();
+        assert!(matches!(running, Some(oc_persistent_pty::wire::WireResponse::Processes { .. })));
+    }
+    fake.state.lock().token = "subscribe-token".into();
+    fake.write_registration();
+    let input =
+        oc_persistent_pty::SubscribeInput { cursor: 0, attachment_id: "attachment".into(), role: Role::Observer, takeover: false };
+    let attachment = daemon.subscribe(1, &input).await.unwrap();
+    assert_eq!(attachment.terminal.id, 1);
+    assert_eq!(fake.ops("subscribe").len(), 1);
+    attachment.detach();
+}
+
+/// "retries a start-required request when connection fails before dispatch"
+#[tokio::test]
+async fn retries_a_start_required_request_when_the_connection_fails_before_dispatch() {
+    let root = temp_root();
+    let first = FakeDaemon::start(root.join("daemon")).await;
+    let daemon = transport(&root, "daemon").await;
+    daemon.request(json!({"op": "list", "mode": "pty"}), false).await.unwrap();
+    first.close();
+    let second = FakeDaemon::start(root.join("daemon")).await;
+    daemon.request(json!({"op": "create_pty", "group_id": "ses"}), true).await.unwrap();
+    assert_eq!(second.ops("create_pty").len(), 1);
+    assert!(first.ops("create_pty").is_empty());
+}
+
+/// "does not replay a dispatched mutating request when its response is lost"
+#[tokio::test]
+async fn does_not_replay_a_dispatched_request_whose_response_was_lost() {
+    let root = temp_root();
+    let fake = FakeDaemon::start(root.join("daemon")).await;
+    fake.state.lock().hang_up.insert("create_pty".into());
+    let daemon = transport(&root, "daemon").await;
+    let error = daemon.request(json!({"op": "create_pty"}), true).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Response);
+    assert_eq!(fake.ops("create_pty").len(), 1);
+}
+
+/// "waits on its own connection until the process exits", "closes the wait connection when the wait is
+/// interrupted", "reports a daemon that goes away during a wait as unreachable"
+#[tokio::test]
+async fn waits_on_its_own_connection() {
+    let root = temp_root();
+    let fake = FakeDaemon::start(root.join("daemon")).await;
+    let pty = service(&root, "daemon").await;
+    let file = root.join("out");
+    let input = |command: &str| CreatePipeInput {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), command.into()],
+        cwd: root.to_string_lossy().into_owned(),
+        env: [("A".to_string(), "1".to_string())].into(),
+        group_id: "proj".into(),
+        output_path: file.to_string_lossy().into_owned(),
+        metadata: json!({"id": "sh_1"}).as_object().cloned().unwrap(),
+    };
+    let created = pty.create_pipe(input("echo hi")).await.unwrap();
+    assert_eq!((created.id, created.pid, created.lifecycle.clone()), (1, Some(1001), PipeLifecycle::Running));
+    assert_eq!(created.command, vec!["/bin/sh", "-c", "echo hi"]);
+    let request = fake.ops("create_pipe").pop().unwrap();
+    assert_eq!(
+        request,
+        json!({"op": "create_pipe", "program": "/bin/sh", "args": ["-c", "echo hi"], "cwd": root.to_string_lossy(),
+               "env": {"A": "1"}, "group_id": "proj", "output_path": file.to_string_lossy(), "metadata": {"id": "sh_1"}})
+    );
+
+    // An unknown process is the daemon's own error.
+    assert!(matches!(pty.wait_pipe(2).await, Err(PipeError::Request(m)) if m == "terminal 2 not found"));
+    let error = pty.daemon().wait(2).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Request);
+
+    let waiting = tokio::spawn({
+        let pty = pty.clone();
+        async move { pty.wait_pipe(1).await }
+    });
+    poll(|| fake.waiters(1) == 1).await;
+    fake.output(1, "hi\n");
+    fake.exit(1, None, Some("SIGTERM"));
+    let exit = waiting.await.unwrap().unwrap();
+    assert_eq!(
+        (exit.exit_code, exit.signal.as_deref(), exit.final_offset, exit.output_lines),
+        (None, Some("SIGTERM"), 3, 1)
+    );
+    // An exited process is answered at once.
+    assert_eq!(pty.wait_pipe(1).await.unwrap().final_offset, 3);
+
+    // Interrupting a wait closes its connection.
+    pty.create_pipe(input("sleep 1")).await.unwrap();
+    let waiting = tokio::spawn({
+        let pty = pty.clone();
+        async move { pty.wait_pipe(2).await }
+    });
+    poll(|| fake.waiters(2) == 1).await;
+    waiting.abort();
+    poll(|| fake.waiters(2) == 0).await;
+
+    // A daemon that goes away during a wait is unreachable.
+    let waiting = tokio::spawn({
+        let pty = pty.clone();
+        async move { pty.daemon().wait(2).await }
+    });
+    poll(|| fake.waiters(2) == 1).await;
+    fake.drop_waiters(2);
+    assert_eq!(waiting.await.unwrap().unwrap_err().kind, ErrorKind::Connect);
+}
+
+/// The pipe methods: get, list, signal, set_metadata, terminate, and their errors.
+#[tokio::test]
+async fn pipe_processes() {
+    let root = temp_root();
+    let fake = FakeDaemon::start(root.join("daemon")).await;
+    fake.add_terminal("ses_a");
+    let pty = service(&root, "daemon").await;
+    let out = root.join("pipe.out");
+    let input = CreatePipeInput {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "x".into()],
+        cwd: root.to_string_lossy().into_owned(),
+        env: Default::default(),
+        group_id: "proj".into(),
+        output_path: out.to_string_lossy().into_owned(),
+        metadata: Default::default(),
+    };
+    let created = pty.create_pipe(input.clone()).await.unwrap();
+    assert_eq!(created.id, 2);
+    // A terminal is no pipe, and a pipe no terminal.
+    assert!(matches!(pty.get_pipe(1).await, Err(PipeError::NotFound(1))));
+    assert_eq!(
+        pty.get("pty_persistent_2").await.unwrap_err(),
+        oc_persistent_pty::Error::NotFound("pty_persistent_2".into())
+    );
+    assert_eq!(pty.list(None).await.unwrap().len(), 1);
+    assert_eq!(pty.list_pipes().await.unwrap().iter().map(|p| p.id).collect::<Vec<_>>(), vec![2]);
+
+    fake.output(2, "a\nb");
+    let found = pty.get_pipe(2).await.unwrap();
+    assert_eq!((found.output_tail, found.output_lines, found.output_path.as_str()), (3, 1, out.to_str().unwrap()));
+    pty.set_pipe_metadata(2, json!({"stopReason": "killed"}).as_object().cloned().unwrap()).await.unwrap();
+    assert_eq!(pty.get_pipe(2).await.unwrap().metadata["stopReason"], "killed");
+
+    fake.state.lock().trap.insert(2);
+    pty.signal_pipe(2, Signal::Term).await.unwrap();
+    assert_eq!(pty.get_pipe(2).await.unwrap().lifecycle, PipeLifecycle::Running);
+    pty.signal_pipe(2, Signal::Kill).await.unwrap();
+    assert_eq!(fake.signals(2), vec!["SIGTERM", "SIGKILL"]);
+    let ended = pty.get_pipe(2).await.unwrap();
+    assert_eq!(ended.lifecycle, PipeLifecycle::Exited { exit_code: None, signal: Some("SIGKILL".into()) });
+    assert!(ended.exited_at.is_some());
+
+    pty.terminate_pipe(2).await.unwrap();
+    assert!(matches!(pty.get_pipe(2).await, Err(PipeError::NotFound(2))));
+    assert!(matches!(pty.signal_pipe(2, Signal::Term).await, Err(PipeError::Request(_))));
+
+    // A rejected request may have run: it is no "unavailable".
+    fake.state.lock().fail_create = Some("spawn failed".into());
+    assert_eq!(pty.create_pipe(input.clone()).await.unwrap_err(), PipeError::Request("spawn failed".into()));
+    let mut relative = input;
+    relative.cwd = "relative".into();
+    fake.state.lock().fail_create = None;
+    assert_eq!(pty.create_pipe(relative).await.unwrap_err(), PipeError::Request("cwd must be absolute".into()));
+}
+
 #[tokio::test]
 async fn expired_or_mismatched_handoff_is_discarded() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    start_fake(root.join("old"), fake.clone()).await;
+    let fake = FakeDaemon::start(root.join("old")).await;
     let mut g = oc_util::Global::resolve();
     g.state = root.join("state");
-    let handoff = oc_persistent_pty::Handoff {
-        directory: root.join("old").to_string_lossy().into_owned(),
-        instance_id: "other-instance".into(),
-        ticket: "t".into(),
-        expires_at: 4_000_000_000_000,
-    };
+    let mut handoff = fake.handoff();
+    handoff.instance_id = "other-instance".into();
     let pty = PersistentPty::new(
         &g,
         Options { root: Some(root.clone()), handoff: Some(handoff), binary: Some(no_spawn()), ..Default::default() },
@@ -321,43 +470,75 @@ async fn expired_or_mismatched_handoff_is_discarded() {
     assert!(!pty.daemon().is_owner());
     assert_ne!(pty.daemon().id(), "old");
     // The mismatched daemon was asked to shut down.
-    assert!(fake.requests.lock().contains(&json!({"op": "shutdown"})));
+    assert_eq!(fake.ops("shutdown").len(), 1);
 }
 
-/// persistent-pty-daemon.test.ts (#60329): renaming needs a daemon that lists the `rename` feature; it sends
-/// `{op:"rename", id, title}`, returns the terminal with its `userTitle` and publishes `persistent-pty.updated`.
+/// "starts fresh instead of failing when an inherited registration is gone or expired"
 #[tokio::test]
-async fn rename_needs_the_feature_and_publishes_updated() {
+async fn starts_fresh_when_an_inherited_registration_is_gone_or_expired() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    start_fake(root.join("old"), fake.clone()).await;
-    let pty = service(&root, "old").await;
-    // A 0.3.3 daemon omits `features`: nothing is sent, so it never drops the connection.
-    assert_eq!(pty.rename("pty_persistent_1", Some("Build")).await.unwrap_err(), oc_persistent_pty::Error::Unsupported { feature: "rename".into() });
-    assert!(!fake.requests.lock().iter().any(|r| r["op"] == "rename"));
-    assert_eq!(pty.get("pty_persistent_1").await.unwrap().user_title, None);
-    // A missing terminal is reported before the feature check.
-    assert_eq!(pty.rename("pty_persistent_9", None).await.unwrap_err(), oc_persistent_pty::Error::NotFound("pty_persistent_9".into()));
+    let legacy = root.join("legacy");
+    std::fs::create_dir_all(&legacy).unwrap();
+    for expires_at in [now_ms() + 60_000, now_ms() - 1] {
+        let handoff = oc_persistent_pty::Handoff {
+            directory: legacy.to_string_lossy().into_owned(),
+            instance_id: "test".into(),
+            ticket: "ticket".into(),
+            expires_at,
+        };
+        let daemon = DaemonTransport::new(root.join("root"), "fresh".into(), no_spawn(), Some(handoff)).await;
+        assert_eq!(daemon.handoff().await.unwrap(), None);
+        assert_eq!(daemon.request_if_running(json!({"op": "list", "mode": "pty"})).await.unwrap(), None);
+    }
+}
 
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    *fake.features.lock() = Some(vec!["rename".into()]);
-    start_fake(root.join("new"), fake.clone()).await;
+/// A valid handoff adopts the daemon in its own directory and claims it with the ticket.
+#[tokio::test]
+async fn adopts_a_handed_off_daemon() {
+    let root = temp_root();
+    let fake = FakeDaemon::start(root.join("inherited")).await;
+    let mut g = oc_util::Global::resolve();
+    g.state = root.join("state");
+    let pty = PersistentPty::new(
+        &g,
+        Options {
+            root: Some(root.join("other-root")),
+            handoff: Some(fake.handoff()),
+            binary: Some(no_spawn()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(pty.daemon().is_owner());
+    assert_eq!(pty.daemon().id(), "inherited");
+    assert!(fake.requests().contains(&json!({"op": "own", "instance_id": "inst-1", "ticket": "ticket"})));
+    // Nothing was moved: the daemon keeps its directory.
+    assert!(root.join("inherited/service.json").exists());
+}
+
+/// persistent-pty-daemon.test.ts (#60329): `rename` sends `{op:"rename", id, title}`, returns the terminal with its
+/// `userTitle` and publishes `persistent-pty.updated`. Protocol 9 daemons always support it.
+#[tokio::test]
+async fn rename_publishes_updated() {
+    let root = temp_root();
+    let fake = with_terminals(root.join("new")).await;
     let pty = service(&root, "new").await;
+    // A missing terminal is reported first.
+    assert_eq!(
+        pty.rename("pty_persistent_9", None).await.unwrap_err(),
+        oc_persistent_pty::Error::NotFound("pty_persistent_9".into())
+    );
     let mut events = pty.subscribe_events();
     let renamed = pty.rename("pty_persistent_1", Some("Build")).await.unwrap();
     assert_eq!(renamed.user_title.as_deref(), Some("Build"));
-    assert!(fake.requests.lock().contains(&json!({"op": "rename", "id": 1, "title": "Build"})));
+    assert!(fake.requests().contains(&json!({"op": "rename", "id": 1, "title": "Build"})));
     let event = events.recv().await.unwrap();
     assert_eq!(event.event_type(), "persistent-pty.updated");
     assert_eq!(event.properties()["sessionID"], "ses_a");
     assert_eq!(event.properties()["terminal"]["userTitle"], "Build");
     let cleared = pty.rename("pty_persistent_1", None).await.unwrap();
     assert_eq!(cleared.user_title, None);
-    assert!(fake.requests.lock().contains(&json!({"op": "rename", "id": 1, "title": null})));
+    assert!(fake.requests().contains(&json!({"op": "rename", "id": 1, "title": null})));
     assert_eq!(serde_json::to_value(&cleared).unwrap()["userTitle"], Value::Null);
 }
 
@@ -366,15 +547,11 @@ async fn rename_needs_the_feature_and_publishes_updated() {
 #[tokio::test]
 async fn remove_session_terminates_the_sessions_terminals() {
     let root = temp_root();
-    let fake = Arc::new(Fake::default());
-    *fake.token.lock() = "tok".into();
-    *fake.protocol.lock() = 7;
-    start_fake(root.join("d"), fake.clone()).await;
+    let fake = with_terminals(root.join("d")).await;
     let pty = service(&root, "d").await;
     let mut events = pty.subscribe_events();
     pty.remove_session("ses_a").await;
-    let terminated: Vec<Value> = fake.requests.lock().iter().filter(|r| r["op"] == "terminate").cloned().collect();
-    assert_eq!(terminated, vec![json!({"op": "terminate", "id": 1}), json!({"op": "terminate", "id": 3})]);
+    assert_eq!(fake.ops("terminate"), vec![json!({"op": "terminate", "id": 1}), json!({"op": "terminate", "id": 3})]);
     for id in ["pty_persistent_1", "pty_persistent_3"] {
         let event = events.recv().await.unwrap();
         assert_eq!(event.event_type(), "persistent-pty.removed");

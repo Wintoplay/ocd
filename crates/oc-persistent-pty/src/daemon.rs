@@ -6,7 +6,7 @@
 //! (`own`), sends one-shot framed requests on fresh connections, opens dedicated
 //! subscription connections, and can prepare / adopt a restart handoff.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -19,12 +19,14 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::frame::{FrameReader, encode_envelope, parse_output_frame};
 use crate::handoff::Handoff;
-use crate::wire::{Registration, Role, StreamEvent, WireResponse, WireTerminal, decode_base64, stream_event};
+use crate::wire::{Exited, ProcessInfo, Registration, Role, StreamEvent, WireResponse, decode_base64, stream_event};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
 
-/// `DaemonError.kind`.
+/// `DaemonError.kind`. `Connect`, `Spawn`, `Registration` and `Protocol` mean the daemon could not be reached or
+/// started and the request never ran; `Response` means the request was sent but its reply was lost; `Request` is
+/// the daemon's own `error` reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Connect,
@@ -32,6 +34,7 @@ pub enum ErrorKind {
     Registration,
     Protocol,
     Spawn,
+    Request,
 }
 
 /// `PersistentPty.DaemonError`.
@@ -123,7 +126,7 @@ impl DetachHandle {
 
 /// `DaemonAttachment`: the `attached` response plus a not-yet-started event pump.
 pub struct DaemonAttachment {
-    pub terminal: WireTerminal,
+    pub terminal: ProcessInfo,
     pub role: Role,
     pub generation: u64,
     pub replay: Replay,
@@ -205,6 +208,8 @@ struct State {
     owner: Option<Owner>,
     closed: bool,
     seq: u64,
+    /// Set once a daemon we spawned turned out to speak another protocol.
+    incompatible: Option<DaemonError>,
 }
 
 /// `DaemonTransport`.
@@ -228,7 +233,14 @@ impl DaemonTransport {
         let transport = Self {
             root,
             binary,
-            state: Arc::new(Mutex::new(State { id: initial_id, registration: None, owner: None, closed: false, seq: 0 })),
+            state: Arc::new(Mutex::new(State {
+                id: initial_id,
+                registration: None,
+                owner: None,
+                closed: false,
+                seq: 0,
+                incompatible: None,
+            })),
             startup: tokio::sync::Mutex::new(()),
         };
         if let Some(inherited) = inherited {
@@ -269,7 +281,6 @@ impl DaemonTransport {
             if (inherited.expires_at as i128) <= now_ms() as i128 {
                 return Err(DaemonError::new(ErrorKind::Registration, "PTY restart handoff expired"));
             }
-            // Older releases put the daemon directory outside the root; its directory name is still the ID.
             let directory = PathBuf::from(&inherited.directory);
             let id = directory.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.state.lock().id = id.clone();
@@ -277,10 +288,6 @@ impl DaemonTransport {
             found = Some(registration.clone());
             if registration.instance_id != inherited.instance_id {
                 return Err(DaemonError::new(ErrorKind::Registration, "PTY restart daemon changed"));
-            }
-            let target = self.root.join(&id);
-            if normalize(&absolute(&directory)) != normalize(&absolute(&target)) {
-                migrate(&directory, &target).await?;
             }
             self.claim(&registration, Some(&inherited.ticket)).await
         }
@@ -349,6 +356,7 @@ impl DaemonTransport {
             command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         }
         let mut child = command.spawn().map_err(|e| DaemonError::new(ErrorKind::Spawn, e.to_string()))?;
+        let pid = child.id().map(u64::from);
         let result = async {
             let deadline = Instant::now() + TIMEOUT;
             let mut last: Option<DaemonError> = None;
@@ -357,6 +365,11 @@ impl DaemonTransport {
                     Ok(found) => {
                         self.claim(&found, None).await?;
                         return Ok(found);
+                    }
+                    // The binary we just started speaks another protocol: waiting longer cannot help.
+                    Err(error) if error.kind == ErrorKind::Protocol && error.pid.is_some() && error.pid == pid => {
+                        self.state.lock().incompatible = Some(error.clone());
+                        return Err(error);
                     }
                     Err(error) => last = Some(error),
                 }
@@ -371,10 +384,14 @@ impl DaemonTransport {
         result
     }
 
-    /// An unreachable daemon can still hold this directory's lock, so retry once in a fresh directory.
+    /// An unreachable daemon, or one left by another release, can still hold this directory's lock, so retry once in
+    /// a fresh directory. A binary that cannot be spawned, or that speaks another protocol, fails the same way again.
     async fn start(&self) -> Result<Registration, DaemonError> {
         match self.spawn_daemon().await {
             Ok(found) => Ok(found),
+            Err(error) if error.kind == ErrorKind::Spawn || self.state.lock().incompatible.as_ref() == Some(&error) => {
+                Err(error)
+            }
             Err(error) => {
                 tracing::warn!(cause = %error.message, "Starting opencode-pty in a fresh runtime directory");
                 self.abandon();
@@ -406,7 +423,14 @@ impl DaemonTransport {
         }
         let found = match self.discover(None).await {
             Ok(found) => found,
-            Err(error) if should_start && error.kind == ErrorKind::Connect => self.start().await?,
+            Err(error) if should_start && error.kind == ErrorKind::Connect => {
+                // Starting the same incompatible binary again would only fail again.
+                let incompatible = self.state.lock().incompatible.clone();
+                match incompatible {
+                    Some(error) => return Err(error),
+                    None => self.start().await?,
+                }
+            }
             Err(error) => return Err(error),
         };
         let owned = self.state.lock().owner.is_some();
@@ -449,10 +473,22 @@ impl DaemonTransport {
         }
     }
 
-    /// `supports(feature)`: whether the reachable daemon (never started for this) lists `feature`.
-    pub async fn supports(&self, feature: &str) -> Result<bool, DaemonError> {
+    /// `wait(id)`: waits on its own connection, with no timeout, until the pipe process exits. Never starts the
+    /// daemon. Dropping the future closes the connection.
+    pub async fn wait(&self, process: u64) -> Result<Exited, DaemonError> {
+        match self.wait_attempt(process).await {
+            Err(error) if error.kind == ErrorKind::Registration => self.wait_attempt(process).await,
+            other => other,
+        }
+    }
+
+    async fn wait_attempt(&self, process: u64) -> Result<Exited, DaemonError> {
         let current = self.connect(false).await?;
-        Ok(current.features.is_some_and(|features| features.iter().any(|f| f == feature)))
+        wait_raw(&current, process).await.inspect_err(|error| {
+            if error.kind == ErrorKind::Registration {
+                self.forget(&current);
+            }
+        })
     }
 
     /// `requestIfRunning(value)`: `Ok(None)` when no daemon is reachable.
@@ -547,52 +583,6 @@ pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(path)
-    }
-}
-
-/// Lexical normalization (`path.resolve`).
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// Older releases kept registrations in purgeable temp directories. Renaming keeps the lock file's
-/// inode, so the still-running daemon keeps holding its lock in the new location.
-async fn migrate(directory: &Path, target: &Path) -> Result<(), DaemonError> {
-    let directory = directory.to_path_buf();
-    let target = target.to_path_buf();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&target)?;
-        std::fs::rename(directory.join("service.lock"), target.join("service.lock"))?;
-        std::fs::rename(directory.join("service.json"), target.join("service.json"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| DaemonError::new(ErrorKind::Registration, e.to_string()))?
-    .map_err(|e| DaemonError::new(ErrorKind::Registration, e.to_string()))
-}
-
 pub(crate) async fn discover_in(directory: &Path) -> Result<Registration, DaemonError> {
     let text = tokio::fs::read_to_string(directory.join("service.json"))
         .await
@@ -612,18 +602,18 @@ pub(crate) async fn discover_in(directory: &Path) -> Result<Registration, Daemon
     }
     let response = one_shot(&decoded, json!({ "op": "ping" })).await?;
     match response {
-        WireResponse::Pong { instance_id, pid, protocol, features }
+        WireResponse::Pong { instance_id, pid, protocol, .. }
             if instance_id == decoded.instance_id && pid == decoded.pid && protocol == crate::frame::PROTOCOL_VERSION =>
         {
-            // Daemons older than the features list omit it; trust the live daemon's answer over the file.
-            Ok(Registration { features: Some(features.unwrap_or_default()), ..decoded })
+            Ok(decoded)
         }
         _ => Err(DaemonError::new(ErrorKind::Protocol, "opencode-pty registration mismatch")),
     }
 }
 
+/// `responseError`: the daemon's own `error` reply.
 fn error_kind(message: &str) -> ErrorKind {
-    if message == "authentication failed" { ErrorKind::Registration } else { ErrorKind::Protocol }
+    if message == "authentication failed" { ErrorKind::Registration } else { ErrorKind::Request }
 }
 
 /// `oneShot(registration, request)`: a fresh connection per request, 5 s overall timeout.
@@ -642,7 +632,7 @@ pub(crate) async fn one_shot(registration: &Registration, request: Value) -> Res
             .await
             .map_err(failure(ErrorKind::Response))?
             .ok_or_else(|| DaemonError::new(ErrorKind::Response, "opencode-pty closed without response"))?;
-        let response = WireResponse::decode(&frame).map_err(failure(ErrorKind::Protocol))?;
+        let response = WireResponse::decode(&frame).map_err(failure(ErrorKind::Response))?;
         if let WireResponse::Error { message } = response {
             return Err(DaemonError::new(error_kind(&message), message));
         }
@@ -761,7 +751,7 @@ async fn subscribe_raw(
     match response {
         WireResponse::Error { message } => Err(DaemonError::new(error_kind(&message), message)),
         WireResponse::Attached {
-            terminal,
+            process: terminal,
             role,
             generation,
             requested_offset,
@@ -781,19 +771,38 @@ async fn subscribe_raw(
     }
 }
 
+/// `waitPromise`: `{op:"wait", id}` on a connection of its own, answered once the process exited.
+async fn wait_raw(registration: &Registration, process: u64) -> Result<Exited, DaemonError> {
+    let connect = |message: String| DaemonError::new(ErrorKind::Connect, message);
+    let mut stream = connect_socket(&registration.socket).await.map_err(|e| connect(e.to_string()))?;
+    let payload =
+        encode_envelope(&registration.token, &json!({ "op": "wait", "id": process })).map_err(failure(ErrorKind::Protocol))?;
+    stream.write_all(&payload).await.map_err(|e| connect(e.to_string()))?;
+    let mut reader = FrameReader::new(stream);
+    // The connection was open, so a missing reply means the daemon went away while the process ran.
+    let frame = match reader.next().await {
+        Ok(Some(frame)) => frame,
+        Ok(None) | Err(_) => return Err(connect("opencode-pty closed before the process exited".into())),
+    };
+    match WireResponse::decode(&frame).map_err(failure(ErrorKind::Response))? {
+        WireResponse::Error { message } => Err(DaemonError::new(error_kind(&message), message)),
+        WireResponse::Exited { exit_code, signal, final_offset, output_lines, output_error, exited_at } => {
+            Ok(Exited { exit_code, signal, final_offset, output_lines, output_error, exited_at })
+        }
+        other => Err(DaemonError::new(
+            ErrorKind::Response,
+            format!("unexpected opencode-pty response: {}", other.type_name()),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_paths() {
-        assert_eq!(normalize(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
-        assert_eq!(normalize(Path::new("/a/b/")), PathBuf::from("/a/b"));
-    }
-
-    #[test]
-    fn auth_failures_are_registration_errors() {
+    fn daemon_replies_are_request_errors() {
         assert_eq!(error_kind("authentication failed"), ErrorKind::Registration);
-        assert_eq!(error_kind("terminal 3 not found"), ErrorKind::Protocol);
+        assert_eq!(error_kind("terminal 3 not found"), ErrorKind::Request);
     }
 }

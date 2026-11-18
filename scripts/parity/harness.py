@@ -5,6 +5,7 @@ same location before each run), so path-derived values (project IDs, data direct
 only genuinely volatile values need masking.
 """
 import base64
+import glob
 import json
 import os
 import re
@@ -166,6 +167,30 @@ DEAD_PROXY = "http://127.0.0.1:9"
 PROXY_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy")
 
 
+SCRATCH = os.environ.get("OCD_SCRATCH", "/tmp/ocd-scratch")
+
+# The pinned `@opencode/pty` daemon (0.6.0, protocol 9): upstream installs its embedded copy at this path, so placing
+# the same bytes there first lets ocd (which downloads it otherwise) run terminals and shell commands in the same
+# daemon without a download. Taken from a 2.3.x checkout with its dependencies installed.
+PTY_VERSION = "0.6.0"
+PTY_DIR = "0.6.0-3a781ac5ff8bc189"
+
+
+def install_pty(cache_root):
+    found = sorted(glob.glob(os.path.join(SCRATCH, "src/opencode-2.3.*/node_modules/.bun/@opencode+pty-linux-x64-gnu@"
+                                                   f"{PTY_VERSION}/node_modules/@opencode/pty-linux-x64-gnu/bin/opencode-pty")))
+    if not found:
+        return
+    target = os.path.join(cache_root, "opencode", "bin", "opencode-pty", PTY_DIR)
+    os.makedirs(target, mode=0o700, exist_ok=True)
+    for d in (os.path.dirname(target), target):
+        os.chmod(d, 0o700)
+    path = os.path.join(target, "opencode-pty")
+    if not os.path.exists(path):
+        shutil.copy(found[-1], path)
+        os.chmod(path, 0o755)
+
+
 def isolated_env(state_root, extra=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("OPENCODE")}
     for key, sub in [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"),
@@ -193,6 +218,7 @@ def isolated_env(state_root, extra=None):
         webui = os.path.join(state_root, "empty-web-ui")
         os.makedirs(webui, exist_ok=True)
         env["OCD_WEB_UI"] = webui
+    install_pty(env["XDG_CACHE_HOME"])
     env.update({
         "HOME": home,
         "OPENCODE_TEST_HOME": home,

@@ -185,25 +185,12 @@ def session225_wellknown_config(ctx):
     ctx.call("config.after", "GET", "/api/config")
 
 
-def _pty_binary(ctx):
-    """Install the 0.4.0 daemon where both binaries look for it, so nothing is downloaded."""
-    # Any 2.2.x checkout with its dependencies installed carries it (2.2.5 through 2.2.7 pin 0.4.0).
-    found = sorted(glob.glob(os.path.join(SCRATCH, "src/opencode-2.2.*/node_modules/.bun/@opencode+pty-linux-x64-gnu@0.4.0/"
-                                                   "node_modules/@opencode/pty-linux-x64-gnu/bin/opencode-pty")))
-    for d in (os.path.join(ctx.state, "cache", "opencode", "bin", "opencode-pty", "0.4.0-637e67684fb4fbb7"),):
-        os.makedirs(d, exist_ok=True)
-        if found:
-            shutil.copy(found[0], os.path.join(d, "opencode-pty"))
-            os.chmod(os.path.join(d, "opencode-pty"), 0o755)
-
-
 @scenario("session225", hold_for_title=0)
 def session225_terminal_rename_and_delete(ctx):
     """terminals: rename (userTitle, persistent-pty.updated), clear, resize only, then the session's deletion
     removes them (#60322, #60329)."""
     ctx.set_script([])
     ctx.make_project()
-    _pty_binary(ctx)
     ctx.start()
     sid = ctx.create_session(title="Terminals")
     other = ctx.create_session(label="session.create.other", title="Other")

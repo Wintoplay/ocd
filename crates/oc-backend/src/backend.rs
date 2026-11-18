@@ -1862,17 +1862,13 @@ fn authorization_error(e: oc_ai::credentials::integration::IntegrationError) -> 
     }
 }
 
-/// `PersistentPty.UnavailableError` → 503 `{service:"opencode-pty"}`; `NotFoundError` → 404;
-/// `UnsupportedError` (only from a rename) → 501 `PtyFeatureUnsupportedError`.
+/// `PersistentPty.UnavailableError` → 503 `{service:"opencode-pty"}`; `NotFoundError` → 404.
 fn persistent_error(e: oc_persistent_pty::Error) -> ApiError {
     match e {
         oc_persistent_pty::Error::Unavailable(m) => ApiError::service_unavailable(m, Some("opencode-pty".into())),
         oc_persistent_pty::Error::NotFound(id) => ApiError::pty_not_found(id),
         oc_persistent_pty::Error::InvalidCwd { message, .. } => {
             ApiError::invalid_request(message).with_kind("invalid_cwd").with_field("cwd")
-        }
-        oc_persistent_pty::Error::Unsupported { feature } => {
-            ApiError::pty_feature_unsupported(feature, "Terminal renaming will be available after OpenCode's terminal service restarts")
         }
     }
 }

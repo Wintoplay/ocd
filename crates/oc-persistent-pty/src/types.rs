@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
 
-use crate::wire::{Lifecycle, WireTerminal};
+use crate::wire::{Lifecycle, ProcessInfo};
 
 pub const ID_PREFIX: &str = "pty_persistent_";
 
@@ -58,26 +58,29 @@ pub struct Info {
 }
 
 impl Info {
-    /// `toInfo(value)` (`index.ts:390-408`).
-    pub fn from_wire(value: &WireTerminal) -> Self {
+    /// `toInfo(value)` (`index.ts:587-611`). A process without terminal fields (never listed as a terminal) reads
+    /// with an empty title and a 0×0 size.
+    pub fn from_wire(value: &ProcessInfo) -> Self {
         let (status, exit_code) = match &value.lifecycle {
             Lifecycle::Running => (Status::Running, None),
-            Lifecycle::Exited { exit_code } => (Status::Exited, *exit_code),
+            Lifecycle::Exited { exit_code, .. } => (Status::Exited, *exit_code),
             Lifecycle::Failed { .. } => (Status::Exited, None),
         };
+        let pty = value.pty.as_ref();
         Info {
             id: to_id(value.id),
-            title: value.title.clone(),
+            title: pty.map(|p| p.title.clone()).unwrap_or_default(),
             command: value.command.first().cloned().unwrap_or_default(),
             args: value.command.iter().skip(1).cloned().collect(),
             cwd: value.cwd.clone(),
             status,
             pid: value.pid.unwrap_or(0),
             exit_code,
+            // Terminals are always created with a session ID as their group.
             session_id: value.group_id.clone(),
-            user_title: value.user_title.clone(),
-            foreground_process: value.foreground_process.clone(),
-            size: Size { cols: value.cols, rows: value.rows },
+            user_title: pty.and_then(|p| p.user_title.clone()),
+            foreground_process: pty.and_then(|p| p.foreground_process.clone()),
+            size: Size { cols: pty.map_or(0, |p| p.cols), rows: pty.map_or(0, |p| p.rows) },
             output: Output { head: value.output_head, tail: value.output_tail },
         }
     }
@@ -210,27 +213,33 @@ impl BusEvent {
 mod tests {
     use super::*;
 
-    fn wire(lifecycle: Lifecycle) -> WireTerminal {
-        WireTerminal {
+    fn wire(lifecycle: Lifecycle) -> ProcessInfo {
+        ProcessInfo {
             id: 7,
+            mode: crate::wire::Mode::Pty,
             pid: None,
-            title: "Terminal".into(),
-            user_title: None,
-            foreground_process: Some("vim".into()),
             group_id: "ses_abc".into(),
             command: vec!["/bin/zsh".into(), "-i".into()],
             cwd: "/home".into(),
-            cols: 80,
-            rows: 24,
             lifecycle,
             output_head: 1,
             output_tail: 9,
+            started_at: 1,
+            exited_at: None,
+            pty: Some(crate::wire::PtyInfo {
+                title: "Terminal".into(),
+                user_title: None,
+                foreground_process: Some("vim".into()),
+                cols: 80,
+                rows: 24,
+            }),
+            pipe: None,
         }
     }
 
     #[test]
     fn info_json_key_order() {
-        let info = Info::from_wire(&wire(Lifecycle::Exited { exit_code: Some(2) }));
+        let info = Info::from_wire(&wire(Lifecycle::Exited { exit_code: Some(2), signal: None }));
         assert_eq!(
             serde_json::to_string(&info).unwrap(),
             r#"{"id":"pty_persistent_7","title":"Terminal","command":"/bin/zsh","args":["-i"],"cwd":"/home","status":"exited","pid":0,"exitCode":2,"sessionID":"ses_abc","userTitle":null,"foregroundProcess":"vim","size":{"cols":80,"rows":24},"output":{"head":1,"tail":9}}"#
@@ -244,9 +253,9 @@ mod tests {
         empty.command.clear();
         assert_eq!(Info::from_wire(&empty).command, "");
         assert_eq!(serde_json::from_str::<Info>(&text).unwrap(), running);
-        // 0.4.0 daemons report the user title.
+        // The daemon reports the user title.
         let mut renamed = wire(Lifecycle::Running);
-        renamed.user_title = Some("Build".into());
+        renamed.pty.as_mut().unwrap().user_title = Some("Build".into());
         assert!(serde_json::to_string(&Info::from_wire(&renamed)).unwrap().contains(r#""sessionID":"ses_abc","userTitle":"Build","foregroundProcess""#));
     }
 

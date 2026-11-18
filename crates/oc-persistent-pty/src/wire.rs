@@ -1,34 +1,72 @@
-//! Protocol-7 wire types (`persistent-pty/daemon.ts:11-132`).
+//! Protocol-9 wire types (`persistent-pty/daemon.ts:11-139`).
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// `Lifecycle`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Lifecycle {
     Running,
-    Exited { exit_code: Option<u64> },
+    Exited {
+        exit_code: Option<u64>,
+        /// The signal's name (`SIGTERM`) when one ended a pipe process.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+    },
     Failed { message: String },
 }
 
-/// `WireTerminal`.
+/// `mode` of a daemon process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Pty,
+    Pipe,
+}
+
+/// `PtyInfo`: what only a terminal has.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireTerminal {
-    pub id: u64,
-    pub pid: Option<u64>,
+pub struct PtyInfo {
     pub title: String,
-    /// The title a user gave the terminal (`@opencode/pty` 0.4.0); absent from older daemons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The title a user gave the terminal; null when none.
     pub user_title: Option<String>,
     pub foreground_process: Option<String>,
-    pub group_id: String,
-    pub command: Vec<String>,
-    pub cwd: String,
     pub cols: u64,
     pub rows: u64,
+}
+
+/// `PipeInfo`: what only a pipe process has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipeInfo {
+    pub output_path: String,
+    pub output_lines: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_error: Option<String>,
+    /// Opaque JSON object stored for the client (`Metadata`).
+    pub metadata: Map<String, Value>,
+}
+
+/// `ProcessInfo`: a terminal or a pipe process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub id: u64,
+    pub mode: Mode,
+    pub pid: Option<u64>,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub group_id: String,
     pub lifecycle: Lifecycle,
     pub output_head: u64,
     pub output_tail: u64,
+    /// Milliseconds since the Unix epoch.
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exited_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty: Option<PtyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipe: Option<PipeInfo>,
 }
 
 /// `Registration` (`service.json`).
@@ -39,9 +77,8 @@ pub struct Registration {
     pub protocol: u64,
     pub socket: String,
     pub token: String,
-    /// Optional daemon features such as `rename` (0.4.0); a live `pong` overrides the file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<Vec<String>>,
+    /// Additive daemon capabilities; protocol 9 needs none.
+    pub features: Vec<String>,
 }
 
 /// Attachment role.
@@ -65,22 +102,17 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireResponse {
-    Pong {
-        instance_id: String,
-        pid: u64,
-        protocol: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        features: Option<Vec<String>>,
-    },
-    Created { terminal: WireTerminal },
-    Terminals { terminals: Vec<WireTerminal> },
+    Pong { instance_id: String, pid: u64, protocol: u64, features: Vec<String> },
+    Created { process: ProcessInfo },
+    Processes { processes: Vec<ProcessInfo> },
+    Process { process: ProcessInfo },
     Ok,
     Owned,
     Handoff { ticket: String, expires_at: u64 },
-    Snapshot { terminal: WireTerminal, text: String, checkpoint_base64: String, cursor_x: u64, cursor_y: u64 },
-    Rows { terminal: WireTerminal, lines: Vec<String>, cursor_x: u64, cursor_y: u64 },
+    Snapshot { process: ProcessInfo, text: String, checkpoint_base64: String, cursor_x: u64, cursor_y: u64 },
+    Rows { process: ProcessInfo, lines: Vec<String>, cursor_x: u64, cursor_y: u64 },
     Attached {
-        terminal: WireTerminal,
+        process: ProcessInfo,
         role: Role,
         generation: u64,
         requested_offset: u64,
@@ -90,11 +122,33 @@ pub enum WireResponse {
         replay_base64: String,
     },
     Resized { cols: u64, rows: u64, generation: u64, checkpoint_base64: String },
-    Exited { exit_code: Option<u64>, final_offset: u64 },
+    Exited {
+        exit_code: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
+        final_offset: u64,
+        /// Pipe processes only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_lines: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_error: Option<String>,
+        exited_at: u64,
+    },
     ControllerChanged { attachment_id: Option<String>, generation: u64 },
     TitleChanged { title: String },
     ForegroundProcessChanged { process: Option<String> },
     Error { message: String },
+}
+
+/// The `exited` reply (`Exited`): how a pipe process (or terminal) ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exited {
+    pub exit_code: Option<u64>,
+    pub signal: Option<String>,
+    pub final_offset: u64,
+    pub output_lines: Option<u64>,
+    pub output_error: Option<String>,
+    pub exited_at: u64,
 }
 
 impl WireResponse {
@@ -103,7 +157,8 @@ impl WireResponse {
         match self {
             WireResponse::Pong { .. } => "pong",
             WireResponse::Created { .. } => "created",
-            WireResponse::Terminals { .. } => "terminals",
+            WireResponse::Processes { .. } => "processes",
+            WireResponse::Process { .. } => "process",
             WireResponse::Ok => "ok",
             WireResponse::Owned => "owned",
             WireResponse::Handoff { .. } => "handoff",
@@ -205,7 +260,7 @@ pub fn stream_event(response: WireResponse) -> Result<Option<StreamEvent>, Strin
         }
         WireResponse::TitleChanged { title } => StreamEvent::TitleChanged { title },
         WireResponse::ForegroundProcessChanged { process } => StreamEvent::ForegroundProcessChanged { process },
-        WireResponse::Exited { exit_code, final_offset } => StreamEvent::Exited { exit_code, final_offset },
+        WireResponse::Exited { exit_code, final_offset, .. } => StreamEvent::Exited { exit_code, final_offset },
         _ => return Ok(None),
     }))
 }
@@ -250,40 +305,81 @@ mod tests {
 
     fn terminal_json() -> serde_json::Value {
         json!({
-            "id": 3, "pid": 42, "title": "Terminal", "foreground_process": null, "group_id": "ses_1",
-            "command": ["/bin/bash", "-i"], "cwd": "/tmp", "cols": 80, "rows": 24,
-            "lifecycle": {"status": "exited", "exit_code": null}, "output_head": 0, "output_tail": 12
+            "id": 3, "mode": "pty", "pid": 42, "command": ["/bin/bash", "-i"], "cwd": "/tmp", "group_id": "ses_1",
+            "lifecycle": {"status": "exited", "exit_code": null}, "output_head": 0, "output_tail": 12,
+            "started_at": 1700000000000u64, "exited_at": 1700000001000u64,
+            "pty": {"title": "Terminal", "user_title": null, "foreground_process": null, "cols": 80, "rows": 24}
+        })
+    }
+
+    fn pipe_json() -> serde_json::Value {
+        json!({
+            "id": 4, "mode": "pipe", "pid": 43, "command": ["/bin/sh", "-c", "echo hi"], "cwd": "/tmp", "group_id": "proj",
+            "lifecycle": {"status": "exited", "exit_code": null, "signal": "SIGTERM"}, "output_head": 0,
+            "output_tail": 3, "started_at": 1700000000000u64, "exited_at": null,
+            "pipe": {"output_path": "/tmp/sh_1.out", "output_lines": 1, "metadata": {"id": "sh_1"}}
         })
     }
 
     #[test]
-    fn decodes_terminal_and_lifecycles() {
-        let t: WireTerminal = serde_json::from_value(terminal_json()).unwrap();
-        assert_eq!(t.lifecycle, Lifecycle::Exited { exit_code: None });
+    fn decodes_processes_and_lifecycles() {
+        let t: ProcessInfo = serde_json::from_value(terminal_json()).unwrap();
+        assert_eq!(t.lifecycle, Lifecycle::Exited { exit_code: None, signal: None });
         assert_eq!(t.command, vec!["/bin/bash", "-i"]);
+        assert_eq!((t.mode, t.pty.as_ref().unwrap().cols, t.pipe.is_none()), (Mode::Pty, 80, true));
+        let p: ProcessInfo = serde_json::from_value(pipe_json()).unwrap();
+        assert_eq!(p.lifecycle, Lifecycle::Exited { exit_code: None, signal: Some("SIGTERM".into()) });
+        assert_eq!((p.mode, p.exited_at, p.pipe.as_ref().unwrap().output_lines), (Mode::Pipe, None, 1));
+        assert_eq!(p.pipe.as_ref().unwrap().metadata["id"], "sh_1");
         let running: Lifecycle = serde_json::from_value(json!({"status": "running"})).unwrap();
         assert_eq!(running, Lifecycle::Running);
         let failed: Lifecycle = serde_json::from_value(json!({"status": "failed", "message": "boom"})).unwrap();
         assert_eq!(failed, Lifecycle::Failed { message: "boom".into() });
+        // Protocol 9 requires the process fields.
+        assert!(serde_json::from_value::<ProcessInfo>(json!({"id": 1, "pid": null})).is_err());
     }
 
     #[test]
     fn decodes_responses() {
-        let pong = WireResponse::decode(br#"{"type":"pong","instance_id":"i","pid":7,"protocol":7}"#).unwrap();
-        assert_eq!(pong, WireResponse::Pong { instance_id: "i".into(), pid: 7, protocol: 7, features: None });
+        let pong =
+            WireResponse::decode(br#"{"type":"pong","instance_id":"i","pid":7,"protocol":9,"features":[]}"#).unwrap();
+        assert_eq!(pong, WireResponse::Pong { instance_id: "i".into(), pid: 7, protocol: 9, features: vec![] });
+        // `features` is required since protocol 9.
+        assert!(WireResponse::decode(br#"{"type":"pong","instance_id":"i","pid":7,"protocol":9}"#).is_err());
         assert_eq!(WireResponse::decode(br#"{"type":"ok"}"#).unwrap(), WireResponse::Ok);
         assert_eq!(WireResponse::decode(br#"{"type":"owned"}"#).unwrap(), WireResponse::Owned);
         let handoff = WireResponse::decode(br#"{"type":"handoff","ticket":"t","expires_at":1700000000000}"#).unwrap();
         assert_eq!(handoff.type_name(), "handoff");
         let attached = json!({
-            "type": "attached", "terminal": terminal_json(), "role": "observer", "generation": 2,
+            "type": "attached", "process": terminal_json(), "role": "observer", "generation": 2,
             "requested_offset": 0, "available_offset": 0, "end_offset": 12, "truncated": false,
             "replay_base64": "aGVsbG8="
         });
         let attached = WireResponse::decode(attached.to_string().as_bytes()).unwrap();
         assert!(matches!(attached, WireResponse::Attached { role: Role::Observer, generation: 2, .. }));
+        let processes = json!({"type": "processes", "processes": [terminal_json(), pipe_json()]});
+        let processes = WireResponse::decode(processes.to_string().as_bytes()).unwrap();
+        assert!(matches!(&processes, WireResponse::Processes { processes } if processes.len() == 2));
+        let process = WireResponse::decode(json!({"type": "process", "process": pipe_json()}).to_string().as_bytes());
+        assert_eq!(process.unwrap().type_name(), "process");
+        let exited = WireResponse::decode(
+            br#"{"type":"exited","exit_code":null,"signal":"SIGKILL","final_offset":9,"output_lines":2,"exited_at":5}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            exited,
+            WireResponse::Exited {
+                exit_code: None,
+                signal: Some("SIGKILL".into()),
+                final_offset: 9,
+                output_lines: Some(2),
+                output_error: None,
+                exited_at: 5,
+            }
+        );
         let error = WireResponse::decode(br#"{"type":"error","message":"authentication failed"}"#).unwrap();
         assert_eq!(error, WireResponse::Error { message: "authentication failed".into() });
+        assert!(WireResponse::decode(br#"{"type":"terminals","terminals":[]}"#).is_err());
         assert!(WireResponse::decode(br#"{"type":"nope"}"#).is_err());
         assert!(WireResponse::decode(b"not json").is_err());
     }
@@ -296,7 +392,7 @@ mod tests {
             stream_event(r).unwrap(),
             Some(StreamEvent::Resized { cols: 100, rows: 30, generation: 4, checkpoint: vec![0, 1] })
         );
-        let r = WireResponse::decode(br#"{"type":"exited","exit_code":3,"final_offset":99}"#).unwrap();
+        let r = WireResponse::decode(br#"{"type":"exited","exit_code":3,"final_offset":99,"exited_at":1}"#).unwrap();
         assert_eq!(stream_event(r).unwrap(), Some(StreamEvent::Exited { exit_code: Some(3), final_offset: 99 }));
         assert_eq!(stream_event(WireResponse::Ok).unwrap(), None);
     }
