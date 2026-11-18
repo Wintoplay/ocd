@@ -24,7 +24,7 @@ Goal (user request): an exact behavioral replica of **opencode v2** in Rust — 
   Core is **event-sourced**: durable session events → projectors → SQLite tables; `event` table stays empty locally
   (persist=false); `event_sequence` holds per-aggregate seq (first event seq 0).
 - DB: `<XDG_DATA_HOME|~/.local/share>/opencode/opencode.db` (release channels), WAL, pragmas in spec 02 §1.3.
-  Fresh DB = run `assets/sql/schema.sql` + insert all 59 ids from `assets/sql/migration_ids.txt`.
+  Fresh DB = run `assets/sql/schema.sql` + insert all 62 ids from `assets/sql/migration_ids.txt`.
 - Paths are XDG on every OS. Log: `<data>/log/opencode.log`, logfmt, trimmed >50MiB → ~25MiB.
 - IDs: 12 hex (48-bit, ts<<12+counter, truncated) + 14 base62; `ses_` descending, others ascending.
 - v2 messages have no "parts": assistant `content[]` items (text/reasoning/tool). Stored `data` excludes `id`/`type`.
@@ -94,6 +94,23 @@ and `docs/PORTING.md`; tell it to continue from the existing code in its crate.
 - Output limit formula, media rules, history lowering: spec 03 §2.8.6–2.8.7.
 
 ## Session log
+- 2026-11-18: 2.3.1 CATCH-UP, FOUNDATION (Q0; ocd still reports 2.3.0 until the catch-up ends): the three
+  migrations `20261116043204_automation`, `…181958_automation_event_position`, `…213417_automation_active_index`
+  (byte-equivalent SQL from upstream's `.ts`; 62 ids; `schema.sql` regenerated from 2.3.1's `schema.gen.ts`): live
+  prompt schedules without `check`/`remaining_runs` become `aut_…` automations prompting their session, the rest are
+  dropped with the `schedule` table. Storage tests port `database-migration.test.ts` (copy/drop rules, in-memory DBs
+  never import `auth.json`) and the schema fixture is `schema-2.3.1.txt`, dumped from a 2.1.4 DB the 2.3.1 binary
+  migrated; side by side, a 2.3.0 DB with real schedules migrates to the same schema and rows with ocd and with
+  upstream, and each opens the other's database. Schedules are retired like upstream: no loop, tools, `/schedule` or
+  routes; `oc_core::schedule` stays unwired (its tests run over the 2.3.0 table) as the base of the automations port
+  (Q5; the old HTTP/prompter glue is `crates/oc-backend/src/schedules.rs` in git history). `assets/openapi.json` is
+  v2.3.1's (173 ops, 518 schemas; `gen.py` adds `AutomationNotFoundError`/`VideoNotFoundError`/`BlobNotFoundError`
+  and makes `experimental.blob.get` a hand-written route): `oc-backend/src/automations.rs` answers the automation
+  routes like a release build with the flag off (checks, then 403), video 403, and serves `<data>/blobs/<id>`
+  (`fsread::serve_blob`). Flags: 2.3.1's registry (`automations` with alias `schedules`, `video_generate`,
+  opt-in-only `full_codemode`; `background_compaction`/`shell_timeout_background` gone), `compaction.background`
+  (default true) replaces the flag in `compaction.rs` with 2.3.1's rules (no model/instructions invalidation, used
+  for overflow, starts past the ceiling). `plugin.list` has `opencode.tool.automation`. Parity group `api231`.
 - 2026-11-17: CAUGHT UP WITH 2.3.0 (`docs/UPGRADE-2.3.0.md`): a triage of upstream dev after 2.2.7 (180 commits) plus
   the 11 commits 2.3.0 added, then eleven batches in three waves (API/config, Code Mode engine replay, freeform tools,
   subagents, step lifecycle, MCP OAuth and pasted sign-ins, Code Mode search/fetch, small items, TUI, local discovery,

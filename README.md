@@ -66,7 +66,7 @@ optimisation, after v0.3.4), the same mock model and isolated folders; medians o
 
 | Status | Areas |
 |---|---|
-| ✅ **Same as upstream** | Sessions and history, the agent loop, permissions, built-in tools, Code Mode, agents/commands/skills, config and policies, all chat providers and sign-in methods (API keys, OAuth, ChatGPT, GitHub Copilot, Azure, AWS and Google cloud credentials, the Claude Agent provider), MCP servers, server plugins and AI SDK packages, the editor integration (ACP), the full TUI and `ocd mini`, web UI, HTTP API (170 endpoints), `/goal`, background compaction, background service, git and worktrees, Mercurial, the desktop browser attachment, `--wizard`, v1 history import |
+| ✅ **Same as upstream** | Sessions and history, the agent loop, permissions, built-in tools, Code Mode, agents/commands/skills, config and policies, all chat providers and sign-in methods (API keys, OAuth, ChatGPT, GitHub Copilot, Azure, AWS and Google cloud credentials, the Claude Agent provider), MCP servers, server plugins and AI SDK packages, the editor integration (ACP), the full TUI and `ocd mini`, web UI, HTTP API (173 endpoints), `/goal`, background compaction, background service, git and worktrees, Mercurial, the desktop browser attachment, `--wizard`, v1 history import |
 | 🟡 **Small differences** | Plugins run in a Bun helper that is downloaded on first use; a few error texts; code-block colours in `ocd mini` |
 | ⛔ **Not yet** | TUI plugins, speech and video models, image previews in the terminal, a few other experimental features |
 | ✨ **Different on purpose** | A working status line in the TUI, `ocd upgrade` from ocd's own releases, `ocd --version` shows ocd's own version |
