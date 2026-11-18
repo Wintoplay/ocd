@@ -65,10 +65,10 @@ pub fn body_digest(text: &str) -> String {
 
 /// The model types opencode keeps (`TYPES`). Only chat models are offered for sessions; the others
 /// are listed on request.
-pub const TYPES: &[&str] = &["chat", "decision", "image"];
+pub const TYPES: &[&str] = &["chat", "decision", "image", "video"];
 
 /// `catalogPath`: the experimental v2 API, limited to the model types opencode keeps.
-pub const CATALOG_PATH: &str = "/experimental/v2.0/api.json?type=chat,decision,image";
+pub const CATALOG_PATH: &str = "/experimental/v2.0/api.json?type=chat,decision,image,video";
 
 type Decoded<T> = Result<T, String>;
 

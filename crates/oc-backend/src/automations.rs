@@ -6,7 +6,7 @@
 //! off: the routes check their input, sessions, directories and stored rows like upstream, then answer
 //! `403 ForbiddenError`. Video generation (`handlers/generate.ts`) answers `403` behind `experimental.video_generate`
 //! the same way. Blobs (`handlers/blob.ts`, `core/src/blob-store.ts`) are files under `<data>/blobs/`, served
-//! without a flag.
+//! without a flag; the server deletes video blobs older than a week at startup and hourly.
 
 use oc_server::generated as api;
 use oc_server::{ApiError, BlobFile};
@@ -21,6 +21,33 @@ pub const AUTOMATIONS_DISABLED: &str = "Automations are disabled; set experiment
 pub const VIDEO_DISABLED: &str = "Video generation is disabled; enable experimental.video_generate";
 /// `BlobStore.DIRECTORY`, under the data folder.
 pub const BLOB_DIRECTORY: &str = "blobs";
+/// `BlobStore.RETENTION`: blobs are deleted 7 days after they're written.
+pub const BLOB_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// `BlobStore.layer`'s cleanup, which belongs to the server: at startup and hourly, video blobs (`video_*`, and their
+/// leftover `.part` files) older than the retention are deleted from `<data>/blobs/`.
+pub(crate) fn start_blob_cleanup(engine: &std::sync::Arc<Engine>) {
+    let directory = engine.app.global.data.join(BLOB_DIRECTORY);
+    tokio::spawn(async move {
+        loop {
+            cleanup_blobs(&directory).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+/// One pass of the blob cleanup.
+pub async fn cleanup_blobs(directory: &std::path::Path) {
+    let mut files = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(directory).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name().to_string_lossy().starts_with("video_") {
+                files.push(entry.path());
+            }
+        }
+    }
+    oc_git::file_retention::cleanup(files, BLOB_RETENTION).await;
+}
 
 fn disabled() -> ApiError {
     ApiError::forbidden(AUTOMATIONS_DISABLED)

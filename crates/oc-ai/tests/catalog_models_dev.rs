@@ -195,7 +195,7 @@ async fn cached(data: &Value) -> Vec<Snapshot> {
 fn cache_keys_and_dates() {
     assert_eq!(cache_key("https://models.opencode.ai"), "models-dev:v2:catalog");
     assert_eq!(cache_key("https://example.com"), format!("models-dev:v2:catalog:{}", oc_util::hash::fast("https://example.com")));
-    assert_eq!(CATALOG_PATH, "/experimental/v2.0/api.json?type=chat,decision,image");
+    assert_eq!(CATALOG_PATH, "/experimental/v2.0/api.json?type=chat,decision,image,video");
     assert_eq!(released("2026-01-01"), 1767225600000.0);
     assert_eq!(released("2025-02"), 1738368000000.0);
     assert_eq!(released("bogus"), 0.0);
@@ -401,11 +401,19 @@ async fn drops_model_types_opencode_doesnt_keep() {
         json!({"id": id, "type": kind, "name": id, "release_date": "2026-01-01", "modalities": {"input": ["text"], "output": ["image"]},
                "capabilities": {"tools": {"supported": false}, "reasoning": {"supported": false}}, "api": api})
     };
+    let mut veo = model("acme-veo", "video");
+    veo["api"] = json!({"videos": {"base_url": "https://api.acme.test/v1", "sdk": {"opencodeai": "@opencode/ai/providers/xai/videos"}}});
     let data = json!({"acme": {"id": "acme", "name": "Acme", "env": ["ACME_API_KEY"], "models": {
-        "acme-image": model("acme-image", "image"), "acme-video": model("acme-video", "video")
+        "acme-image": model("acme-image", "image"), "acme-video": model("acme-video", "video"), "acme-veo": veo,
+        "acme-embed": model("acme-embed", "embedding")
     }}});
     let result = cached(&data).await;
-    assert_eq!(result[0].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["acme-image"]);
+    // 2.3.1 keeps video models, run through their type's own entrypoint (`/videos`); a video model with only an
+    // image entrypoint is skipped.
+    assert_eq!(result[0].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["acme-image", "acme-veo"]);
+    let veo = result[0].models.iter().find(|m| m.id == "acme-veo").unwrap();
+    assert_eq!(veo.kind.as_deref(), Some("video"));
+    assert_eq!(veo.package.as_deref(), Some("@opencode/ai/providers/xai/videos"));
 }
 
 #[tokio::test]
@@ -479,7 +487,7 @@ async fn falls_back_to_api_json_when_a_custom_mirror_has_no_v2_catalog() {
     let result = service.get().await.unwrap();
     assert_eq!(
         *http.0.lock(),
-        ["https://mirror.example/experimental/v2.0/api.json?type=chat,decision,image", "https://mirror.example/api.json"]
+        ["https://mirror.example/experimental/v2.0/api.json?type=chat,decision,image,video", "https://mirror.example/api.json"]
     );
     assert_eq!(result[0].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["beta-1"]);
 }
@@ -538,7 +546,7 @@ async fn uses_default_url_when_configured_url_is_empty() {
     opts.url = Some(String::new());
     let service = ModelsDev::new(opts, Arc::new(MemoryCache::default()), http.clone());
     service.get().await.unwrap();
-    assert_eq!(http.calls()[0].url, "https://models.opencode.ai/experimental/v2.0/api.json?type=chat,decision,image");
+    assert_eq!(http.calls()[0].url, "https://models.opencode.ai/experimental/v2.0/api.json?type=chat,decision,image,video");
     assert_eq!(http.calls()[0].user_agent, "opencode/test/1.0.0/opencode");
 }
 

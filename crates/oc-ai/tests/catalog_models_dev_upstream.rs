@@ -1,5 +1,5 @@
 //! Cross-checks ocd's models.dev normalization against upstream's `ModelsDev.decodeSnapshot`, run with
-//! Bun on the upstream checkout. Needs `OCD_SCRATCH` (with `src/opencode-2.2.2`, dependencies installed)
+//! Bun on the upstream checkout. Needs `OCD_SCRATCH` (with `src/opencode-2.3.1`, dependencies installed)
 //! and `OCD_BUN_PATH`; skipped otherwise.
 
 use oc_ai::catalog::models_dev::{decode_snapshot, Snapshot, SNAPSHOT};
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 fn upstream_core() -> Option<(PathBuf, PathBuf)> {
     let scratch = std::env::var("OCD_SCRATCH").ok()?;
     let bun = PathBuf::from(std::env::var("OCD_BUN_PATH").ok()?);
-    let core = PathBuf::from(scratch).join("src/opencode-2.2.2/packages/core/src");
+    let core = PathBuf::from(scratch).join("src/opencode-2.3.1/packages/core/src");
     (core.join("models-dev.ts").is_file() && bun.is_file()).then_some((core, bun))
 }
 
@@ -61,7 +61,7 @@ fn ours(data: &[Snapshot]) -> Value {
 
 fn compare(catalog: &str) {
     let Some((core, bun)) = upstream_core() else {
-        eprintln!("upstream 2.2.2 checkout or bun not found (set OCD_SCRATCH and OCD_BUN_PATH); skipping");
+        eprintln!("upstream 2.3.1 checkout or bun not found (set OCD_SCRATCH and OCD_BUN_PATH); skipping");
         return;
     };
     let expected = numbers(upstream_normalize(&core, &bun, catalog));
@@ -153,6 +153,7 @@ fn edge_cases_normalize_like_upstream() {
             "missing-output": model("missing-output", json!({"cost": {"text": {"input": {"price": 1}}}})),
             "broken": {"id": "broken", "type": "chat"},
             "video": model("video", json!({"type": "video"})),
+            "video-xai": model("video-xai", json!({"type": "video", "api": {"videos": {"base_url": "https://api.acme.test/v1", "sdk": {"opencodeai": "@opencode/ai/providers/xai/videos"}}}})),
             "image-no-entry": model("image-no-entry", json!({"type": "image"})),
             "image": model("image", json!({"type": "image", "api": {"images": {"base_url": "https://api.acme.test/v1", "sdk": {"opencodeai": "@opencode/ai/providers/openai-compatible/images"}}}})),
             "unknown-entry": model("unknown-entry", json!({"api": {"x": {"sdk": {"opencodeai": "@opencode/ai/providers/acme/next"}}, "y": {"base_url": "https://y.test", "sdk": {"aisdk": "@ai-sdk/anthropic"}}}})),

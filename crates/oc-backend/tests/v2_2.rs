@@ -169,7 +169,7 @@ async fn generate_reports_typed_model_errors() {
     std::fs::write(
         g.config.join("opencode.json"),
         json!({ "providers": { "custom": { "name": "Custom", "package": "@ai-sdk/openai-compatible",
-            "settings": { "baseURL": "http://127.0.0.1:9/v1", "apiKey": "k" }, "models": { "m": { "name": "M" } } } } })
+            "settings": { "baseURL": "http://127.0.0.1:9/v1", "apiKey": "k" }, "models": { "m": { "name": "M" }, "v": { "name": "V", "type": "video" } } } } })
         .to_string(),
     )
     .unwrap();
@@ -211,6 +211,15 @@ async fn generate_reports_typed_model_errors() {
             422,
             json!({ "_tag": "UnsupportedModelError", "providerID": "custom", "modelID": "m", "capability": "image",
                     "message": "custom/m is a chat model, not a image model" })
+        )
+    );
+    // 2.3.1: a video model's ref sent to another modality is a 422 too.
+    assert_eq!(
+        post("/api/experimental/generate/image", json!({ "prompt": "hi", "model": { "providerID": "custom", "id": "v" } })).await,
+        (
+            422,
+            json!({ "_tag": "UnsupportedModelError", "providerID": "custom", "modelID": "v", "capability": "image",
+                    "message": "custom/v is a video model, not a image model" })
         )
     );
     let q = json!({ "type": "predicate", "name": "a", "instructions": "is it?" });

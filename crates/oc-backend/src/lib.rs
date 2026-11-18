@@ -69,6 +69,7 @@ pub async fn start(
     start_v1_import(&engine);
     start_models_refresh(&engine);
     start_project_sweep(&engine);
+    automations::start_blob_cleanup(&engine);
     Ok((server, engine))
 }
 

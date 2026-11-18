@@ -298,3 +298,31 @@ fn storage_failures_are_classified_by_their_primary_code() {
     }
     assert_eq!(failure::message_for_code(19), None);
 }
+
+/// `BlobStore`: video blobs and their leftover `.part` files older than a week are deleted; newer ones, and files
+/// that are not video blobs, stay.
+#[tokio::test]
+async fn blob_cleanup_deletes_week_old_video_blobs() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("blobs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+    for (name, aged) in [
+        ("video_0123456789abABCDEFGHIJKLMN_0", true),
+        ("video_0123456789abABCDEFGHIJKLMN_1.part", true),
+        ("video_0123456789abABCDEFGHIJKLMO_0", false),
+        ("other", true),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, "x").unwrap();
+        if aged {
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        }
+    }
+    oc_backend::automations::cleanup_blobs(&dir).await;
+    let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, ["other", "video_0123456789abABCDEFGHIJKLMO_0"]);
+    // A missing folder is fine.
+    oc_backend::automations::cleanup_blobs(&root.path().join("nope")).await;
+}

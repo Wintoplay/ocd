@@ -132,8 +132,8 @@ pub const BUILTIN_PACKAGES: &[&str] = &[
 ];
 
 /// Every `@opencode/ai/providers/*` entrypoint upstream's Core bundles (`Provider.builtinPackages`),
-/// including the image, decision and video entrypoints (video models are library-only: the catalog keeps no video
-/// type). The models.dev catalog keeps
+/// including the image, decision and video entrypoints (2.3.1 keeps video models in the catalog; ocd lists them but
+/// does not generate videos). The models.dev catalog keeps
 /// models whose API names one of these (`loadable`); a chat model whose package is missing from
 /// [`BUILTIN_PACKAGES`] fails to load.
 pub const CATALOG_PACKAGES: &[&str] = &[
@@ -231,6 +231,7 @@ pub const CATALOG_PACKAGES: &[&str] = &[
     "@opencode/ai/providers/vercel-ai-gateway/images",
     "@opencode/ai/providers/xai",
     "@opencode/ai/providers/xai/images",
+    "@opencode/ai/providers/xai/videos",
     "@opencode/ai/providers/zai",
     "@opencode/ai/providers/zai/chat",
     "@opencode/ai/providers/zai/images",

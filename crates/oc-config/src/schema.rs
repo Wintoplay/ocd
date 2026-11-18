@@ -1597,7 +1597,7 @@ impl Decode for Limit {
 pub struct ProviderModel {
     #[serde(rename = "modelID", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    /// `Model.Type`: `chat`, `decision`, `image` or any other string; unset means chat.
+    /// `Model.Type`: `chat`, `decision`, `image`, `video` or any other string; unset means chat.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

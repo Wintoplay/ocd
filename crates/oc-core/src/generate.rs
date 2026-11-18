@@ -36,9 +36,9 @@ fn model_type(model: &oc_ai::catalog::ModelInfo) -> &str {
     model.kind.as_deref().unwrap_or("chat")
 }
 
-/// `models.available(["chat", "image", "decision"])`.
+/// `models.available(["chat", "image", "video", "decision"])`.
 fn generation_models(catalog: &oc_ai::catalog::Catalog) -> Vec<&oc_ai::catalog::ModelInfo> {
-    catalog.available_models_of(&["chat".to_string(), "image".to_string(), "decision".to_string()])
+    catalog.available_models_of(&["chat".to_string(), "image".to_string(), "video".to_string(), "decision".to_string()])
 }
 
 /// `missing`: a ref no model of this type has: another type's model (422) or no model at all (404).
