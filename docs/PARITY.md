@@ -161,6 +161,18 @@ iterator's `next`.
 
 ## Results
 
+**2.3.1 catch-up, core tools and sessions (Q2; debug build, 2026-11-18):** against the opencode 2.3.1 binary,
+groups `loop`, `permission`, `stop`, `tools22`, `tools227` and `shell225` plus `readonly_*` (57 scenarios): **53
+identical**, among them `readonly_instructions` and `loop_llm_request` (the 2.3.1 `read`/`shell` descriptions and
+schemas in the request), `loop_shell_tool`, `tools227_read`, `tools227_shell`, `stop_background_shell`,
+`stop_shell_keeps_output` and every `permission_*`. Left: `loop_tool_error`, `loop_http_400` and
+`stop_retry_exhausted`, the known races below, and `readonly_fs`, where both now index hidden files and only the
+fuzzy ranking of two equally scored directories differs (`fs.find` approximates fff). With the tool texts in place,
+`automation_tools_direct`, `claude_*` (13), `plugin_aisdk*`, `plugin_copilot*` and
+`wire22_{chat_options,mcp_malformed_tools,output_headroom}` are identical too; `automation_command` differs only by an
+ephemeral Code Mode tool-progress event and `subagent_report_running_work` only by the order of ephemeral usage events
+(its durable reports, built from the outstanding-work snapshot, match).
+
 **2.3.1 catch-up, automations (Q5; debug build, 2026-11-18):** the new `automation` group (10 scenarios, replacing
 `schedule`) against the opencode 2.3.1 binary with `OPENCODE_FLAGS=automations`: **8 identical** (`automation_api`,
 `_api_unattended`, `_config_alias`, `_folder_gone`, `_fires`, `_subagent`, `_checks`, `_lease`). `automation_command`
