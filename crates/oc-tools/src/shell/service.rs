@@ -273,23 +273,27 @@ impl ShellService {
         Ok(info)
     }
 
-    /// Output page by byte cursor.
+    /// Output page by byte cursor. A page never splits a UTF-8 character: it starts after the rest of one the cursor
+    /// cut, and ends before one the limit would cut, holding back a valid prefix at the end of a running command's
+    /// output (#63984).
     pub fn output(&self, id: &str, cursor: Option<u64>, limit: Option<u64>) -> Result<ShellOutput, NotFound> {
         let command = self.require(id)?;
+        let running = command.info.lock().status == ShellStatus::Running;
         let size = command.size.load(Ordering::SeqCst);
         let cursor = cursor.unwrap_or(0);
         let limit = limit.unwrap_or(65536);
         if cursor >= size {
             return Ok(ShellOutput { output: String::new(), cursor: size, size, truncated: false });
         }
-        let length = limit.min(size - cursor);
-        let bytes = read_range(&command.file, cursor, length).unwrap_or_default();
-        Ok(ShellOutput {
-            output: String::from_utf8_lossy(&bytes).into_owned(),
-            cursor: cursor + bytes.len() as u64,
-            size,
-            truncated: false,
-        })
+        let start = cursor;
+        if limit == 0 {
+            return Ok(ShellOutput { output: String::new(), cursor: start, size, truncated: false });
+        }
+        // A UTF-8 character can straddle either edge by up to three bytes.
+        let offset = start.saturating_sub(3);
+        let bytes = read_range(&command.file, offset, size.min(start.saturating_add(limit).saturating_add(3)) - offset).unwrap_or_default();
+        let (output, cursor) = output_page(&bytes, offset, start, limit, running);
+        Ok(ShellOutput { output, cursor, size, truncated: false })
     }
 
     /// Terminal state and bounded tail.
@@ -539,6 +543,59 @@ impl ShellService {
     }
 }
 
+/// One page of output from `bytes`, the file's bytes from `offset` (up to three bytes before the cursor `start`) to at
+/// most three bytes past `start + limit`: the decoded page and the cursor after it.
+fn output_page(bytes: &[u8], offset: u64, start: u64, limit: u64, running: bool) -> (String, u64) {
+    let from = ((start - offset) as usize).min(bytes.len());
+    let to = bytes.len().min(from.saturating_add(limit.min(usize::MAX as u64) as usize));
+    let first = split_character(bytes, from, running).and_then(|split| split.end).unwrap_or(from);
+    let last = split_character(bytes, to, running);
+    // Keep the usual limit unless even the first complete character would not fit.
+    let end = match last {
+        Some(Split { start, end: Some(end) }) if start == first => end,
+        Some(split) => split.start,
+        None => to,
+    };
+    let output = if end > first { String::from_utf8_lossy(&bytes[first..end]).into_owned() } else { String::new() };
+    (output, offset + first.max(end) as u64)
+}
+
+/// A UTF-8 character crossing a byte offset: where it starts, and where it ends (none for a valid prefix at a live
+/// end of output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Split {
+    start: usize,
+    end: Option<usize>,
+}
+
+/// `splitCharacter`: the character crossing `cut`, if a well-formed one does.
+fn split_character(bytes: &[u8], cut: usize, running: bool) -> Option<Split> {
+    for start in (cut.saturating_sub(3)..cut).rev() {
+        let lead = bytes[start];
+        if lead & 0xc0 == 0x80 {
+            continue;
+        }
+        if !(0xc2..=0xf4).contains(&lead) {
+            return None;
+        }
+        let end = start + if lead < 0xe0 { 2 } else if lead < 0xf0 { 3 } else { 4 };
+        if end <= cut {
+            return None;
+        }
+        if end <= bytes.len() {
+            return std::str::from_utf8(&bytes[start..end]).is_ok().then_some(Split { start, end: Some(end) });
+        }
+        // A valid prefix of a character: what a streaming decoder holds back without a replacement.
+        let prefix = &bytes[start..];
+        let valid = match std::str::from_utf8(prefix) {
+            Ok(_) => true,
+            Err(error) => error.valid_up_to() == 0 && error.error_len().is_none(),
+        };
+        return (running && valid).then_some(Split { start, end: None });
+    }
+    None
+}
+
 fn read_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;
@@ -546,6 +603,53 @@ fn read_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> 
     let mut buffer = Vec::with_capacity(length as usize);
     file.take(length).read_to_end(&mut buffer)?;
     Ok(buffer)
+}
+
+/// shell-daemon.test.ts (2.3.1, #63984): pages keep UTF-8 characters whole on both edges.
+#[cfg(test)]
+mod page_tests {
+    use super::output_page;
+
+    /// `shell.output(id, {cursor, limit})` over a file holding `file`.
+    fn page(file: &[u8], cursor: u64, limit: u64, running: bool) -> (String, u64) {
+        let size = file.len() as u64;
+        if cursor >= size {
+            return (String::new(), size);
+        }
+        if limit == 0 {
+            return (String::new(), cursor);
+        }
+        let offset = cursor.saturating_sub(3);
+        let end = size.min(cursor + limit + 3);
+        output_page(&file[offset as usize..end as usize], offset, cursor, limit, running)
+    }
+
+    #[test]
+    fn pages_at_utf8_boundaries_with_byte_cursors() {
+        let prefix = "a".repeat(65535);
+        for c in ["é", "€", "😀"] {
+            let text = format!("{prefix}{c}\u{FEFF}z");
+            let bytes = text.as_bytes();
+            let (first, cursor) = page(bytes, 0, 65536, true);
+            assert_eq!(cursor, prefix.len() as u64);
+            let (rest, end) = page(bytes, cursor, 65536, true);
+            assert_eq!(format!("{first}{rest}"), text);
+            assert_eq!(end, bytes.len() as u64);
+            assert_eq!(page(bytes, cursor, 1, true), (c.to_string(), cursor + c.len() as u64));
+            assert_eq!(page(bytes, cursor + 1, 65536, true), ("\u{FEFF}z".to_string(), bytes.len() as u64));
+        }
+        assert_eq!(page(&[b'a'; 65537], 65536, 0, true), (String::new(), 65536));
+    }
+
+    #[test]
+    fn retries_an_incomplete_live_character_and_consumes_malformed_bytes_at_exit() {
+        let start = [0xff, 0xf0, 0x9f];
+        assert_eq!(page(&start, 0, 65536, true), ("\u{FFFD}".to_string(), 1));
+        assert_eq!(page(&start, 1, 1, true), (String::new(), 1));
+        let more = [0xff, 0xf0, 0x9f, 0x98, 0x80, 0xe0, 0x80, 0xe2];
+        assert_eq!(page(&more, 1, 65536, true), ("😀\u{FFFD}\u{FFFD}".to_string(), 7));
+        assert_eq!(page(&more, 7, 65536, false), ("\u{FFFD}".to_string(), 8));
+    }
 }
 
 #[cfg(all(test, unix))]

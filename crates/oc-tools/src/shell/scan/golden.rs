@@ -4,7 +4,8 @@
 //! combinations against the real `ShellScan.scan` / `ShellScan.scanPowerShell` / `ShellParse.scan`, one JSON
 //! object per line. A deterministic, outcome-stratified sample of the 95,128 unique recorded calls (all of which
 //! this port reproduces apart from those that read the process environment). `wordEnds` and `redirectPrefixEnd`
-//! are upstream UTF-16 offsets; home is `/home/user`.
+//! are upstream UTF-16 offsets; home is `/home/user`. The four cases with unknown ANSI-C escapes were
+//! re-recorded against v2.3.1 (#64263), and its two new oracle inputs added in each dialect.
 
 pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' | printf fuzz8189","shell":"/bin/bash","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"echo 'two words'","save":"echo *"},{"resource":"printf fuzz8189","save":"printf *"}],"directories":[]}}
 {"fn":"parse","command":"git hash#word && printf fuzz9585","shell":"/bin/bash","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"git hash#word","save":"git hash#word *"},{"resource":"printf fuzz9585","save":"printf *"}],"directories":[]}}
@@ -148,7 +149,7 @@ pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' |
 {"fn":"scan","input":"{ echo a; } 1>&3-","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"echo a","words":["echo","a"],"rawWords":["echo","a"]}]}}
 {"fn":"scan","input":"git status <> rw &!","dialect":"posix","result":{"kind":"scanned","commands":[{"resource":"git status <> rw","words":["git","status"],"rawWords":["git","status"]},{"resource":"!","words":["!"],"rawWords":["!"]}]}}
 {"fn":"scan","input":"cat << 'EOF'\n$x\nEOF && echo ok","dialect":"posix","result":{"kind":"opaque","reason":"heredoc"}}
-{"fn":"scan","input":"$'scan_probe\\uz'","dialect":"bash","result":{"kind":"opaque","reason":"unterminated-quote"}}
+{"fn":"scan","input":"$'scan_probe\\uz'","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"$'scan_probe\\uz'","words":["scan_probe\\uz"],"rawWords":["$'scan_probe\\uz'"]}]}}
 {"fn":"parse","command":"npm run >>output test |& pwd >last","shell":"/bin/bash","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"npm run >>output test","save":"npm run *"},{"resource":"pwd >last","save":"pwd *"}],"directories":[]}}
 {"fn":"parse","command":"cat 'two words' && printf fuzz5479","shell":"/bin/bash","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"cat 'two words'","save":"cat *"},{"resource":"printf fuzz5479","save":"printf *"}],"directories":[]}}
 {"fn":"scan","input":"echo 'two words' | cd fuzz9239","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"echo 'two words'","words":["echo","two words"],"rawWords":["echo","'two words'"]},{"resource":"cd fuzz9239","words":["cd","fuzz9239"],"rawWords":["cd","fuzz9239"]}]}}
@@ -874,7 +875,7 @@ pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' |
 {"fn":"scan","input":"printf ok\ngit >>output status","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"printf ok","words":["printf","ok"],"rawWords":["printf","ok"]},{"resource":"git >>output status","words":["git","status"],"rawWords":["git","status"],"redirectWordCount":1}]}}
 {"fn":"scan","input":"{fd}> file | cat","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"{fd}> file","words":["{fd}>"],"rawWords":["{fd}>"],"redirectPrefixEnd":5},{"resource":"cat","words":["cat"],"rawWords":["cat"]}]}}
 {"fn":"scan","input":"(( x )); x=$(printf '\\x5b')","dialect":"bash","result":{"kind":"opaque","reason":"dynamic-execution"}}
-{"fn":"scan","input":"$'de\\clare' 'a[$(scan_probe)]=1'","dialect":"zsh","result":{"kind":"opaque","reason":"unterminated-quote"}}
+{"fn":"scan","input":"$'de\\clare' 'a[$(scan_probe)]=1'","dialect":"zsh","result":{"kind":"opaque","reason":"dynamic-execution"}}
 {"fn":"scan","input":"export OUTER=$( f+() case x in x) scan_probe;; esac; f+\n)","dialect":"zsh","result":{"kind":"scanned","commands":[{"resource":"export OUTER=$( f+() case x in x) scan_probe;; esac; f+\n)","words":["export","OUTER=$( f+() case x in x) scan_probe;; esac; f+\n)"],"rawWords":["export","OUTER=$( f+() case x in x) scan_probe;; esac; f+\n)"],"declaration":true},{"resource":"scan_probe","words":["scan_probe"],"rawWords":["scan_probe"]},{"resource":"f+","words":["f+"],"rawWords":["f+"]}]}}
 {"fn":"scan","input":"<<EOF\nbody\nEOF { echo a; }; echo next","dialect":"posix","result":{"kind":"opaque","reason":"heredoc"}}
 {"fn":"parse","command":"cat < in\necho line","shell":"sh","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"cat < in","save":"cat *"},{"resource":"echo line","save":"echo *"}],"directories":[]}}
@@ -1122,7 +1123,7 @@ pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' |
 {"fn":"parse","command":". $a.b()","shell":"/usr/local/bin/pwsh","cwd":"/workspace/dir","home":"/home/user","result":{"commands":[{"resource":". $a.b()","save":". $a.b(*"},{"resource":"$a.b()","save":"$a.b(*"}],"directories":[]}}
 {"fn":"scan","input":"echo *(e:'rm -rf /':)","dialect":"zsh","result":{"kind":"opaque","reason":"dynamic-execution"}}
 {"fn":"scan","input":"for k in 1; do export X=$$'\\'; scan_probe # '\ndone","dialect":"posix","result":{"kind":"opaque","reason":"unterminated-quote"}}
-{"fn":"scan","input":"x=$'\\u{41}'; echo $((x))","dialect":"bash","result":{"kind":"opaque","reason":"unterminated-quote"}}
+{"fn":"scan","input":"x=$'\\u{41}'; echo $((x))","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"echo $((x))","words":["echo","$((x))"],"rawWords":["echo","$((x))"]}]}}
 {"fn":"parse","command":"export -p &> log &| cat","shell":"dash","cwd":"/workspace","home":"/home/user","error":"Portable shell scanner cannot analyze command: invalid-structure"}
 {"fn":"scan","input":"a[$x]=1; echo *(.)","dialect":"posix","result":{"kind":"opaque","reason":"invalid-structure"}}
 {"fn":"parse","command":"{ echo a; } &>> log | cat","shell":"bash","cwd":"/workspace","home":"/home/user","result":{"commands":[{"resource":"echo a","save":"echo *"},{"resource":"&>> log","save":"&>> *"},{"resource":"cat","save":"cat *"}],"directories":[]}}
@@ -1381,7 +1382,7 @@ pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' |
 {"fn":"scan","input":"printf ok \"unterminated","dialect":"posix","result":{"kind":"opaque","reason":"unterminated-quote"}}
 {"fn":"scan","input":"3>&1 ( echo b ) | cat","dialect":"bash","result":{"kind":"opaque","reason":"compound-command"}}
 {"fn":"scan","input":"cat <<$'\\uZZ'\nbody\n\\uZZ\n","dialect":"zsh","result":{"kind":"opaque","reason":"invalid-redirect"}}
-{"fn":"scan","input":"$'scan_probe\\c@x'","dialect":"zsh","result":{"kind":"opaque","reason":"unterminated-quote"}}
+{"fn":"scan","input":"$'scan_probe\\c@x'","dialect":"zsh","result":{"kind":"scanned","commands":[{"resource":"$'scan_probe\\c@x'","words":["scan_probec@x"],"rawWords":["$'scan_probe\\c@x'"]}]}}
 {"fn":"scan","input":"2> /dev/null ( echo b ) more","dialect":"bash","result":{"kind":"opaque","reason":"compound-command"}}
 {"fn":"ps","input":"Write-Output ok 'unterminated","result":{"kind":"opaque","reason":"unterminated-quote"}}
 {"fn":"parse","command":"x=$(echo 'a{$(touch pwn)]' | tr '{' '\\133'); (( x ))","shell":"bash","cwd":"/workspace","home":"/home/user","error":"Portable shell scanner cannot analyze command: dynamic-execution"}
@@ -1433,4 +1434,10 @@ pub(crate) const CASES: &str = r####"{"fn":"parse","command":"echo 'two words' |
 {"fn":"parse","command":"Write-Output `","shell":"pwsh","cwd":"/workspace","home":"/home/user","error":"Portable shell scanner cannot analyze command: unterminated-escape"}
 {"fn":"ps","input":"Write-Output `u{xyz}","result":{"kind":"opaque","reason":"unterminated-escape"}}
 {"fn":"parse","command":"FOO=bar >","shell":"bash","cwd":"/workspace","home":"/home/user","error":"Portable shell scanner cannot analyze command: invalid-redirect"}
-{"fn":"ps","input":"Write-Output @'\nunclosed","result":{"kind":"opaque","reason":"unterminated-quote"}}"####;
+{"fn":"ps","input":"Write-Output @'\nunclosed","result":{"kind":"opaque","reason":"unterminated-quote"}}
+{"fn":"scan","input":"$'scan\\_probe'","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":"$'scan\\_probe'","words":["scan\\_probe"],"rawWords":["$'scan\\_probe'"]}]}}
+{"fn":"scan","input":"$'scan\\_probe'","dialect":"zsh","result":{"kind":"scanned","commands":[{"resource":"$'scan\\_probe'","words":["scan_probe"],"rawWords":["$'scan\\_probe'"]}]}}
+{"fn":"scan","input":"$'scan\\_probe'","dialect":"posix","result":{"kind":"opaque","reason":"unsupported-escape"}}
+{"fn":"scan","input":": <<$'E\\[F'\nE[F\nscan_probe\nE\\[F","dialect":"bash","result":{"kind":"scanned","commands":[{"resource":": <<$'E\\[F'\nE[F\nscan_probe\nE\\[F","words":[":"],"rawWords":[":"]}]}}
+{"fn":"scan","input":": <<$'E\\[F'\nE[F\nscan_probe\nE\\[F","dialect":"zsh","result":{"kind":"scanned","commands":[{"resource":": <<$'E\\[F'\nE[F","words":[":"],"rawWords":[":"]},{"resource":"scan_probe","words":["scan_probe"],"rawWords":["scan_probe"]},{"resource":"E\\[F","words":["E[F"],"rawWords":["E\\[F"]}]}}
+{"fn":"scan","input":": <<$'E\\[F'\nE[F\nscan_probe\nE\\[F","dialect":"posix","result":{"kind":"opaque","reason":"invalid-redirect"}}"####;

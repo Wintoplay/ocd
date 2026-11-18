@@ -45,8 +45,9 @@ pub fn description(shell: Option<&str>) -> String {
             "Prefer dedicated tools over shell commands when possible.",
             "When output is large, the full result is saved to a file and a truncated preview is returned.",
             "Rely on automatic truncation unless filtering the output is more useful.",
-            "Commands accept an optional timeout, background commands have no timeout by default.",
+            "Commands still running after their timeout move to the background.",
             "Background commands return immediately, and you will be notified when they complete.",
+            "The current session ID is available in the OPENCODE_SESSION_ID environment variable.",
         ]
         .map(String::from),
     );
@@ -82,26 +83,26 @@ fn wall_time_seconds(started: u64, end: u64) -> f64 {
     end.saturating_sub(started) as f64 / 1_000.0
 }
 
-/// The structured output (`StructuredOutput`, 2.3.0), in its schema's key order.
+/// The structured output (`StructuredOutput`, 2.3.1), in its schema's key order.
 fn structured(output: &ShellOutput) -> Value {
     let mut value = serde_json::Map::new();
-    value.insert("output".into(), json!(output.base.output));
-    value.insert("exitCode".into(), output.base.exit.map_or(Value::Null, |exit| json!(exit)));
-    // A JS number: whole seconds have no fraction.
-    let seconds = output.wall_time_seconds;
-    value.insert("wallTimeSeconds".into(), if seconds.fract() == 0.0 { json!(seconds as i64) } else { json!(seconds) });
-    if let Some(path) = &output.output_path {
-        value.insert("outputPath".into(), json!(path));
+    if let Some(id) = &output.shell_id {
+        value.insert("shellID".into(), json!(id));
     }
+    value.insert("exitCode".into(), output.base.exit.map_or(Value::Null, |exit| json!(exit)));
     if let Some(signal) = &output.base.signal {
         value.insert("signal".into(), json!(signal));
     }
-    if let Some(id) = &output.shell_id {
-        value.insert("shellID".into(), json!(id));
+    value.insert("output".into(), json!(output.base.output));
+    if let Some(path) = &output.output_path {
+        value.insert("outputPath".into(), json!(path));
     }
     if let Some(pid) = output.pid {
         value.insert("pid".into(), json!(pid));
     }
+    // A JS number: whole seconds have no fraction.
+    let seconds = output.wall_time_seconds;
+    value.insert("wallTimeSeconds".into(), if seconds.fract() == 0.0 { json!(seconds as i64) } else { json!(seconds) });
     Value::Object(value)
 }
 
@@ -123,19 +124,27 @@ fn tool_result(output: ShellOutput, timeout: Option<u64>) -> ToolResult {
     }
 }
 
-/// `backgroundText`: what a call whose command moved to the background returns.
-fn background_text(info: &oc_schema::message::ShellInfo) -> String {
+/// `backgroundText`: what a call whose command moved to the background returns; `timeout` (ms) when its foreground
+/// timeout moved it there.
+fn background_text(info: &oc_schema::message::ShellInfo, timeout: Option<u64>) -> String {
     let mut lines = vec![format!("Command moved to the background (shell ID: {}).", info.id)];
     if let Some(pid) = info.pid {
         lines.push(format!("PID: {pid}"));
     }
     lines.push(format!("Output is streaming to: {}", info.file));
+    if let Some(timeout) = timeout {
+        lines.push(String::new());
+        lines.push(format!(
+            "The command did not finish within its timeout of {} seconds and was moved to the background. Do not start another copy while it is running.",
+            crate::util::js::number(timeout as f64 / 1_000.0)
+        ));
+    }
     lines.join("\n")
 }
 
-fn background_result(info: &oc_schema::message::ShellInfo, now: u64) -> ShellOutput {
+fn background_result(info: &oc_schema::message::ShellInfo, now: u64, timeout: Option<u64>) -> ShellOutput {
     ShellOutput {
-        base: Output { output: background_text(info), truncated: false, ..Default::default() },
+        base: Output { output: background_text(info, timeout), truncated: false, ..Default::default() },
         shell_id: Some(info.id.clone()),
         running: true,
         wall_time_seconds: wall_time_seconds(info.time.started, now),
@@ -327,7 +336,8 @@ impl Tool for ShellTool {
         };
         let leaf = format!("Unable to execute command: {}", input.command);
         let background = input.background == Some(true);
-        let timeout = if background { input.timeout.unwrap_or(0) } else { input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS) };
+        // A foreground timeout of 0 falls back to the default, so a call can't block until the command exits.
+        let timeout = if background { input.timeout.unwrap_or(0) } else { input.timeout.filter(|t| *t > 0).unwrap_or(DEFAULT_TIMEOUT_MS) };
         let shell = Self::compatible_shell(&ctx);
         let base_env: HashMap<String, String> = if ctx.workspace_id.is_some() {
             HashMap::new()
@@ -359,6 +369,10 @@ impl Tool for ShellTool {
             _ = stopped() => return Err(ToolError::new("Command interrupted by the user before it started.")),
             prepared = self.prepare(&mut invocation, &ctx, &leaf) => prepared?,
         };
+        // A foreground timeout moves the command to the background instead of stopping it.
+        if !background {
+            invocation.timeout = 0;
+        }
 
         let info = self
             .service
@@ -444,13 +458,26 @@ impl ShellTool {
         if background {
             let _ = ctx.host.job_background(&job.id).await;
             spawn_notifier(&ctx, job.id.clone(), info.id.clone(), info.command.clone(), settled_rx);
-            return Ok(tool_result(background_result(&info, crate::util::now_ms()), None));
+            return Ok(tool_result(background_result(&info, crate::util::now_ms(), None), None));
         }
 
+        // Past its timeout, a foreground command moves to the background (#63699).
+        let limit = final_timeout.load(Ordering::SeqCst);
+        let deadline = (limit > 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(limit));
+        let expired = || async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
         // A user's stop arrives through `stop`; an interrupt (a server shutdown) cancels the job, which stops the
         // command and keeps it, output file included.
         let blocked = tokio::select! {
             result = ctx.host.job_block(&job.id, &ctx.session_id) => result,
+            _ = expired() => match ctx.host.job_background(&job.id).await {
+                Ok(Some(_)) => return Ok(self.timed_out(&ctx, &job.id, &info, limit, &final_timeout, settled_rx)),
+                _ => Ok(None),
+            },
             _ = stopped() => return Err(self.cancelled(&ctx, &info, &job.id).await),
             _ = ctx.cancel.cancelled() => {
                 let _ = ctx.host.job_cancel(&job.id).await;
@@ -463,7 +490,7 @@ impl ShellTool {
                 let _ = self.service.timeout(&info.id, 0);
                 final_timeout.store(0, Ordering::SeqCst);
                 spawn_notifier(&ctx, job.id.clone(), info.id.clone(), info.command.clone(), settled_rx);
-                return Ok(tool_result(background_result(&info, crate::util::now_ms()), None));
+                return Ok(tool_result(background_result(&info, crate::util::now_ms(), None), None));
             }
             Ok(Some(JobBlockResult::Finished(job_info))) if job_info.status == JobStatus::Error => {
                 return Err(ToolError::with_cause(leaf, ErrorCause::Error(job_info.error.unwrap_or_else(|| "Command failed".into()))));
@@ -484,8 +511,14 @@ impl ShellTool {
                         return Err(ToolError::with_cause(leaf, ErrorCause::Error("Command failed".into())));
                     }
                 }
-                // A host without a job registry returns from `job_block` at once; the stop still reaches the call.
+                // A host without a job registry returns from `job_block` at once; the stop and the timeout still
+                // reach the call.
                 _ = stopped() => return Err(self.cancelled(&ctx, &info, &job.id).await),
+                _ = expired(), if deadline.is_some_and(|d| d > tokio::time::Instant::now()) => {
+                    if let Ok(Some(_)) = ctx.host.job_background(&job.id).await {
+                        return Ok(self.timed_out(&ctx, &job.id, &info, limit, &final_timeout, rx));
+                    }
+                }
                 _ = ctx.cancel.cancelled() => {
                     let _ = ctx.host.job_cancel(&job.id).await;
                     let _ = self.service.stop(&info.id, oc_schema::message::ShellStatus::Killed);
@@ -494,6 +527,23 @@ impl ShellTool {
             }
         };
         Ok(tool_result(output, Some(final_timeout.load(Ordering::SeqCst))))
+    }
+
+    /// The call of a foreground command its timeout moved to the background: the command runs on without a limit
+    /// and the session hears when it ends.
+    fn timed_out(
+        &self,
+        ctx: &ToolContext,
+        job_id: &str,
+        info: &oc_schema::message::ShellInfo,
+        limit: u64,
+        final_timeout: &AtomicU64,
+        settled: tokio::sync::watch::Receiver<Option<ShellOutput>>,
+    ) -> ToolResult {
+        let _ = self.service.timeout(&info.id, 0);
+        final_timeout.store(0, Ordering::SeqCst);
+        spawn_notifier(ctx, job_id.to_string(), info.id.clone(), info.command.clone(), settled);
+        tool_result(background_result(info, crate::util::now_ms(), Some(limit)), None)
     }
 }
 
@@ -504,6 +554,11 @@ mod tests {
     #[test]
     fn descriptions() {
         assert!(!description(None).contains("Commands run on"));
+        // 2.3.1 (#63699, #63718).
+        assert_eq!(
+            description(None),
+            "Execute a shell command and return its output. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands still running after their timeout move to the background. Background commands return immediately, and you will be notified when they complete. The current session ID is available in the OPENCODE_SESSION_ID environment variable."
+        );
         assert!(description(Some("bash")).contains(&format!("Commands run on {} using bash. Quote", os_name())));
     }
 
@@ -526,7 +581,7 @@ mod tests {
     /// tool-shell.test.ts (2.3.0): a backgrounded command reports its PID, output file and elapsed time.
     #[test]
     fn background_content() {
-        let result = tool_result(background_result(&info(Some(4242)), 3_500), None);
+        let result = tool_result(background_result(&info(Some(4242)), 3_500, None), None);
         assert_eq!(
             result.content,
             vec![
@@ -537,14 +592,23 @@ mod tests {
         assert_eq!(serde_json::to_string(&result.metadata).unwrap(), r#"{"status":"running","truncated":false,"shellID":"sh_1","pid":4242}"#);
         assert_eq!(
             serde_json::to_string(&result.output).unwrap(),
-            r#"{"output":"Command moved to the background (shell ID: sh_1).\nPID: 4242\nOutput is streaming to: /d/sh_1.out","exitCode":null,"wallTimeSeconds":2.5,"outputPath":"/d/sh_1.out","shellID":"sh_1","pid":4242}"#
+            r#"{"shellID":"sh_1","exitCode":null,"output":"Command moved to the background (shell ID: sh_1).\nPID: 4242\nOutput is streaming to: /d/sh_1.out","outputPath":"/d/sh_1.out","pid":4242,"wallTimeSeconds":2.5}"#
         );
-        let without = tool_result(background_result(&info(None), 500), None);
+        let without = tool_result(background_result(&info(None), 500, None), None);
         assert_eq!(
             without.content[0],
             ToolContent::Text { text: "Command moved to the background (shell ID: sh_1).\nOutput is streaming to: /d/sh_1.out".into() }
         );
         assert_eq!(without.output.unwrap()["wallTimeSeconds"], json!(0));
+        // tool-shell.test.ts (2.3.1, #63699): a foreground timeout says how long the command had.
+        let timed_out = tool_result(background_result(&info(Some(7)), 1_010, Some(10)), None);
+        assert_eq!(
+            timed_out.content[0],
+            ToolContent::Text {
+                text: "Command moved to the background (shell ID: sh_1).\nPID: 7\nOutput is streaming to: /d/sh_1.out\n\nThe command did not finish within its timeout of 0.01 seconds and was moved to the background. Do not start another copy while it is running.".into()
+            }
+        );
+        assert!(background_text(&info(None), Some(120_000)).ends_with("timeout of 120 seconds and was moved to the background. Do not start another copy while it is running."));
     }
 
     #[test]
@@ -553,7 +617,7 @@ mod tests {
         let result = tool_result(output, Some(120_000));
         assert_eq!(result.content, vec![ToolContent::Text { text: "x".into() }, ToolContent::Text { text: "Exit code: 1".into() }]);
         assert_eq!(serde_json::to_string(&result.metadata).unwrap(), r#"{"status":"completed","truncated":false,"exit":1}"#);
-        assert_eq!(serde_json::to_string(&result.output).unwrap(), r#"{"output":"x","exitCode":1,"wallTimeSeconds":2}"#);
+        assert_eq!(serde_json::to_string(&result.output).unwrap(), r#"{"exitCode":1,"output":"x","wallTimeSeconds":2}"#);
     }
 
     /// A signalled command has no exit code; a cut output names its file.
@@ -567,7 +631,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&tool_result(output, None).output).unwrap(),
-            r#"{"output":"y","exitCode":null,"wallTimeSeconds":0.25,"outputPath":"/d/sh_1.out","signal":"SIGTERM"}"#
+            r#"{"exitCode":null,"signal":"SIGTERM","output":"y","outputPath":"/d/sh_1.out","wallTimeSeconds":0.25}"#
         );
     }
 }

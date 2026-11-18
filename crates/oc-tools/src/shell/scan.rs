@@ -23,6 +23,7 @@ pub enum OpaqueReason {
     Heredoc,
     InvalidRedirect,
     InvalidStructure,
+    UnsupportedEscape,
     UnterminatedEscape,
     UnterminatedQuote,
 }
@@ -37,6 +38,7 @@ impl OpaqueReason {
             OpaqueReason::Heredoc => "heredoc",
             OpaqueReason::InvalidRedirect => "invalid-redirect",
             OpaqueReason::InvalidStructure => "invalid-structure",
+            OpaqueReason::UnsupportedEscape => "unsupported-escape",
             OpaqueReason::UnterminatedEscape => "unterminated-escape",
             OpaqueReason::UnterminatedQuote => "unterminated-quote",
         }
@@ -1150,7 +1152,7 @@ fn scan_bash_operator_or_separator(
         // `" \t\n".includes(input[i] ?? "")`: the end of the input counts too.
         let after = input.at(index + redirect.len());
         if redirect == "<<" || redirect == "<<-" {
-            let Some(delimiter) = bash_heredoc_delimiter(input, index + redirect.len(), redirect == "<<-") else {
+            let Some(delimiter) = bash_heredoc_delimiter(input, index + redirect.len(), redirect == "<<-", ctx.dialect) else {
                 return Err(O::InvalidRedirect);
             };
             let end = delimiter.end;
@@ -1718,9 +1720,7 @@ fn scan_bash_unit(
         return Ok(Some(index + 1));
     }
     if mode == Mode::Word && opener == Some("$'") {
-        let Some((value, quote_end)) = bash_ansi_quote(input, index + 1, true) else {
-            return Err(O::UnterminatedQuote);
-        };
+        let (value, quote_end) = bash_ansi_quote(input, index + 1, ctx.dialect, true)?;
         let first_quote = input.index_of_char('\'', index + 2).map_or(-1, |v| v as isize);
         // Dash does not support $'...' and closes the single-quoted span at the first `'`, even after `\`.
         if quote_end as isize != first_quote
@@ -1738,10 +1738,10 @@ fn scan_bash_unit(
         return Ok(Some(quote_end));
     }
     if mode == Mode::Arithmetic && opener == Some("$'") {
-        let quote = bash_ansi_quote(input, index + 1, true);
+        let quote = bash_ansi_quote(input, index + 1, ctx.dialect, true);
         let first = input.index_of_char('\'', index + 2);
         match quote {
-            Some((value, end)) if Some(end) == first && !test(&RE_ARITH_QUOTE_REJECT, &value) => {
+            Ok((value, end)) if Some(end) == first && !test(&RE_ARITH_QUOTE_REJECT, &value) => {
                 if let Some(text) = text.as_deref_mut() {
                     bash_append(text, &value);
                 }
@@ -2185,9 +2185,7 @@ fn scan_bash_parameter(
             return Err(O::DynamicExecution);
         }
         if quoted && c == '\'' && input.ati(i as isize - 1) == Some('$') {
-            let Some((value, _)) = bash_ansi_quote(input, i, true) else {
-                return Err(O::UnterminatedQuote);
-            };
+            let (value, _) = bash_ansi_quote(input, i, ctx.dialect, true)?;
             text.literal.push_str(&value);
         }
         let subscript = index == colon && c == '[';
@@ -2441,13 +2439,14 @@ fn ansi_escape(c: char) -> Option<char> {
     })
 }
 
-fn bash_ansi_quote(input: &Input, start: usize, allow_unicode: bool) -> Option<(String, usize)> {
+/// `bashAnsiQuote`: the value of a `$'...'` word opened at `start`, and the index of its closing quote.
+fn bash_ansi_quote(input: &Input, start: usize, dialect: Dialect, allow_unicode: bool) -> Result<(String, usize), OpaqueReason> {
     let mut value = String::new();
     let mut index = start + 1;
     while index < input.len() {
         let c = input.chars[index];
         if c == '\'' {
-            return Some((value, index));
+            return Ok((value, index));
         }
         if c != '\\' {
             value.push(c);
@@ -2455,7 +2454,7 @@ fn bash_ansi_quote(input: &Input, start: usize, allow_unicode: bool) -> Option<(
             continue;
         }
         index += 1;
-        let escaped = input.at(index)?;
+        let Some(escaped) = input.at(index) else { break };
         if let Some(replacement) = ansi_escape(escaped) {
             value.push(replacement);
             index += 1;
@@ -2473,21 +2472,35 @@ fn bash_ansi_quote(input: &Input, start: usize, allow_unicode: bool) -> Option<(
         } else {
             String::new()
         };
-        if digits.is_empty() {
-            return None;
+        if !digits.is_empty() {
+            let point = u32::from_str_radix(&digits, if octal { 8 } else { 16 }).unwrap_or(0);
+            let Some(decoded) = char::from_u32(point).filter(|_| point != 0) else {
+                return Err(OpaqueReason::UnsupportedEscape);
+            };
+            value.push(decoded);
+            index += digits.chars().count() - usize::from(octal);
+            index += 1;
+            continue;
         }
-        let point = u32::from_str_radix(&digits, if octal { 8 } else { 16 }).ok()?;
-        if point == 0 || point > 0x10ffff || (0xd800..=0xdfff).contains(&point) {
-            return None;
+        // Bash keeps the backslash of an unknown escape and Zsh drops it, so Posix, which covers both, can't know the
+        // value. Bash 3.2 and 5 decode \c control escapes differently, and \u or \U stay rejected where Unicode is.
+        // Zsh reads \C and \M as key escapes, and \x, \u or \U without digits as NUL.
+        if dialect == Dialect::Posix
+            || (dialect == Dialect::Bash && (escaped == 'c' || (!allow_unicode && matches!(escaped, 'u' | 'U'))))
+            || (dialect == Dialect::Zsh && matches!(escaped, 'C' | 'M' | 'x' | 'u' | 'U'))
+        {
+            return Err(OpaqueReason::UnsupportedEscape);
         }
-        value.push(char::from_u32(point)?);
-        index += digits.chars().count() - usize::from(octal);
+        if dialect == Dialect::Bash {
+            value.push('\\');
+        }
+        value.push(escaped);
         index += 1;
     }
-    None
+    Err(OpaqueReason::UnterminatedQuote)
 }
 
-fn bash_heredoc_delimiter(input: &Input, start: usize, tabs: bool) -> Option<BashHeredoc> {
+fn bash_heredoc_delimiter(input: &Input, start: usize, tabs: bool, dialect: Dialect) -> Option<BashHeredoc> {
     let mut delimiter = String::new();
     let mut dash_delimiter: Option<String> = None;
     let mut quoted = false;
@@ -2523,7 +2536,7 @@ fn bash_heredoc_delimiter(input: &Input, start: usize, tabs: bool) -> Option<Bas
         }
         // Dash retains $ in $'...' heredoc delimiters while Bash and Zsh strip $.
         if quote.is_none() && input.starts_with("$'", index) {
-            let (value, literal_end) = bash_ansi_quote(input, index + 1, false)?;
+            let (value, literal_end) = bash_ansi_quote(input, index + 1, dialect, false).ok()?;
             if Some(literal_end) != input.index_of_char('\'', index + 2) {
                 return None;
             }
@@ -3967,5 +3980,38 @@ mod tests {
         assert_eq!(commands[1].word_ends, Some(vec![12, 15, 18]));
         assert_eq!(scan_powershell("Write-Output \"x"), ScanOutcome::Opaque(O::UnterminatedQuote));
         assert_eq!(scan_powershell("a \u{2018}b"), ScanOutcome::Opaque(O::InvalidStructure));
+    }
+
+    /// bash-syntax.test.ts (2.3.1, #64263): unknown ANSI-C escapes decode like each shell (Bash 3.2 and 5.2, Zsh 5.9).
+    #[test]
+    fn ansi_c_unknown_escapes_per_dialect() {
+        for (dialect, word, value) in [
+            (Dialect::Bash, "$'\\033\\[?1049'", "\x1b\\[?1049"),
+            (Dialect::Bash, "$'\\q\\8\\-\\xg\\ug\\Ug'", "\\q\\8\\-\\xg\\ug\\Ug"),
+            (Dialect::Bash, "$'a\\\nb'", "a\\\nb"),
+            (Dialect::Zsh, "$'\\033\\[?1049'", "\x1b[?1049"),
+            (Dialect::Zsh, "$'\\q\\8\\-\\c'", "q8-c"),
+            (Dialect::Zsh, "$'a\\\nb'", "a\nb"),
+        ] {
+            let commands = scanned(&format!("printf '%s' {word} | od -c"), dialect);
+            assert_eq!(commands.iter().map(|c| c.words.clone()).collect::<Vec<_>>(), [vec!["printf", "%s", value], vec!["od", "-c"]], "{word}");
+        }
+        let source = "cat <<$'E\\[F'\nE[F\nE\\[F\nprintf done";
+        let words = |dialect| scanned(source, dialect).into_iter().map(|c| c.words).collect::<Vec<_>>();
+        assert_eq!(words(Dialect::Bash), [vec!["cat"], vec!["printf", "done"]]);
+        assert_eq!(words(Dialect::Zsh), [vec!["cat"], vec!["E[F"], vec!["printf", "done"]]);
+        for (dialect, word) in [
+            (Dialect::Posix, "$'\\['"),
+            (Dialect::Bash, "$'\\cA'"),
+            (Dialect::Bash, "$'a\\0b'"),
+            (Dialect::Zsh, "$'\\C-a'"),
+            (Dialect::Zsh, "$'\\M-a'"),
+            (Dialect::Zsh, "$'\\xg'"),
+            (Dialect::Zsh, "$'\\u'"),
+        ] {
+            assert_eq!(opaque(&format!("printf '%s' {word}"), dialect), "unsupported-escape", "{word}");
+        }
+        assert_eq!(opaque("printf $'abc", Dialect::Bash), "unterminated-quote");
+        assert_eq!(opaque("printf $'abc\\", Dialect::Bash), "unterminated-quote");
     }
 }

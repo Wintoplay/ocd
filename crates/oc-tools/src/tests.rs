@@ -47,6 +47,20 @@ impl ToolHost for MockHost {
         Ok(())
     }
 
+    async fn job_background(&self, id: &str) -> Result<Option<crate::host::JobInfo>, String> {
+        Ok(Some(crate::host::JobInfo {
+            id: id.to_string(),
+            kind: "shell".into(),
+            title: None,
+            status: crate::host::JobStatus::Running,
+            started_at: 0,
+            completed_at: None,
+            output: None,
+            error: None,
+            notification_id: None,
+        }))
+    }
+
     async fn models_available(&self) -> Result<Vec<crate::host::ModelSummary>, String> {
         self.models_list(&[]).await
     }
@@ -782,33 +796,52 @@ async fn shell_tool_flow() {
     let mut ctx = context(dir.path(), host.clone());
     ctx.config = Arc::new(ToolConfig { shell: Some("/bin/sh".into()), ..ToolConfig::default() });
     let service = crate::shell::service::ShellService::new(dir.path().join(".data"), None);
-    let tool = tools::shell::ShellTool::new(service);
+    let tool = tools::shell::ShellTool::new(service.clone());
     let ok = run(&tool, json!({"command": "echo hello && exit 2"}), ctx.clone()).await.unwrap();
     assert_eq!(ok.content, vec![ToolContent::Text { text: "hello\n".into() }, ToolContent::Text { text: "Exit code: 2".into() }]);
     // tool-shell.test.ts (2.3.0, #63647): the structured output has the exit code and the elapsed time.
     let output = ok.output.clone().unwrap();
-    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["output", "exitCode", "wallTimeSeconds"]);
+    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["exitCode", "output", "wallTimeSeconds"]);
     assert_eq!((output["output"].clone(), output["exitCode"].clone()), (json!("hello\n"), json!(2)));
     assert!(output["wallTimeSeconds"].as_f64().unwrap() >= 0.0);
     let request = host.requests.lock()[0].clone();
     assert_eq!(request.action, "shell");
     assert_eq!(request.resources, vec!["echo hello", "exit 2"]);
     assert_eq!(request.save, Some(vec!["echo *".to_string(), "exit *".to_string()]));
-    let ok = run(&tool, json!({"command": "sleep 3", "timeout": 100}), ctx.clone()).await.unwrap();
+    // tool-shell.test.ts (2.3.1, #63699): a foreground timeout moves the command to the background instead of
+    // stopping it, and says so.
+    let ok = run(&tool, json!({"command": "printf started; sleep 1; printf ' done'", "timeout": 10}), ctx.clone()).await.unwrap();
+    let metadata = ok.metadata.clone().unwrap();
+    let id = metadata["shellID"].as_str().unwrap().to_string();
+    let pid = metadata["pid"].as_u64().unwrap();
+    assert_eq!((metadata["status"].clone(), metadata["truncated"].clone()), (json!("running"), json!(false)));
+    assert!(metadata.get("timeout").is_none());
+    let output = ok.output.clone().unwrap();
+    let file = output["outputPath"].as_str().unwrap().to_string();
+    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["shellID", "exitCode", "output", "outputPath", "pid", "wallTimeSeconds"]);
+    assert!(output["wallTimeSeconds"].as_f64().unwrap() >= 0.01);
     assert_eq!(
         ok.content,
         vec![
-            ToolContent::Text { text: "(no output)".into() },
-            // #62141: how long it waited, and the exit code of the killed process.
             ToolContent::Text {
-                text: "Command timed out after 0.1 seconds. If it needs longer and isn't waiting for input, rerun with a larger timeout.\nExit code: 143 (SIGTERM)".into()
+                text: format!(
+                    "Command moved to the background (shell ID: {id}).\nPID: {pid}\nOutput is streaming to: {file}\n\nThe command did not finish within its timeout of 0.01 seconds and was moved to the background. Do not start another copy while it is running."
+                )
             },
+            ToolContent::Text { text: tools::shell::BACKGROUND_INSTRUCTION.into() },
         ]
     );
-    assert_eq!(ok.metadata.as_ref().unwrap()["signal"], json!("SIGTERM"));
-    let output = ok.output.clone().unwrap();
-    assert!(output.get("timeout").is_none());
-    assert_eq!((output["exitCode"].clone(), output["signal"].clone()), (json!(null), json!("SIGTERM")));
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), service.wait(&id)).await.unwrap().unwrap();
+    assert_eq!((finished.status, finished.exit), (oc_schema::message::ShellStatus::Exited, Some(0)));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "started done");
+    // A fast foreground command still returns directly, and a timeout of 0 is the default one.
+    let ok = run(&tool, json!({"command": "printf hello", "timeout": 0}), ctx.clone()).await.unwrap();
+    assert_eq!(ok.content, vec![ToolContent::Text { text: "hello".into() }]);
+    // An explicit timeout still stops a background command.
+    let ok = run(&tool, json!({"command": "sleep 30", "background": true, "timeout": 50}), ctx.clone()).await.unwrap();
+    let id = ok.metadata.unwrap()["shellID"].as_str().unwrap().to_string();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(60), service.wait(&id)).await.unwrap().unwrap();
+    assert_eq!(stopped.status, oc_schema::message::ShellStatus::Timeout);
 
     // A background command reports its PID, output file and elapsed time (#63647).
     let ok = run(&tool, json!({"command": "sleep 0.2", "background": true}), ctx.clone()).await.unwrap();
@@ -818,7 +851,7 @@ async fn shell_tool_flow() {
     assert_eq!((metadata["status"].clone(), metadata["truncated"].clone()), (json!("running"), json!(false)));
     let output = ok.output.clone().unwrap();
     let file = output["outputPath"].as_str().unwrap().to_string();
-    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["output", "exitCode", "wallTimeSeconds", "outputPath", "shellID", "pid"]);
+    assert_eq!(output.as_object().unwrap().keys().collect::<Vec<_>>(), ["shellID", "exitCode", "output", "outputPath", "pid", "wallTimeSeconds"]);
     assert_eq!((output["exitCode"].clone(), output["pid"].clone(), output["shellID"].clone()), (json!(null), json!(pid), metadata["shellID"].clone()));
     assert_eq!(
         ok.content[0],
