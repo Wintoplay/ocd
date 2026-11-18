@@ -28,7 +28,7 @@ ocd reports version 2.3.0.
   - the 2.3.0 changes: freeform tools, subagent reports, the step lifecycle, Code Mode search and `fetch`,
     MCP OAuth refresh, pasted sign-ins and client certificates;
   - the 2.3.1 Code Mode changes: `Buffer`, arguments crossing as copies, plugin renames and nested permission rows;
-  - the editor integration (ACP) following subagents after a turn;
+  - the editor integration (ACP) following subagents and background shells after a turn;
   - the 2.3.1 changes: the API (automation, video and blob routes) and config keys;
   - local model discovery for LM Studio, Ollama and vLLM against mock servers.
 - **Model requests:** every request ocd sends to the model is compared too: system prompt, tool definitions,
@@ -78,10 +78,10 @@ ocd reports version 2.3.0.
 | Persistent terminals | `@opencode/pty` 0.4.0: terminals belong to their session, are removed with it, and can be renamed |
 | Mercurial | Project identity, status, working and branch diffs, `vcs.init` for hg and branch watching. Like upstream, snapshots and worktrees are git-only. Needs `hg` on `PATH` |
 | Desktop browser attachment | The built-in `opencode.browser` plugin: the `experimental.browser` RPC (attach, state, commands and results, tunnels), its control events, the session permissions an attached desktop grants, the 45 `browser.*` Code Mode tools with file uploads and captures, and the 60 s request timeout. The `browser` skill is denied to every agent until a desktop attaches. The desktop's own proxy is part of the desktop app, not the server |
-| Editor integration (ACP) | `ocd acp`, including the file diffs on permission requests and completed edits, and following subagents that outlive the turn (or its cancellation): their updates and asks, and (2.3.0) the root's own turns their reports start, until a root turn ends with no child open; the next prompt takes over the children |
+| Editor integration (ACP) | `ocd acp`, including the file diffs on permission requests and completed edits, and following subagents and (2.3.1) background shells that outlive the turn (or its cancellation): their updates and asks, and the root's own turns their reports (2.3.0) or the shells' notices (2.3.1) wake, until a root turn ends with no child open and no shell notice pending; the next prompt takes over the children and shells |
 | CLI prompts | `ocd auth`, `ocd mcp auth` and `ocd session export` use the same prompts as upstream (pickers, search lists, forms), down to resizing and key handling. `--wizard` builds any command interactively with upstream's prompts, byte for byte |
 | Remote access | `ocd pair --remote` |
-| Scripted runs | `ocd run` as rewritten in 2.2.7: `--worktree`, `--archived`, waiting for the run's background jobs, retry notices, and SIGINT/SIGTERM cancelling the session and its jobs. Every command exits 130/143 on those signals |
+| Scripted runs | `ocd run` as rewritten in 2.2.7: `--worktree`, `--archived`, waiting for the run's background jobs (not, after a cancel, for image or (2.3.1) Code Mode jobs the API can't cancel), retry notices, and SIGINT/SIGTERM cancelling the session and its jobs. Every command exits 130/143 on those signals |
 | Feature flags | 2.3.1's registry: `OPENCODE_FLAGS` (`all`, a key, or `-key`), then `experimental.<key>`, then `experimental.all_flags`; `full_codemode` is opt-in only (`all` and `all_flags` skip it, off on every channel) and `schedules` is read as the old name of `automations`. `background_compaction` and `shell_timeout_background` are retired and dropped from the config. The `websearch.use` policy action |
 | Experimental todo list | `experimental.todo`: the `todowrite` tool, the sidebar section and its transcript rendering |
 
