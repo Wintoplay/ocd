@@ -22,7 +22,7 @@ const MAX_LINE_LENGTH: usize = 2_000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated to 2000 chars)";
 pub const MEDIA_MIMES: [&str; 5] = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"];
 
-pub const DESCRIPTION: &str = "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.";
+pub const DESCRIPTION: &str = "Read the contents of a file or directory. Supports text files, images, and PDFs. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListType {
@@ -41,45 +41,36 @@ impl ListType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListEntry {
-    pub path: String,
-    pub kind: ListType,
-}
-
-/// Structured read output.
+/// Structured read output (`ReadToolFileSystem.Output`, 2.3.1): text with its first line number and line count, a
+/// directory page, or media whose bytes travel beside the reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOutput {
-    File { uri: String, name: String, content: String, base64: bool, mime: String },
-    TextPage { content: String, mime: String, offset: usize, truncated: bool, next: Option<usize> },
-    ListPage { entries: Vec<ListEntry>, truncated: bool, next: Option<usize> },
+    /// Whole-file content keeps its final newline; a page's selected trailing blank line is an empty last line, so
+    /// `line_count` decides which pieces are lines.
+    Text { content: String, offset: usize, line_count: usize, next: Option<usize> },
+    Directory { entries: Vec<String>, next: Option<usize> },
+    Media { uri: String, mime: String, name: String, bytes: Vec<u8> },
 }
 
 impl ReadOutput {
+    /// The tool's structured output; media leaves its bytes out.
     pub fn to_json(&self) -> Value {
         match self {
-            ReadOutput::File { uri, name, content, base64, mime } => json!({
-                "type": "file", "uri": uri, "name": name, "content": content,
-                "encoding": if *base64 { "base64" } else { "utf8" }, "mime": mime,
-            }),
-            ReadOutput::TextPage { content, mime, offset, truncated, next } => {
-                let mut v = json!({"type": "text-page", "content": content, "mime": mime, "offset": offset, "truncated": truncated});
+            ReadOutput::Text { content, offset, line_count, next } => {
+                let mut v = json!({"type": "text", "content": content, "offset": offset, "lineCount": line_count});
                 if let Some(next) = next {
                     v["next"] = json!(next);
                 }
                 v
             }
-            ReadOutput::ListPage { entries, truncated, next } => {
-                let mut v = json!({
-                    "type": "list-page",
-                    "entries": entries.iter().map(|e| json!({"path": e.path, "type": e.kind.as_str()})).collect::<Vec<_>>(),
-                    "truncated": truncated,
-                });
+            ReadOutput::Directory { entries, next } => {
+                let mut v = json!({"type": "directory", "entries": entries});
                 if let Some(next) = next {
                     v["next"] = json!(next);
                 }
                 v
             }
+            ReadOutput::Media { uri, mime, name, .. } => json!({"type": "media", "uri": uri, "mime": mime, "name": name}),
         }
     }
 }
@@ -239,17 +230,11 @@ fn text_page(bytes: &[u8], eof: bool, page: Page) -> Option<PageResult> {
     Some(PageResult { entries, offset, next, consumed })
 }
 
-fn make_text_page(mime: &str, resource: &str, result: PageResult, binary: bool) -> Result<ReadOutput, ReadError> {
+fn make_text_page(resource: &str, result: PageResult, binary: bool) -> Result<ReadOutput, ReadError> {
     if binary {
         return Err(ReadError::Binary { resource: resource.to_string() });
     }
-    Ok(ReadOutput::TextPage {
-        content: result.entries.join("\n"),
-        mime: mime.to_string(),
-        offset: result.offset,
-        truncated: result.next.is_some(),
-        next: result.next,
-    })
+    Ok(ReadOutput::Text { content: result.entries.join("\n"), offset: result.offset, line_count: result.entries.len(), next: result.next })
 }
 
 fn io_error(error: std::io::Error) -> ReadError {
@@ -280,21 +265,19 @@ pub fn list_dir(path: &Path) -> Result<Vec<(String, ListType)>, ReadError> {
 fn list(items: Vec<(String, ListType)>, page: Page, sep: char) -> ReadOutput {
     let offset = page.start().max(1) as usize;
     let limit = page.lines();
-    let mut visible: Vec<ListEntry> = items
+    let mut visible: Vec<(String, bool)> = items
         .into_iter()
-        .map(|(name, kind)| ListEntry { path: if kind == ListType::Directory { format!("{name}{sep}") } else { name }, kind })
+        .map(|(name, kind)| {
+            let directory = kind == ListType::Directory;
+            (if directory { format!("{name}{sep}") } else { name }, directory)
+        })
         .collect();
-    visible.sort_by(|a, b| match (a.kind == ListType::Directory, b.kind == ListType::Directory) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => js::locale_compare(&a.path, &b.path),
-    });
+    visible.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| js::locale_compare(&a.0, &b.0)));
     let start = (offset - 1).min(visible.len());
     let end = (offset - 1 + limit).min(visible.len());
-    let selected: Vec<ListEntry> = visible[start..end].to_vec();
-    let truncated = offset - 1 + selected.len() < visible.len();
-    let next = truncated.then_some(offset + selected.len());
-    ReadOutput::ListPage { entries: selected, truncated, next }
+    let entries: Vec<String> = visible[start..end].iter().map(|(name, _)| name.clone()).collect();
+    let next = (offset - 1 + entries.len() < visible.len()).then_some(offset + entries.len());
+    ReadOutput::Directory { entries, next }
 }
 
 fn file_uri(path: &Path) -> String {
@@ -308,11 +291,10 @@ fn read_range(file: &mut impl std::io::Read, length: usize) -> std::io::Result<V
     Ok(buffer)
 }
 
-/// How a read file names itself in [`ReadOutput`]: its `uri`, `name` and the mime type of that name.
+/// How a read file names itself in [`ReadOutput::Media`]: its `uri` and `name`.
 struct FileName {
     uri: String,
     name: String,
-    mime: String,
 }
 
 /// `ReadToolFileSystem.read`.
@@ -328,7 +310,7 @@ pub fn read(path: &Path, resource: &str, page: Page) -> Result<ReadOutput, ReadE
         return Err(ReadError::PathKind { resource: resource.to_string(), expected: "a file or directory" });
     }
     let file = std::fs::File::open(path).map_err(io_error)?;
-    let name = FileName { uri: file_uri(path), name: util::basename(&path.to_string_lossy()), mime: crate::mime::lookup(path) };
+    let name = FileName { uri: file_uri(path), name: util::basename(&path.to_string_lossy()) };
     read_file(file, metadata.len(), || std::fs::read(path).map_err(io_error), name, resource, page)
 }
 
@@ -342,30 +324,31 @@ fn read_file(
     page: Page,
 ) -> Result<ReadOutput, ReadError> {
     let first = read_range(&mut reader, FIRST_CHUNK).map_err(io_error)?;
-    let media = crate::mime::detect(&first);
-    if MEDIA_MIMES.contains(&media) {
+    if let Some(media) = crate::mime::detect_media(&first).filter(|media| MEDIA_MIMES.contains(media)) {
         if size > MAX_MEDIA_INGEST_BYTES {
             return Err(ReadError::MediaLimit { resource: resource.to_string() });
         }
-        let whole = whole()?;
-        return Ok(ReadOutput::File {
-            uri: name.uri,
-            name: name.name,
-            content: base64::engine::general_purpose::STANDARD.encode(whole),
-            base64: true,
-            mime: media.to_string(),
-        });
+        return Ok(ReadOutput::Media { uri: name.uri, mime: media.to_string(), name: name.name, bytes: whole()? });
     }
     let paged = size as usize > MAX_READ_BYTES || page.offset.is_some() || page.limit.is_some();
     if !paged {
         if first.contains(&0) {
             return Err(ReadError::Binary { resource: resource.to_string() });
         }
-        let content = text_decode(&first).split('\n').map(clamp_line).collect::<Vec<_>>().join("\n");
-        return Ok(ReadOutput::File { uri: name.uri, name: name.name, content, base64: false, mime: name.mime });
+        // Small files are whole unless they exceed the default line or byte limit (#63810); a final separator ends
+        // the last physical line and stays in the content.
+        let decoded = text_decode(&first);
+        let lines: Vec<&str> = decoded.split('\n').collect();
+        let count = if lines.last() == Some(&"") { lines.len() - 1 } else { lines.len() };
+        if count <= MAX_READ_LINES {
+            let content = lines.into_iter().map(clamp_line).collect::<Vec<_>>().join("\n");
+            if content.len() <= MAX_READ_BYTES {
+                return Ok(ReadOutput::Text { content, offset: 1, line_count: count, next: None });
+            }
+        }
     }
     if first.len() as u64 >= size {
-        return complete_page(&name.mime, resource, &first, page);
+        return complete_page(resource, &first, page);
     }
 
     let offset = page.start();
@@ -385,7 +368,7 @@ fn read_file(
                 return Err(ReadError::Failed("Read page did not settle for a complete file".into()));
             };
             let tail = PageResult { offset: skipped.saturating_sub(1) + tail.offset, ..tail };
-            return make_text_page(&name.mime, resource, tail, bytes.contains(&0));
+            return make_text_page(resource, tail, bytes.contains(&0));
         }
         if eof || (offset > 0 && newlines as i64 >= offset - 1) {
             // A negative offset only resolves at EOF, counting back from the last line.
@@ -402,7 +385,7 @@ fn read_file(
                     entries: result.entries,
                 };
                 let binary = bytes[..translated.consumed.min(bytes.len())].contains(&0);
-                return make_text_page(&name.mime, resource, translated, binary);
+                return make_text_page(resource, translated, binary);
             }
         }
         let next = read_range(&mut reader, FIRST_CHUNK).map_err(io_error)?;
@@ -416,7 +399,7 @@ fn read_file(
 }
 
 /// `completePage`: a file whose first chunk holds all of it.
-fn complete_page(mime: &str, resource: &str, bytes: &[u8], page: Page) -> Result<ReadOutput, ReadError> {
+fn complete_page(resource: &str, bytes: &[u8], page: Page) -> Result<ReadOutput, ReadError> {
     let total = line_count(bytes.iter().filter(|&&b| b == b'\n').count(), bytes.last().copied());
     let page = match page.offset {
         Some(offset) if offset < 0 => Page { offset: Some((total as i64 + offset + 1).max(1)), ..page },
@@ -426,7 +409,7 @@ fn complete_page(mime: &str, resource: &str, bytes: &[u8], page: Page) -> Result
         return Err(ReadError::Failed("Read page did not settle for a complete file".into()));
     };
     let binary = bytes[..result.consumed.min(bytes.len())].contains(&0);
-    make_text_page(mime, resource, result, binary)
+    make_text_page(resource, result, binary)
 }
 
 /// The in-memory files a `skill://` read sees (upstream writes them to a memory driver): `SKILL.md` and the
@@ -471,7 +454,7 @@ impl VirtualFiles {
         let rel = target.trim_start_matches('/');
         if let Some((_, bytes)) = self.files.iter().find(|(p, _)| p == rel) {
             let base = rel.rsplit('/').next().unwrap_or(rel);
-            let name = FileName { uri: resource.to_string(), name: base.to_string(), mime: crate::mime::lookup(Path::new(base)) };
+            let name = FileName { uri: resource.to_string(), name: base.to_string() };
             let whole = bytes.clone();
             let reader = std::io::Cursor::new(bytes.as_slice());
             return read_file(reader, bytes.len() as u64, move || Ok(whole), name, resource, page);
@@ -486,37 +469,35 @@ impl VirtualFiles {
 
 /// `toModelContent(path, offset, output)`.
 pub fn to_model_content(path: &str, offset: Option<i64>, output: &ReadOutput) -> Vec<ToolContent> {
+    let continuation = |next: &Option<usize>| next.map(|next| format!("[Output truncated. Continue reading with offset: {next}]"));
     match output {
-        ReadOutput::File { content, base64: true, mime, .. } => vec![
+        ReadOutput::Media { mime, bytes, .. } => vec![
             ToolContent::Text {
                 text: if mime == "application/pdf" { "PDF read successfully".into() } else { "Image read successfully".into() },
             },
-            ToolContent::File { uri: format!("data:{mime};base64,{content}"), mime: mime.clone(), name: Some(path.to_string()) },
+            ToolContent::File {
+                uri: format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)),
+                mime: mime.clone(),
+                name: Some(path.to_string()),
+            },
         ],
-        ReadOutput::ListPage { entries, truncated, next } => {
+        ReadOutput::Directory { entries, next } => {
             let start = offset.filter(|o| *o != 0).unwrap_or(1);
             let mut lines = vec![if entries.is_empty() {
                 format!("Read directory {path}, 0 entries")
             } else {
                 format!("Read directory {path}, entries {start}-{}", start + entries.len() as i64 - 1)
             }];
-            lines.extend(entries.iter().map(|e| e.path.clone()));
-            if *truncated {
-                if let Some(next) = next {
-                    lines.push(format!("[Output truncated. Continue reading with offset: {next}]"));
-                }
-            }
+            lines.extend(entries.iter().cloned());
+            lines.extend(continuation(next));
             vec![ToolContent::Text { text: lines.join("\n") }]
         }
-        ReadOutput::File { content, .. } | ReadOutput::TextPage { content, .. } => {
-            let (start, text) = match output {
-                ReadOutput::TextPage { offset, .. } => (*offset, content.as_str()),
-                _ => (1, content.strip_suffix('\n').unwrap_or(content)),
-            };
-            let items: Vec<&str> = if content.is_empty() { Vec::new() } else { text.split('\n').collect() };
+        ReadOutput::Text { content, offset: start, line_count, next } => {
+            let start = *start;
+            let items: Vec<&str> = if *line_count == 0 { Vec::new() } else { content.split('\n').take(*line_count).collect() };
             // A page that starts before the requested offset is the file's tail, returned for an offset past the end.
             let total = (start + items.len()) as i64 - 1;
-            let past_end = matches!(output, ReadOutput::TextPage { .. }) && offset.is_some_and(|o| (start as i64) < o);
+            let past_end = offset.is_some_and(|o| (start as i64) < o);
             let mut header = if items.is_empty() {
                 format!("Read file {path}, 0 lines")
             } else {
@@ -528,9 +509,7 @@ pub fn to_model_content(path: &str, offset: Option<i64>, output: &ReadOutput) ->
             }
             let mut lines = vec![header];
             lines.extend(items.iter().enumerate().map(|(i, l)| format!("{}: {l}", start + i)));
-            if let ReadOutput::TextPage { truncated: true, next: Some(next), .. } = output {
-                lines.push(format!("[Output truncated. Continue reading with offset: {next}]"));
-            }
+            lines.extend(continuation(next));
             vec![ToolContent::Text { text: lines.join("\n") }]
         }
     }
@@ -812,16 +791,32 @@ fn parse_skill_uri(value: &str) -> Option<SkillUri> {
     })
 }
 
-/// Discover nested AGENTS.md files between the read target and the Location root.
-fn discover_agents(target: &Path, directory: &Path, listing: bool) -> Vec<PathBuf> {
+/// `InstructionDiscovery.filenames`: CLAUDE.md stands in for AGENTS.md in a directory that has none.
+pub fn instruction_filenames(claude: bool) -> &'static [&'static str] {
+    if claude { &["AGENTS.md", "CLAUDE.md"] } else { &["AGENTS.md"] }
+}
+
+/// `InstructionDiscovery.preferAgents`: drops each CLAUDE.md whose directory also has an AGENTS.md among `found`.
+pub fn prefer_agents(found: Vec<PathBuf>) -> Vec<PathBuf> {
+    let agents: Vec<PathBuf> = found.iter().filter(|f| f.file_name().is_some_and(|n| n == "AGENTS.md")).cloned().collect();
+    found
+        .into_iter()
+        .filter(|file| file.file_name().is_none_or(|n| n != "CLAUDE.md") || !agents.contains(&util::dirname(file).join("AGENTS.md")))
+        .collect()
+}
+
+/// Discover nested AGENTS.md (or CLAUDE.md, with `claude`) files between the read target and the Location root.
+fn discover_agents(target: &Path, directory: &Path, listing: bool, claude: bool) -> Vec<PathBuf> {
     let resolved = PathBuf::from(crate::file_mutation::fs_resolve(target));
     let root = PathBuf::from(crate::file_mutation::fs_resolve(directory));
     let mut current = if listing { resolved.clone() } else { util::dirname(&resolved) };
     let mut found = Vec::new();
     loop {
-        let candidate = current.join("AGENTS.md");
-        if candidate.is_file() {
-            found.push(candidate);
+        for name in instruction_filenames(claude) {
+            let candidate = current.join(name);
+            if candidate.is_file() {
+                found.push(candidate);
+            }
         }
         if current == root {
             break;
@@ -831,22 +826,17 @@ fn discover_agents(target: &Path, directory: &Path, listing: bool) -> Vec<PathBu
             _ => break,
         }
     }
-    found
+    prefer_agents(found)
         .into_iter()
         .map(|f| PathBuf::from(crate::file_mutation::fs_resolve(&f)))
         .filter(|file| !util::contains(&util::dirname(file), &root) && *file != resolved)
         .collect()
 }
 
-fn result(shown: &str, offset: Option<i64>, output: ReadOutput, resource: &str, input_path: &str) -> Result<ToolResult, ToolError> {
-    if let ReadOutput::File { base64: true, mime, .. } = &output {
-        if !MEDIA_MIMES.contains(&mime.as_str()) {
-            return Err(map_read_error(ReadError::Binary { resource: resource.to_string() }, input_path));
-        }
-    }
+fn result(shown: &str, offset: Option<i64>, output: ReadOutput) -> Result<ToolResult, ToolError> {
     let truncated = match &output {
-        ReadOutput::File { .. } => false,
-        ReadOutput::TextPage { truncated, .. } | ReadOutput::ListPage { truncated, .. } => *truncated,
+        ReadOutput::Media { .. } => false,
+        ReadOutput::Text { next, .. } | ReadOutput::Directory { next, .. } => next.is_some(),
     };
     Ok(ToolResult {
         content: to_model_content(shown, offset, &output),
@@ -874,7 +864,7 @@ impl ReadTool {
             Err(ReadError::NotFound) => return Err(not_found()),
             Err(error) => return Err(map_read_error(error, &input.path)),
         };
-        result(&input.path, input.offset, output, &input.path, &input.path)
+        result(&input.path, input.offset, output)
     }
 }
 
@@ -894,6 +884,9 @@ impl Tool for ReadTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolResult, ToolError> {
         let input: Input = decode(input)?;
+        if input.limit == Some(0) {
+            return Err(ToolError::new("Limit must be a positive integer"));
+        }
         let page = Page { offset: input.offset, limit: input.limit };
         if input.path.starts_with("skill://") {
             return self.read_skill(&input, &ctx, page).await;
@@ -910,7 +903,7 @@ impl Tool for ReadTool {
                     .await
                     .map_err(super::perm(leaf.clone()))?;
                 match read(&target.absolute, &target.resource, page) {
-                    Ok(ReadOutput::ListPage { .. }) | Err(ReadError::NotFound) => return Err(missing(&ctx, &input.path, &requested).await),
+                    Ok(ReadOutput::Directory { .. }) | Err(ReadError::NotFound) => return Err(missing(&ctx, &input.path, &requested).await),
                     Ok(output) => {
                         let shown = util::join_str(&util::dirname_str(&input.path), &util::basename(&alternate.to_string_lossy()));
                         (output, target, shown)
@@ -921,12 +914,12 @@ impl Tool for ReadTool {
             Err(error) => return Err(map_read_error(error, &input.path)),
         };
         if target.external_directory.is_none() {
-            let candidates = discover_agents(&target.absolute, &ctx.directory, matches!(output, ReadOutput::ListPage { .. }));
+            let candidates = discover_agents(&target.absolute, &ctx.directory, matches!(output, ReadOutput::Directory { .. }), false);
             if !candidates.is_empty() {
                 let _ = ctx.host.load_instructions(&ctx.session_id, candidates).await;
             }
         }
-        result(&shown, input.offset, output, &target.resource, &input.path)
+        result(&shown, input.offset, output)
     }
 }
 
@@ -988,7 +981,7 @@ mod tests {
         let out = read(&file, "a.txt", page(Some(9), None)).unwrap();
         assert_eq!(text(&out, "a.txt", Some(9)), "Read file a.txt, lines 9-10\n9: line9\n10: line10");
         let out = read(&file, "a.txt", page(Some(10), Some(1))).unwrap();
-        assert!(matches!(out, ReadOutput::TextPage { truncated: false, next: None, .. }));
+        assert!(matches!(out, ReadOutput::Text { next: None, .. }));
     }
 
     #[test]
@@ -998,8 +991,8 @@ mod tests {
         let body: String = (1..=60_000).map(|i| format!("row {i}\n")).collect();
         std::fs::write(&file, &body).unwrap();
         let out = read(&file, "big.txt", Page::default()).unwrap();
-        let ReadOutput::TextPage { next, truncated, offset, .. } = &out else { panic!() };
-        assert_eq!((*offset, *truncated, *next), (1, true, Some(2001)));
+        let ReadOutput::Text { next, line_count, offset, .. } = &out else { panic!() };
+        assert_eq!((*offset, *line_count, *next), (1, 2000, Some(2001)));
         let out = read(&file, "big.txt", page(Some(59_999), None)).unwrap();
         assert_eq!(text(&out, "big.txt", Some(59_999)), "Read file big.txt, lines 59999-60000\n59999: row 59999\n60000: row 60000");
         let out = read(&file, "big.txt", page(Some(70_000), Some(2))).unwrap();
@@ -1178,10 +1171,7 @@ mod tests {
         std::fs::write(&file, format!("{}\nselected\n\0\ntail", "x".repeat(256 * 1024))).unwrap();
         for offset in [2, -3] {
             match read(&file, "late-nul.txt", page(Some(offset), Some(1))).unwrap() {
-                ReadOutput::TextPage { content, offset, truncated, next, .. } => {
-                    assert_eq!((content.as_str(), offset, truncated, next), ("selected", 2, true, Some(3)));
-                }
-                other => panic!("{other:?}"),
+                other => assert_eq!(other, ReadOutput::Text { content: "selected".into(), offset: 2, line_count: 1, next: Some(3) }),
             }
         }
         assert!(matches!(read(&file, "late-nul.txt", page(Some(5), Some(1))), Err(ReadError::Binary { .. })));
@@ -1194,12 +1184,9 @@ mod tests {
         let file = dir.path().join("marked.txt");
         // The first byte of the three-byte UTF-8 mark is the last byte of the first chunk.
         std::fs::write(&file, format!("{}\n\u{FEFF}selected", "x".repeat(256 * 1024 - 2))).unwrap();
-        let page_of = |offset: i64| match read(&file, "marked.txt", page(Some(offset), Some(1))).unwrap() {
-            ReadOutput::TextPage { content, offset, truncated, .. } => (content, offset, truncated),
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(page_of(3), ("\u{FEFF}selected".to_string(), 2, false));
-        assert_eq!(page_of(-1), ("selected".to_string(), 2, false));
+        let page_of = |offset: i64| read(&file, "marked.txt", page(Some(offset), Some(1))).unwrap();
+        assert_eq!(page_of(3), ReadOutput::Text { content: "\u{FEFF}selected".into(), offset: 2, line_count: 1, next: None });
+        assert_eq!(page_of(-1), ReadOutput::Text { content: "selected".into(), offset: 2, line_count: 1, next: None });
     }
 
     /// "rejects a negative offset for a directory".
@@ -1220,7 +1207,7 @@ mod tests {
         let body: String = (0..40).map(|_| format!("{long}\n")).collect();
         std::fs::write(&file, &body).unwrap();
         let out = read(&file, "wide.txt", Page::default()).unwrap();
-        let ReadOutput::TextPage { content, next, .. } = &out else { panic!() };
+        let ReadOutput::Text { content, next, .. } = &out else { panic!() };
         let lines: Vec<&str> = content.split('\n').collect();
         assert_eq!(lines[0], format!("{}{MAX_LINE_SUFFIX}", "x".repeat(2000)));
         // each clamped line is 2034 bytes (+1 newline): 25 lines fit in 51200
@@ -1235,9 +1222,10 @@ mod tests {
         let file = dir.path().join("long.txt");
         std::fs::write(&file, format!("{}😀tail", "a".repeat(1_999))).unwrap();
         let out = read(&file, "long.txt", page(None, Some(1))).unwrap();
-        let ReadOutput::TextPage { content, truncated, .. } = out else { panic!() };
-        assert_eq!(content, format!("{}... (line truncated to 2000 chars)", "a".repeat(1_999)));
-        assert!(!truncated);
+        assert_eq!(
+            out,
+            ReadOutput::Text { content: format!("{}... (line truncated to 2000 chars)", "a".repeat(1_999)), offset: 1, line_count: 1, next: None }
+        );
     }
 
     #[test]
@@ -1369,8 +1357,22 @@ mod tests {
         let out = files.read("/", "skill://guide/", Page::default()).unwrap();
         assert_eq!(text(&out, "skill://guide/", None), "Read directory skill://guide/, entries 1-2\nreferences/\nSKILL.md");
         let out = files.read("/SKILL.md", "skill://guide/SKILL.md", Page::default()).unwrap();
-        assert_eq!(out.to_json()["uri"], "skill://guide/SKILL.md");
-        assert_eq!(out.to_json()["name"], "SKILL.md");
+        assert_eq!(out.to_json(), json!({"type": "text", "content": "# Guide\nRead references/style.md", "offset": 1, "lineCount": 2}));
+        // tool-read.test.ts (2.3.1): a skill's PDF is media named after its file, without its bytes in the output.
+        let files = VirtualFiles::new("# Guide", &[("references/guide.pdf".into(), "%PDF-1.7\nguide".into())]);
+        let out = files.read("/references/guide.pdf", "skill://guide/references/guide.pdf", Page::default()).unwrap();
+        assert_eq!(
+            out.to_json(),
+            json!({"type": "media", "uri": "skill://guide/references/guide.pdf", "mime": "application/pdf", "name": "guide.pdf"})
+        );
+        assert_eq!(
+            to_model_content("skill://guide/references/guide.pdf", None, &out)[1],
+            ToolContent::File {
+                uri: format!("data:application/pdf;base64,{}", base64::engine::general_purpose::STANDARD.encode("%PDF-1.7\nguide")),
+                mime: "application/pdf".into(),
+                name: Some("skill://guide/references/guide.pdf".into()),
+            }
+        );
         assert_eq!(files.read("/missing.md", "x", Page::default()), Err(ReadError::NotFound));
         assert_eq!(files.read("/SKILL.md/x", "x", Page::default()), Err(ReadError::NotFound));
         assert_eq!(files.read("/references", "r", page(Some(-1), None)), Err(ReadError::DirectoryOffset { resource: "r".into() }));
@@ -1384,8 +1386,152 @@ mod tests {
         std::fs::write(root.join("AGENTS.md"), "root").unwrap();
         std::fs::write(root.join("a/AGENTS.md"), "a").unwrap();
         std::fs::write(root.join("a/b/x.txt"), "x").unwrap();
-        let found = discover_agents(&root.join("a/b/x.txt"), root, false);
+        let found = discover_agents(&root.join("a/b/x.txt"), root, false, true);
         assert_eq!(found, vec![PathBuf::from(crate::file_mutation::fs_resolve(&root.join("a/AGENTS.md")))]);
-        assert!(discover_agents(&root.join("a/AGENTS.md"), root, false).is_empty());
+        assert!(discover_agents(&root.join("a/AGENTS.md"), root, false, true).is_empty());
+    }
+
+    /// session-instructions.test.ts (2.3.1, #64474): CLAUDE.md stands in where a directory above a read has no
+    /// AGENTS.md, and only then; `instructions.claude: false` leaves it out.
+    #[test]
+    fn claude_md_fallback_above_a_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("sub/AGENTS.md"), "sub-agents").unwrap();
+        std::fs::write(root.join("sub/CLAUDE.md"), "sub-claude").unwrap();
+        std::fs::write(root.join("sub/deep/CLAUDE.md"), "deep-claude").unwrap();
+        std::fs::write(root.join("sub/deep/file.txt"), "content").unwrap();
+        let resolved = |p: &str| PathBuf::from(crate::file_mutation::fs_resolve(&root.join(p)));
+        assert_eq!(discover_agents(&root.join("sub/deep/file.txt"), root, false, true), vec![resolved("sub/deep/CLAUDE.md"), resolved("sub/AGENTS.md")]);
+        assert_eq!(discover_agents(&root.join("sub/deep/file.txt"), root, false, false), vec![resolved("sub/AGENTS.md")]);
+        assert_eq!(discover_agents(&root.join("sub/deep"), root, true, true), vec![resolved("sub/deep/CLAUDE.md"), resolved("sub/AGENTS.md")]);
+        assert_eq!(instruction_filenames(true), ["AGENTS.md", "CLAUDE.md"]);
+        assert_eq!(instruction_filenames(false), ["AGENTS.md"]);
+    }
+
+    /// tool-read-filesystem.test.ts "ReadTool text serialization" (2.3.1, #63809, #63811, #64361).
+    #[test]
+    fn text_serialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lines.txt");
+        let cases: [(&str, Page, Value, &str); 14] = [
+            ("GIF8 is text", page(None, None), json!({"type": "text", "content": "GIF8 is text", "offset": 1, "lineCount": 1}), "Read file lines.txt, lines 1-1\n1: GIF8 is text"),
+            (
+                "alpha\n\nomega\n",
+                page(Some(1), Some(2)),
+                json!({"type": "text", "content": "alpha\n", "offset": 1, "lineCount": 2, "next": 3}),
+                "Read file lines.txt, lines 1-2\n1: alpha\n2: \n[Output truncated. Continue reading with offset: 3]",
+            ),
+            (
+                "before\nalpha\n\n\nomega\n",
+                page(Some(2), Some(3)),
+                json!({"type": "text", "content": "alpha\n\n", "offset": 2, "lineCount": 3, "next": 5}),
+                "Read file lines.txt, lines 2-4\n2: alpha\n3: \n4: \n[Output truncated. Continue reading with offset: 5]",
+            ),
+            ("alpha\n\n", page(None, Some(2)), json!({"type": "text", "content": "alpha\n", "offset": 1, "lineCount": 2}), "Read file lines.txt, lines 1-2\n1: alpha\n2: "),
+            (
+                "alpha\n\nomega\n",
+                page(None, Some(3)),
+                json!({"type": "text", "content": "alpha\n\nomega", "offset": 1, "lineCount": 3}),
+                "Read file lines.txt, lines 1-3\n1: alpha\n2: \n3: omega",
+            ),
+            (
+                "alpha\n\nomega\n",
+                page(None, Some(1)),
+                json!({"type": "text", "content": "alpha", "offset": 1, "lineCount": 1, "next": 2}),
+                "Read file lines.txt, lines 1-1\n1: alpha\n[Output truncated. Continue reading with offset: 2]",
+            ),
+            ("alpha\n\n", page(None, None), json!({"type": "text", "content": "alpha\n\n", "offset": 1, "lineCount": 2}), "Read file lines.txt, lines 1-2\n1: alpha\n2: "),
+            ("alpha\n", page(None, None), json!({"type": "text", "content": "alpha\n", "offset": 1, "lineCount": 1}), "Read file lines.txt, lines 1-1\n1: alpha"),
+            ("alpha", page(None, None), json!({"type": "text", "content": "alpha", "offset": 1, "lineCount": 1}), "Read file lines.txt, lines 1-1\n1: alpha"),
+            ("", page(None, None), json!({"type": "text", "content": "", "offset": 1, "lineCount": 0}), "Read file lines.txt, 0 lines"),
+            ("", page(None, Some(2)), json!({"type": "text", "content": "", "offset": 1, "lineCount": 0}), "Read file lines.txt, 0 lines"),
+            ("\n", page(None, Some(1)), json!({"type": "text", "content": "", "offset": 1, "lineCount": 1}), "Read file lines.txt, lines 1-1\n1: "),
+            ("\n", page(None, None), json!({"type": "text", "content": "\n", "offset": 1, "lineCount": 1}), "Read file lines.txt, lines 1-1\n1: "),
+            (
+                "alpha\n\nomega\n",
+                page(Some(2), Some(1)),
+                json!({"type": "text", "content": "", "offset": 2, "lineCount": 1, "next": 3}),
+                "Read file lines.txt, lines 2-2\n2: \n[Output truncated. Continue reading with offset: 3]",
+            ),
+        ];
+        for (content, page, output, model) in cases {
+            std::fs::write(&file, content).unwrap();
+            let result = read(&file, "lines.txt", page).unwrap();
+            assert_eq!(result.to_json(), output, "{content:?} {page:?}");
+            assert_eq!(text(&result, "lines.txt", page.offset), model, "{content:?} {page:?}");
+        }
+        std::fs::write(&file, "alpha\n\n").unwrap();
+        let result = read(&file, "lines.txt", page(Some(9), Some(1))).unwrap();
+        assert_eq!(result.to_json(), json!({"type": "text", "content": "", "offset": 2, "lineCount": 1}));
+        assert_eq!(text(&result, "lines.txt", Some(9)), "Read file lines.txt, lines 2-2 (offset 9 is past the end; the file has 2 lines)\n2: ");
+    }
+
+    /// "applies the default line limit to small files at physical line boundaries" (2.3.1, #63810).
+    #[test]
+    fn small_files_take_the_default_line_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dense.txt");
+        let prefix = "x\r\n".repeat(1_999);
+        for ending in ["last", "last\n", "last\r\n", "\n"] {
+            let content = format!("{prefix}{ending}");
+            std::fs::write(&file, &content).unwrap();
+            assert_eq!(read(&file, "dense.txt", Page::default()).unwrap(), ReadOutput::Text { content, offset: 1, line_count: 2_000, next: None });
+        }
+        std::fs::write(&file, format!("{prefix}\r\nlast")).unwrap();
+        let out = read(&file, "dense.txt", Page::default()).unwrap();
+        assert_eq!(out, ReadOutput::Text { content: "x\n".repeat(1_999), offset: 1, line_count: 2_000, next: Some(2_001) });
+        assert!(text(&out, "dense.txt", None).ends_with("2000: \n[Output truncated. Continue reading with offset: 2001]"));
+        assert_eq!(
+            read(&file, "dense.txt", page(Some(2_001), None)).unwrap(),
+            ReadOutput::Text { content: "last".into(), offset: 2_001, line_count: 1, next: None }
+        );
+    }
+
+    /// "applies the byte limit to the returned content of small files" (2.3.1, #63810).
+    #[test]
+    fn small_files_take_the_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bytes.txt");
+        let exact = format!("{}x\n", "é".repeat(799)).repeat(32);
+        std::fs::write(&file, &exact).unwrap();
+        assert_eq!(read(&file, "bytes.txt", Page::default()).unwrap(), ReadOutput::Text { content: exact, offset: 1, line_count: 32, next: None });
+        // Each truncation marker takes more bytes than the one character it replaces.
+        std::fs::write(&file, format!("{}\n", "x".repeat(2_001)).repeat(25) + &"é".repeat(500)).unwrap();
+        let ReadOutput::Text { content, offset, line_count, next } = read(&file, "bytes.txt", Page::default()).unwrap() else { panic!() };
+        assert_eq!((offset, line_count, next), (1, 25, Some(26)));
+        assert_eq!(content.split('\n').count(), 25);
+        assert!(content.len() <= MAX_READ_BYTES);
+    }
+
+    /// "reads extensionless and renamed GIFs as images" (2.3.1, #63811) and PDFs as media without their bytes in
+    /// the structured output.
+    #[test]
+    fn gifs_and_pdfs_are_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let tail: Vec<u8> = (0..58).step_by(2).map(|i| u8::from_str_radix(&"01000100800000000000ffffff2c00000000010001000002024401003b"[i..i + 2], 16).unwrap()).collect();
+        for (version, name) in [("GIF87a", "pixel"), ("GIF89a", "pixel.txt")] {
+            let bytes = [version.as_bytes(), &tail].concat();
+            let file = dir.path().join(name);
+            std::fs::write(&file, &bytes).unwrap();
+            assert_eq!(
+                read(&file, name, Page::default()).unwrap(),
+                ReadOutput::Media { uri: file_uri(&file), mime: "image/gif".into(), name: name.into(), bytes }
+            );
+        }
+        let file = dir.path().join("document.pdf");
+        std::fs::write(&file, "%PDF-1.7\ncontent").unwrap();
+        let out = read(&file, "document.pdf", Page::default()).unwrap();
+        assert_eq!(out.to_json(), json!({"type": "media", "uri": file_uri(&file), "mime": "application/pdf", "name": "document.pdf"}));
+        assert_eq!(to_model_content("document.pdf", None, &out)[0], ToolContent::Text { text: "PDF read successfully".into() });
+        // A directory page lists names only.
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+        let listing = read(dir.path(), "dir", Page::default()).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            listing.to_json(),
+            json!({"type": "directory", "entries": [format!("folder{sep}"), "document.pdf", "pixel", "pixel.txt"]})
+        );
     }
 }

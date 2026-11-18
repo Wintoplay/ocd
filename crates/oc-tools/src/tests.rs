@@ -375,6 +375,25 @@ async fn external_directory_request() {
     assert_eq!(requests[1].action, "read");
     assert_eq!(requests[1].resources, vec![path.replace('\\', "/")]);
     assert_eq!(ok.metadata.as_ref().unwrap()["truncated"], json!(false));
+    // tool-read.test.ts (2.3.1, #64361): whole-file text is the `text` shape.
+    assert_eq!(ok.output, Some(json!({"type": "text", "content": "data\n", "offset": 1, "lineCount": 1})));
+}
+
+// tool-read.test.ts "rejects a zero limit before reading" (2.3.1, #63808).
+#[tokio::test]
+async fn read_rejects_a_zero_limit_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+    let host = Arc::new(MockHost::default());
+    let ctx = context(dir.path(), host.clone());
+    let error = run(&tools::read::ReadTool, json!({"path": "README.md", "limit": 0}), ctx.clone()).await.unwrap_err();
+    assert_eq!(error.model_message(), "Limit must be a positive integer");
+    assert!(host.requests.lock().is_empty());
+    // A bounded page reports itself truncated in the metadata.
+    std::fs::write(dir.path().join("lines.txt"), "one\ntwo\nthree\n").unwrap();
+    let ok = run(&tools::read::ReadTool, json!({"path": "lines.txt", "limit": 1}), ctx).await.unwrap();
+    assert_eq!(ok.output, Some(json!({"type": "text", "content": "one", "offset": 1, "lineCount": 1, "next": 2})));
+    assert_eq!(ok.metadata.unwrap()["truncated"], json!(true));
 }
 
 // tool-read.test.ts "reads virtual skill:// files and directories from Skill.Service without external_directory

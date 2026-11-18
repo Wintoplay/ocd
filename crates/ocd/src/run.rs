@@ -147,13 +147,15 @@ pub fn canonical_tool_name(name: &str) -> &str {
     }
 }
 
+/// Read's JSON page envelope: 2.3.0's `text-page`, utf8 `file` and `list-page` shapes and 2.3.1's `text` and
+/// `directory` shapes, since stored rows keep whichever shape wrote them.
 pub fn read_display_text(text: &str) -> Option<String> {
     if !text.starts_with('{') {
         return None;
     }
     let v: Value = serde_json::from_str(text).ok()?;
     if let Some(c) = v.get("content").and_then(Value::as_str)
-        && (v.get("type").and_then(Value::as_str) == Some("text-page") || v.get("encoding").and_then(Value::as_str) == Some("utf8"))
+        && (matches!(v.get("type").and_then(Value::as_str), Some("text-page" | "text")) || v.get("encoding").and_then(Value::as_str) == Some("utf8"))
     {
         return Some(c.to_string());
     }
@@ -1916,6 +1918,23 @@ mod tests {
         assert!(!only_uncancellable(&[job("codemode"), job("shell")]));
         assert!(!only_uncancellable(&[job("subagent")]));
         assert!(!only_uncancellable(&[]));
+    }
+
+    /// Read envelopes of both releases render: 2.3.0's `text-page`, utf8 `file` and `list-page`, 2.3.1's `text` and
+    /// `directory`.
+    #[test]
+    fn read_display_text_reads_old_and_new_shapes() {
+        for (envelope, shown) in [
+            (r#"{"type":"text-page","content":"a\nb","mime":"text/plain","offset":1,"truncated":false}"#, "a\nb"),
+            (r#"{"type":"file","uri":"file:///x","content":"whole","encoding":"utf8","mime":"text/plain"}"#, "whole"),
+            (r#"{"type":"list-page","entries":[{"path":"src/","type":"directory"},{"path":"a.ts","type":"file"}],"truncated":false}"#, "src/\na.ts"),
+            (r#"{"type":"text","content":"a\nb","offset":1,"lineCount":2}"#, "a\nb"),
+            (r#"{"type":"directory","entries":["src/","a.ts"],"next":3}"#, "src/\na.ts"),
+        ] {
+            assert_eq!(read_display_text(envelope).as_deref(), Some(shown), "{envelope}");
+        }
+        assert_eq!(read_display_text(r#"{"type":"media","uri":"file:///p.png","mime":"image/png","name":"p.png"}"#), None);
+        assert_eq!(read_display_text("Read file a, lines 1-1\n1: x"), None);
     }
 
     #[test]

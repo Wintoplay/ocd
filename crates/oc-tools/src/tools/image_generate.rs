@@ -179,10 +179,9 @@ impl ImageGenerateTool {
     /// `readImage`: a local file or an http(s) URL as `{data, mime, name}`.
     async fn read_image(&self, ctx: &ToolContext, source: &str) -> Result<Value, ToolError> {
         let bytes = self.read_bytes(ctx, source).await?;
-        let mime = crate::mime::detect(&bytes);
-        if !INPUT_TYPES.contains(&mime) {
+        let Some(mime) = crate::mime::detect_media(&bytes).filter(|mime| INPUT_TYPES.contains(mime)) else {
             return Err(ToolError::new(format!("{source} is not a PNG, JPEG, WebP or GIF image.")));
-        }
+        };
         let name = Path::new(source).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         Ok(json!({ "data": base64::engine::general_purpose::STANDARD.encode(&bytes), "mime": mime, "name": name }))
     }
@@ -260,7 +259,7 @@ async fn run(
         return Err(format!("{reference} returned no image."));
     };
     let bytes = base64::engine::general_purpose::STANDARD.decode(image["data"].as_str().unwrap_or_default()).unwrap_or_default();
-    let file = PathBuf::from(format!("{}{}", stem.display(), extension(crate::mime::detect(&bytes)).unwrap_or(".png")));
+    let file = PathBuf::from(format!("{}{}", stem.display(), extension(crate::mime::detect_media(&bytes).unwrap_or("image/png")).unwrap_or(".png")));
     // The edit prompt covered the requested path. Replacing a different existing file needs its own approval; a new
     // file only has to pass the deny rules.
     if let Some(target) = &target

@@ -28,30 +28,38 @@ fn is_text(bytes: &[u8]) -> bool {
     controls as f64 / bytes.len() as f64 <= 0.3
 }
 
-/// `Mime.detect(bytes)`.
+/// `Mime.detect(bytes)`: a media signature, else plain text or binary.
 pub fn detect(bytes: &[u8]) -> &'static str {
+    detect_media(bytes).unwrap_or(if is_text(bytes) { "text/plain" } else { "application/octet-stream" })
+}
+
+/// `Mime.detectMedia(bytes)`: the media type a file's leading bytes name, if any (2.3.1: both six-byte GIF
+/// signatures #63811, and a bitmap only with a valid DIB header #63822).
+pub fn detect_media(bytes: &[u8]) -> Option<&'static str> {
     if starts_with(bytes, &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
-        return "image/png";
+        return Some("image/png");
     }
     if starts_with(bytes, &[0xff, 0xd8, 0xff]) {
-        return "image/jpeg";
+        return Some("image/jpeg");
     }
-    if starts_with(bytes, &[0x47, 0x49, 0x46, 0x38]) {
-        return "image/gif";
+    if starts_with(bytes, b"GIF87a") || starts_with(bytes, b"GIF89a") {
+        return Some("image/gif");
     }
-    if starts_with(bytes, &[0x42, 0x4d]) {
-        return "image/bmp";
+    if bytes.len() >= 18 && starts_with(bytes, &[0x42, 0x4d]) {
+        let pixels = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as u64;
+        let dib = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]) as u64;
+        // Pixels follow the 14-byte file header and a Windows or OS/2 DIB header, possibly beyond this sample.
+        if [12, 16, 40, 52, 56, 64, 108, 124].contains(&dib) && pixels >= 14 + dib {
+            return Some("image/bmp");
+        }
     }
     if starts_with(bytes, &[0x25, 0x50, 0x44, 0x46, 0x2d]) {
-        return "application/pdf";
+        return Some("application/pdf");
     }
     if starts_with(bytes, &[0x52, 0x49, 0x46, 0x46]) && bytes.len() >= 8 && starts_with(&bytes[8..], &[0x57, 0x45, 0x42, 0x50]) {
-        return "image/webp";
+        return Some("image/webp");
     }
-    if let Some(mime) = iso_bmff(bytes) {
-        return mime;
-    }
-    if is_text(bytes) { "text/plain" } else { "application/octet-stream" }
+    iso_bmff(bytes)
 }
 
 /// An `ftyp` box: AVIF, HEIC, QuickTime and M4A share MP4's container; the major brand tells them apart, and
@@ -136,6 +144,30 @@ mod tests {
         assert_eq!(detect(&[1, 2, 3, b'a']), "application/octet-stream");
         assert_eq!(lookup(Path::new("a.unknownext")), "application/octet-stream");
         assert_eq!(lookup(Path::new("a.html")), "text/html");
+    }
+
+    // mime.test.ts (2.3.1, #63811, #63822, #63823).
+    #[test]
+    fn media_headers_and_text_fallback() {
+        for (bytes, mime) in [(&[65u8][..], "text/plain"), (&[0xff], "application/octet-stream"), (&[0xe2, 0x82], "text/plain")] {
+            assert_eq!(detect_media(bytes), None);
+            assert_eq!(detect(bytes), mime);
+        }
+        for text in ["BM", "BMW service schedule\n"] {
+            assert_eq!(detect(text.as_bytes()), "text/plain");
+        }
+        assert_eq!(detect(b"GIF8 is text"), "text/plain");
+        assert_eq!(detect(b"GIF87a\x01\x00"), "image/gif");
+        assert_eq!(detect(b"GIF89a\x01\x00"), "image/gif");
+        let hex = |hex: &str| (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        // 1x1, 24-bit bitmaps with a four-byte padded pixel row.
+        let windows = format!("424d3a000000000000003600000028000000010000000100000001001800{}", "00".repeat(28));
+        let os2 = "424d1e000000000000001a0000000c000000010001000100180000000000";
+        for source in [windows.as_str(), os2] {
+            let bytes = hex(source);
+            assert_eq!(detect(&bytes), "image/bmp");
+            assert_eq!(detect(&bytes[..18]), "image/bmp");
+        }
     }
 
     // core test/mime.test.ts "tells ISO-BMFF brands apart"

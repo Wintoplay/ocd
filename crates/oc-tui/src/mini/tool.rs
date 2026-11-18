@@ -106,7 +106,8 @@ pub fn tool_output_text(name: &str, content: &[Value]) -> String {
     joined
 }
 
-/// `readDisplayText`: unwrap Read's JSON page envelope.
+/// `readDisplayText`: unwrap Read's JSON page envelope. Besides upstream's 2.3.0 shapes (`text-page`, a utf8 `file`,
+/// `list-page` entries), this reads 2.3.1's `text` content and `directory` names, so old and new rows both render.
 pub fn read_display_text(text: &str) -> Option<String> {
     if !text.starts_with('{') {
         return None;
@@ -114,7 +115,8 @@ pub fn read_display_text(text: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(text).ok()?;
     let envelope = dict(Some(&parsed));
     if let Some(Value::String(content)) = envelope.get("content")
-        && (envelope.get("type").and_then(|t| t.as_str()) == Some("text-page") || envelope.get("encoding").and_then(|t| t.as_str()) == Some("utf8"))
+        && (matches!(envelope.get("type").and_then(|t| t.as_str()), Some("text-page" | "text"))
+            || envelope.get("encoding").and_then(|t| t.as_str()) == Some("utf8"))
     {
         return Some(content.clone());
     }
@@ -879,6 +881,23 @@ pub fn tool_filetype(input: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Read envelopes of both releases render: 2.3.0's `text-page`, utf8 `file` and `list-page`, 2.3.1's `text` and
+    /// `directory`.
+    #[test]
+    fn read_display_text_reads_old_and_new_shapes() {
+        for (envelope, shown) in [
+            (r#"{"type":"text-page","content":"a\nb","mime":"text/plain","offset":1,"truncated":false}"#, "a\nb"),
+            (r#"{"type":"file","uri":"file:///x","content":"whole","encoding":"utf8","mime":"text/plain"}"#, "whole"),
+            (r#"{"type":"list-page","entries":[{"path":"src/","type":"directory"},{"path":"a.ts","type":"file"}],"truncated":false}"#, "src/\na.ts"),
+            (r#"{"type":"text","content":"a\nb","offset":1,"lineCount":2}"#, "a\nb"),
+            (r#"{"type":"directory","entries":["src/","a.ts"],"next":3}"#, "src/\na.ts"),
+        ] {
+            assert_eq!(read_display_text(envelope).as_deref(), Some(shown), "{envelope}");
+        }
+        assert_eq!(read_display_text(r#"{"type":"media","uri":"file:///p.png","mime":"image/png","name":"p.png"}"#), None);
+        assert_eq!(read_display_text("Read file a, lines 1-1\n1: x"), None);
+    }
 
     /// `canonicalToolPart(name, state, id)` from the upstream fixture.
     pub fn part(name: &str, state: Value, id: Option<&str>) -> ToolPart {
