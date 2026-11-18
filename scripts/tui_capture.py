@@ -3,7 +3,7 @@
 usage:
   tui_capture.py --bin target/debug/ocd --work DIR --script turns.json [--cols 100] [--rows 30]
                  [--key 2:hello] [--key 3:<CR>] [--snap 5] [--snap 9.5] [--duration 30] [--mini] [--config JSON]
-                 [--seed-session ses_…:TITLE]
+                 [--seed-session ses_…:TITLE] [--project-config JSON]
 
 Everything runs isolated: DIR/project holds `opencode.json` (provider `mock` → the mock on a free port),
 DIR/state holds XDG_* / HOME / OPENCODE_TEST_HOME (the background service is disabled), and the TUI runs with
@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--mini", action="store_true")
     ap.add_argument("--ready", default=None, help="key and snap times count from when the screen first shows this text")
     ap.add_argument("--config", default=None, help="cli.json (TUI config) as JSON")
+    ap.add_argument("--project-config", default=None, help="keys merged into the project's opencode.json, as JSON")
     ap.add_argument("--seed-session", action="append", default=[], metavar="ID:TITLE",
                     help="create this session (through a `serve` of the same binary and state) before the TUI starts")
     a = ap.parse_args()
@@ -75,6 +76,8 @@ def main():
         "name": "Mock", "package": "@opencode/ai/providers/openai-compatible",
         "settings": {"baseURL": f"http://127.0.0.1:{mock.port}/v1", "apiKey": "test"},
         "models": {"m1": {"name": "Mock One", "limit": {"context": 100000, "output": 4096}}}}}}
+    if a.project_config:
+        cfg.update(json.loads(a.project_config))
     with open(os.path.join(project, "opencode.json"), "w") as f:
         json.dump(cfg, f, indent=2)
     with open(os.path.join(project, "hello.txt"), "w") as f:

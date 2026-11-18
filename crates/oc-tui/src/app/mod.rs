@@ -1559,6 +1559,8 @@ mod catchup227_tests;
 #[cfg(test)]
 mod catchup230_tests;
 #[cfg(test)]
+mod catchup231_tests;
+#[cfg(test)]
 mod perf;
 #[cfg(test)]
 mod media_tests;

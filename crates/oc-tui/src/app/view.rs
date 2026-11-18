@@ -729,7 +729,9 @@ impl App {
             dock.push(SLine::blank());
         }
         let mut prompt_lines = None;
-        if self.composer_open() && form.is_none() {
+        // `<Match when={composerVisible()}>` first: an open composer hides a form (as upstream), and a permission
+        // prompt hides the composer (`composer_open`, 2.3.1).
+        if self.composer_open() {
             dock.extend(self.composer_lines(t, width));
         } else if let Some(p) = &permission {
             dock.extend(self.permission_lines(t, width, p));
@@ -1079,6 +1081,26 @@ impl App {
 
     // ---- permission --------------------------------------------------------
 
+    /// The request's metadata with the input of its source tool call (`source` in `permission.tsx`: the call's part,
+    /// once it is no longer streaming) under `input` when the metadata has none, so a shell ask shows `$ <command>`.
+    fn permission_metadata(&self, req: &PermissionRequest) -> Option<serde_json::Value> {
+        let input = req.source.as_ref().and_then(|src| {
+            let (mid, tid) = (src.get("messageID")?.as_str()?, src.get("id")?.as_str()?);
+            let message = self.store.messages.get(&req.session_id)?.iter().find(|m| m.id == mid && m.kind == "assistant")?;
+            message.content.iter().find_map(|c| match c {
+                Content::Tool(t) if t.id == tid && t.state.status != "streaming" && t.state.input.is_object() => Some(t.state.input.clone()),
+                _ => None,
+            })
+        });
+        let mut metadata = req.metadata.clone();
+        if let Some(input) = input
+            && let serde_json::Value::Object(m) = metadata.get_or_insert_with(|| serde_json::json!({}))
+        {
+            m.entry("input").or_insert(input);
+        }
+        metadata
+    }
+
     pub(super) fn permission_lines(&self, t: &Theme, width: usize, req: &PermissionRequest) -> Vec<SLine> {
         let ui = self.permission_ui.clone().filter(|u| u.id == req.id).unwrap_or_default();
         let bg = t.background.raised.base;
@@ -1087,7 +1109,8 @@ impl App {
         let inner = width.saturating_sub(5).max(1);
         let mut body: Vec<SLine> = Vec::new();
         let fmt = |p: &str| transcript::format_path(p, Some(&self.location_dir()));
-        let (icon, title, lines, diff) = F::permission_presentation(&req.action, &req.resources, req.metadata.as_ref(), &fmt);
+        let metadata = self.permission_metadata(req);
+        let (icon, title, lines, diff) = F::permission_presentation(&req.action, &req.resources, metadata.as_ref(), &fmt);
         // The header sits in a box with its own 1-cell padding, one column right of the bar's padding.
         if ui.rejecting {
             body.push(SLine::new(vec![pad(1), s("△", t.text.feedback.error.base), s(" Reject permission", t.text.base)]));

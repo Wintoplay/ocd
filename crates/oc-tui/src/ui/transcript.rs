@@ -1343,18 +1343,6 @@ fn turn_tps_at(messages: &[Message], idx: usize, legacy: bool) -> Option<f64> {
     Some(out / (d as f64 / 1000.0))
 }
 
-pub fn turn_ttft(m: &Message, messages: &[Message]) -> Option<i64> {
-    let idx = messages.iter().position(|x| x.id == m.id)?;
-    turn_ttft_at(messages, idx, is_legacy(messages))
-}
-
-/// `SessionTurn.timeToFirstToken`: ms from the dispatch of the turn's first token-producing step to its first
-/// streamed token, until a step records one.
-fn turn_ttft_at(messages: &[Message], idx: usize, legacy: bool) -> Option<i64> {
-    let step = turn_steps(messages, idx, legacy).into_iter().find(|s| s.time.first_token.is_some())?;
-    Some((step.time.first_token? - step.time.created).max(0))
-}
-
 /// Seconds left on a scheduled retry, as the footer shows them (`Retrying in Ns`).
 pub fn retry_secs(at: i64, now: i64) -> i64 {
     ((at - now) as f64 / 1000.0).ceil().max(0.0) as i64
@@ -1497,13 +1485,7 @@ fn render_footer(ctx: &RCtx, id: &str) -> Vec<SLine> {
     {
         segs.push(s(format!(" · {v:.1} tok/s"), th.text.muted));
     }
-    // `· 500ms ttft` (2.3.0); a zero wait is not shown.
-    if ctx.config.tps()
-        && ctx.term_width >= 36
-        && let Some(v) = idx.and_then(|i| turn_ttft_at(ctx.messages, i, legacy)).filter(|v| *v != 0)
-    {
-        segs.push(s(format!(" · {} ttft", locale::duration(v)), th.text.muted));
-    }
+    // 2.3.1 (#63759) dropped the `· 500ms ttft` segment that 2.3.0 showed here.
     if interrupted {
         segs.push(s(" · interrupted", th.text.muted));
     }
@@ -2090,7 +2072,8 @@ pub fn revert_banner(ctx: &RCtx, count: usize, files: &[FileDiff]) -> Vec<SLine>
 mod tests {
     use super::*;
 
-    // session-turn.test.ts (2.3.0, #63321): throughput from the first streamed token, and time to first token.
+    // session-turn.test.ts (2.3.0, #63321; 2.3.1 dropped the time to first token, #63759): throughput from the first
+    // streamed token.
     fn turn_messages(first: serde_json::Value, last: serde_json::Value) -> Vec<Message> {
         serde_json::from_value(serde_json::json!([
             {"id": "user-1", "type": "user", "text": "go", "time": {"created": 1000}},
@@ -2108,7 +2091,6 @@ mod tests {
         );
         // 65 tokens over the 5s the provider spent streaming them, not the 10s that include waiting for the first.
         assert_eq!(turn_tps(&messages[2], &messages), Some(13.0));
-        assert_eq!(turn_ttft(&messages[2], &messages), Some(2000));
     }
 
     #[test]
@@ -2119,14 +2101,11 @@ mod tests {
         );
         // The old step counts its 4s request window, the new one its 3s decode window.
         assert_eq!(turn_tps(&messages[2], &messages), Some(65.0 / 7.0));
-        // Only the step that recorded a first token can report how long it waited for one.
-        assert_eq!(turn_ttft(&messages[2], &messages), Some(1000));
         let messages = turn_messages(
             serde_json::json!({"created": 6000, "streamed": 10000, "completed": 20000}),
             serde_json::json!({"created": 24000, "streamed": 30000, "completed": 31000}),
         );
         assert_eq!(turn_tps(&messages[2], &messages), Some(6.5));
-        assert_eq!(turn_ttft(&messages[2], &messages), None);
     }
 
     // session-shell-stopped.test.tsx (2.3.0, #62977): a stopped call's output shows like a finished call's, then the

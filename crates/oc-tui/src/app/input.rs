@@ -152,12 +152,13 @@ impl App {
             return None;
         }
         let sid = self.session_id()?;
-        for id in self.store.family_of(sid).iter().chain(std::iter::once(&sid.to_string())) {
-            if let Some(p) = self.store.permissions.get(id).and_then(|l| l.first()) {
-                return Some(p.clone());
-            }
+        // `permissions`: the session's own requests, then (for a root only) its descendants'. A subagent session
+        // lists only its own (2.3.1, #64343; 2.3.0 listed none there).
+        let mut ids = vec![sid.to_string()];
+        if !self.session().is_some_and(|s| s.parent_id.is_some()) {
+            ids.extend(self.store.family_of(sid).into_iter().filter(|id| id != sid));
         }
-        None
+        ids.iter().find_map(|id| self.store.permissions.get(id).and_then(|l| l.first()).cloned())
     }
 
     pub fn active_form(&self) -> Option<(FormInfo, Option<LocationRef>)> {

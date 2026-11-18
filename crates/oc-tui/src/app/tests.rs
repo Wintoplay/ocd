@@ -104,10 +104,10 @@ pub(super) fn session(app: &mut App) -> String {
     id
 }
 
-// app-lifecycle.test.tsx (2.3.0, #63321): the footer measures tokens/s from the first streamed token and shows the
-// time to first token after it.
+// app-lifecycle.test.tsx (2.3.0, #63321; 2.3.1, #63759): the footer measures tokens/s from the first streamed token
+// and no longer shows the time to first token after it.
 #[test]
-fn footer_shows_time_to_first_token() {
+fn footer_leaves_out_time_to_first_token() {
     let mut a = app();
     let id = session(&mut a);
     let msgs: Vec<Message> = serde_json::from_value(json!([
@@ -121,10 +121,8 @@ fn footer_shows_time_to_first_token() {
     a.store.messages.insert(id, msgs);
     let lines = render(&mut a, 100, 30);
     let joined = lines.join("\n");
-    assert!(contains(&lines, "4.0s · 40.0 tok/s · 500ms ttft"), "{joined}");
-    // Below 36 columns the time to first token is left out, like the duration.
-    let lines = render(&mut a, 35, 30);
-    assert!(!lines.join("\n").contains("ttft"));
+    assert!(contains(&lines, "4.0s · 40.0 tok/s"), "{joined}");
+    assert!(!joined.contains("ttft"), "{joined}");
 }
 
 #[test]

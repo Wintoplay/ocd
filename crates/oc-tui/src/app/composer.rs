@@ -66,8 +66,12 @@ pub fn session_family(sessions: &[(String, Option<String>)], session: &str) -> V
 pub const TAB_CLICK: &str = "composer.tab:";
 
 impl App {
+    /// `composerVisible` (2.3.1, #64343): a permission prompt wins over the composer, both the one a subagent session
+    /// opens by default and one the user opened (`self.composer` is kept, so it comes back once the prompt is
+    /// answered).
     pub fn composer_open(&self) -> bool {
-        self.composer.is_some() || (self.session().is_some_and(|s| s.parent_id.is_some()) && self.active_form().is_none())
+        self.active_permission().is_none()
+            && (self.composer.is_some() || (self.session().is_some_and(|s| s.parent_id.is_some()) && self.active_form().is_none()))
     }
 
     pub fn composer_tabs(&self) -> Vec<(&'static str, &'static str)> {

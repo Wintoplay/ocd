@@ -230,6 +230,15 @@ The modules below cover the main session and home screens and all dialogs. They 
   exactly one ID stay plain. An unknown ID is looked up once with `session.get`; a miss marks it missing. Segments
   carry their own click target through wrapping (`Seg::link`), so each wrapped row of a title opens it. ocd's
   editor deletes a chip whole, so upstream's half-deleted chip fragment (Ctrl+W inside a chip) cannot occur.
+- **2.3.1 changes** (`app/catchup231_tests.rs`): the assistant footer no longer shows the time to first token
+  (`· 500ms ttft`; it reads `Build · Model · 4.0s · 40.0 tok/s`) (#63759). A permission prompt wins over the composer
+  (#64343, `composerVisible`): a subagent session shows its own permission prompt instead of its Subagents composer,
+  and a composer the user opened gives way to an arriving prompt (keys go to the prompt) and comes back once it is
+  answered. A subagent session lists only its own permission requests (2.3.0 listed none there; the root still
+  gathers its descendants'). An open composer also hides a pending form, as upstream's `Switch` does. The permission body reads the input of the
+  tool call that asked (`source`), so a shell ask shows `$ <command>` like upstream (it listed `- <resource>`). Not ported (new
+  designs only): the export dialog's Location row (#62490). A tab closed by another TUI moving to its old neighbour
+  (#64261) needs the live keyed-state watch ocd does not have (only `cli.json` reloads live).
 - **Full-screen views:** the diff viewer route (`diff.open`: tree, unified or split, base
   picker) and the stats route.
 - **Embedded terminal pane:** uses the server PTY WebSocket (input protocol 1) and renders
