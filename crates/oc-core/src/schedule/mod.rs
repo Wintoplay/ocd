@@ -1,5 +1,10 @@
-//! Scheduled prompts (`core/src/schedule.ts`, `schedule/sql.ts`, `schema/src/schedule.ts`), behind
-//! `experimental.schedules`.
+//! Scheduled prompts (`core/src/schedule.ts`, `schedule/sql.ts`, `schema/src/schedule.ts`) as opencode 2.3.0 had
+//! them, behind `experimental.schedules`.
+//!
+//! Retired: 2.3.1 replaced schedules with automations and its migrations copy simple schedules into the
+//! `automation` table and drop the `schedule` table. Nothing wires this service any more (no loop, tools, `/schedule`
+//! command or routes); it stays as the base the automations port builds on (the time parser, the leader lease and
+//! the Code Mode check runner), and it reads `experimental.automations`, whose old name `schedules` is.
 //!
 //! A schedule wakes its session with a prompt once after a delay (`in`), at a time (`at`), every interval (`every`)
 //! or on a cron, optionally gated by a shell or Code Mode check (`if` / `until`, see [`check`]). Rows live in the
@@ -1287,7 +1292,7 @@ impl Schedules {
 /// The location settings from its config entries: the `schedules` flag and `timezone`.
 pub fn settings_of(entries: &[oc_config::Entry]) -> Settings {
     Settings {
-        enabled: oc_config::flag::enabled(entries, "schedules"),
+        enabled: oc_config::flag::enabled(entries, "automations"),
         timezone: oc_config::fold::latest(entries, |i| i.timezone.as_ref()).cloned(),
     }
 }

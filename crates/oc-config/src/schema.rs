@@ -952,6 +952,10 @@ impl CompactionBuffer {
 pub struct Compaction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
+    /// Write the summary in the background as the session nears automatic compaction, so it does not wait for one
+    /// (default: true). A summary that is never used still costs tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep: Option<CompactionKeep>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -963,6 +967,7 @@ impl Decode for Compaction {
         let o = record(value)?;
         Some(Compaction {
             auto: opt(o, "auto")?,
+            background: opt(o, "background")?,
             keep: opt(o, "keep")?,
             buffer: opt_with(o, "buffer", CompactionBuffer::decode)?,
         })
@@ -1734,33 +1739,37 @@ pub struct Experimental {
     /// Deprecated: ignored because Code Mode always runs on the VM.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codemode_vm: Option<bool>,
-    /// Turn every feature flag on regardless of the build channel, like `OPENCODE_FLAGS=all` (see [`crate::flag`]).
+    /// Turn every feature flag on regardless of the build channel, like `OPENCODE_FLAGS=all`, except opt-in-only
+    /// flags (see [`crate::flag`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_flags: Option<bool>,
     /// Flag: enable the experimental todowrite tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo: Option<bool>,
-    /// Flag: experimental background compaction.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background_compaction: Option<bool>,
     /// Flag: store new session media once in a deduplicated blob table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_blob: Option<bool>,
-    /// Flag: experimental scheduled tasks.
+    /// Flag: automations, prompts or Code Mode actions on a timer (accepted; not ported yet).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schedules: Option<bool>,
+    pub automations: Option<bool>,
     /// Flag: experimental artifacts backed by pluggable providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<bool>,
-    /// Flag: move foreground shell commands to the background when their timeout expires (accepted; not ported).
+    /// Flag: the experimental video generation API (accepted; not ported).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_timeout_background: Option<bool>,
+    pub video_generate: Option<bool>,
     /// Flag: OpenCode Console watches (accepted; not ported).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub console_watches: Option<bool>,
     /// Flag: experimental MCP Events, a draft MCP extension (accepted; not ported).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_events: Option<bool>,
+    /// Opt-in-only flag: the full Code Mode work in progress (accepted; not ported).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_codemode: Option<bool>,
+    /// Deprecated: use experimental.automations (read as its old name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<bool>,
     /// Each assistant part as its own `session_part` row (accepted; not ported, ocd writes whole messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part_rows: Option<bool>,
@@ -1781,17 +1790,18 @@ pub struct Experimental {
 }
 
 impl Experimental {
-    /// The value of a flag of the registry (`experimental.<key>`).
+    /// The value of a flag of the registry, or of a flag's old name (`experimental.<key>`).
     pub fn flag(&self, key: &str) -> Option<bool> {
         match key {
             "todo" => self.todo,
-            "background_compaction" => self.background_compaction,
             "media_blob" => self.media_blob,
-            "schedules" => self.schedules,
+            "automations" => self.automations,
             "artifacts" => self.artifacts,
-            "shell_timeout_background" => self.shell_timeout_background,
+            "video_generate" => self.video_generate,
             "console_watches" => self.console_watches,
             "mcp_events" => self.mcp_events,
+            "full_codemode" => self.full_codemode,
+            "schedules" => self.schedules,
             _ => None,
         }
     }
@@ -1805,13 +1815,14 @@ impl Decode for Experimental {
             codemode_vm: opt(o, "codemode_vm")?,
             all_flags: opt(o, "all_flags")?,
             todo: opt(o, "todo")?,
-            background_compaction: opt(o, "background_compaction")?,
             media_blob: opt(o, "media_blob")?,
-            schedules: opt(o, "schedules")?,
+            automations: opt(o, "automations")?,
             artifacts: opt(o, "artifacts")?,
-            shell_timeout_background: opt(o, "shell_timeout_background")?,
+            video_generate: opt(o, "video_generate")?,
             console_watches: opt(o, "console_watches")?,
             mcp_events: opt(o, "mcp_events")?,
+            full_codemode: opt(o, "full_codemode")?,
+            schedules: opt(o, "schedules")?,
             part_rows: opt(o, "part_rows")?,
             image_generate: opt(o, "image_generate")?,
             subagent_depth: opt_with(o, "subagent_depth", non_negative_int)?,

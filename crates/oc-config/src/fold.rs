@@ -132,10 +132,11 @@ pub fn subagent_depth(entries: &[Entry]) -> u64 {
 }
 
 
-/// Compaction settings overlaid field-wise (defaults: auto true, keep 15000, buffer unset).
+/// Compaction settings overlaid field-wise (defaults: auto true, background true, keep 15000, buffer unset).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CompactionSettings {
     pub auto: Option<bool>,
+    pub background: Option<bool>,
     pub buffer: Option<crate::schema::CompactionBuffer>,
     pub keep: Option<u64>,
 }
@@ -146,6 +147,9 @@ pub fn compaction(entries: &[Entry]) -> CompactionSettings {
         let Some(c) = &info.compaction else { continue };
         if c.auto.is_some() {
             out.auto = c.auto;
+        }
+        if c.background.is_some() {
+            out.background = c.background;
         }
         if c.buffer.is_some() {
             out.buffer = c.buffer.clone();

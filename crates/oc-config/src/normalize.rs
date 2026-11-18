@@ -600,10 +600,13 @@ fn normalize_compaction(input: &Obj, encoded: &mut Obj, d: &mut Diags) {
     unsupported_if_present(c, "tail_turns", p(&["compaction", "tail_turns"]), d);
     unsupported_if_present(c, "prune", p(&["compaction", "prune"]), d);
     let mut result = Obj::new();
-    if let Some(v) = c.get("auto")
-        && let Some(value) = decode_encoded::<bool>(v, p(&["compaction", "auto"]), d)
-    {
-        result.insert("auto".into(), value);
+    // 2.3.1: `background` decodes like `auto`, right after it.
+    for key in ["auto", "background"] {
+        if let Some(v) = c.get(key)
+            && let Some(value) = decode_encoded::<bool>(v, p(&["compaction", key]), d)
+        {
+            result.insert(key.into(), value);
+        }
     }
     let legacy_tokens = c
         .get("preserve_recent_tokens")
@@ -701,13 +704,14 @@ fn normalize_experimental(input: &Obj, encoded: &mut Obj, d: &mut Diags) {
                 for key in UNSUPPORTED_EXPERIMENTAL {
                     unsupported_if_present(e, key, p(&["experimental", key]), d);
                 }
-                // 2.3.0: every `ConfigExperimental.Info` field in schema order (`policies` merges into top-level
+                // 2.3.1: every `ConfigExperimental.Info` field in schema order (`policies` merges into top-level
                 // `policies` in normalize_policies). `codemode_vm` is a deprecated, ignored key; the retired
-                // `codemodeVm` alias is no longer read.
+                // `codemodeVm` alias is no longer read. `schedules` is the deprecated name of `automations`, after
+                // the registry; the retired `background_compaction` and `shell_timeout_background` are dropped.
                 let booleans = ["portable_shell_scanner", "codemode_vm", "all_flags"]
                     .into_iter()
                     .chain(crate::flag::REGISTRY.iter().map(|(key, _)| *key))
-                    .chain(["part_rows"]);
+                    .chain(["schedules", "part_rows"]);
                 for key in booleans {
                     if let Some(v) = e.get(key)
                         && let Some(value) = decode_encoded::<bool>(v, p(&["experimental", key]), d)

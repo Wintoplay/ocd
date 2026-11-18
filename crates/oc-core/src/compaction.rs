@@ -9,9 +9,10 @@
 //!   again:  [S1 + "E9 E10"][E11 … E18][E19]    →  [S2 + "E19"]      S2 covers the whole current conversation
 //! ```
 //!
-//! Background summaries (`experimental.background_compaction`): once the context passes 85% of the ceiling, the
-//! prefix the provider just processed is summarized off the critical path and held until automatic compaction is
-//! due, when it is swapped in instead of summarizing from scratch ([`Engine::precompute`]).
+//! Background summaries (`compaction.background`, on by default since 2.3.1): once the context comes within
+//! `PRECOMPUTE_LEAD` of the ceiling, the prefix the provider just processed is summarized off the critical path and
+//! held until automatic or overflow compaction, when it is swapped in instead of summarizing from scratch
+//! ([`Engine::precompute`]).
 //!
 //! Native (provider-side) compaction is not available: `oc-ai` has no compact endpoint, so a model whose
 //! `compaction` policy is `native` fails with `provider.unsupported-operation`, exactly as upstream does when
@@ -220,13 +221,13 @@ pub struct Settings {
     pub buffer: Option<CompactionBuffer>,
     /// Tokens of recent conversation kept verbatim beside the summary.
     pub keep: u64,
-    /// Background summaries (`experimental.background_compaction`).
-    pub precompute: bool,
+    /// Background summaries (`compaction.background`, default true).
+    pub background: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, buffer: None, keep: DEFAULT_KEEP, precompute: false }
+        Settings { auto: true, buffer: None, keep: DEFAULT_KEEP, background: true }
     }
 }
 
@@ -237,8 +238,7 @@ impl Settings {
             auto: c.auto.unwrap_or(true),
             buffer: c.buffer,
             keep: c.keep.unwrap_or(DEFAULT_KEEP),
-            // `Flag.enabled("background_compaction")` (2.2.7 flag registry).
-            precompute: oc_config::flag::enabled(entries, "background_compaction"),
+            background: c.background.unwrap_or(true),
         }
     }
 }
@@ -810,8 +810,6 @@ struct Background {
 pub struct Precomputed {
     first_id: Option<String>,
     keep_id: String,
-    model: ModelRef,
-    initial: String,
     /// The longest tail since `keep_id` that compaction still accepts beside this summary.
     tail_limit: i64,
     /// Background summaries that failed since the last compaction, this one included once it has.
@@ -839,12 +837,10 @@ impl Drop for AbortOnDrop {
 }
 
 /// `heldIndex`: where the messages kept beside a held summary start, or `None` when the summary no longer describes
-/// this conversation: a compaction or revert since replaced its start, or the model or instructions changed.
-fn held_index(held: &Precomputed, messages: &[Message], initial: &str, model: &ModelRef) -> Option<usize> {
-    if held.first_id.as_deref() != messages.first().map(Message::id) || held.initial != initial {
-        return None;
-    }
-    if held.model.provider_id != model.provider_id || held.model.id != model.id || held.model.variant != model.variant {
+/// this conversation: a compaction or revert since replaced its start. A summary is plain text, so a model or
+/// instructions change keeps it (2.3.1).
+fn held_index(held: &Precomputed, messages: &[Message]) -> Option<usize> {
+    if held.first_id.as_deref() != messages.first().map(Message::id) {
         return None;
     }
     messages.iter().position(|m| m.id() == held.keep_id)
@@ -1386,7 +1382,7 @@ impl Engine {
         let work = async {
             // A summary still being written shows as a running compaction while it is waited for.
             if let Some(held) = held
-                && let Some(res) = use_precomputed(&run, held, budget, &settings).await
+                && let Some(res) = use_precomputed(&run, held, budget, native).await
             {
                 return Ok(res);
             }
@@ -1415,14 +1411,13 @@ impl Engine {
 
 /// `usePrecomputed`: the held summary plus everything since it, kept verbatim, when it still describes this
 /// conversation and that tail is short. Waits for a summary still being written. `None`, after stopping the
-/// background work, when it cannot be used; compaction then summarizes as usual.
-async fn use_precomputed(run: &Run<'_>, held: Precomputed, budget: i64, settings: &Settings) -> Option<Res> {
+/// background work, when it cannot be used; compaction then summarizes as usual. A summary is plain text, so it
+/// serves any model (and an overflow compaction too), but a session that switched to native compaction compacts
+/// natively.
+async fn use_precomputed(run: &Run<'_>, held: Precomputed, budget: i64, native: bool) -> Option<Res> {
     let messages = &run.loaded.messages;
-    let index = held_index(&held, messages, &run.loaded.initial, &run.model.model_ref());
-    let usable = settings.precompute
-        && *run.trigger != Trigger::Overflow
-        && run.model.compaction.as_deref() != Some("native")
-        && index.is_some_and(|i| tail_tokens(messages, i) <= tail_limit(budget));
+    let index = held_index(&held, messages);
+    let usable = !native && index.is_some_and(|i| tail_tokens(messages, i) <= tail_limit(budget));
     let Precomputed { keep_id, usage, task, .. } = held;
     let mut task = AbortOnDrop(task);
     if !usable {
@@ -1453,7 +1448,7 @@ impl Engine {
     /// `fresh`: load the session's latest history into the context first (the step before going idle).
     pub async fn precompute(self: &Arc<Self>, loaded: &Loaded, fresh: bool) -> anyhow::Result<()> {
         let settings = Settings::from_entries(&loaded.sel.location.entries);
-        if !settings.precompute || !settings.auto {
+        if !settings.background || !settings.auto {
             return Ok(());
         }
         let reloaded;
@@ -1468,11 +1463,10 @@ impl Engine {
             return Ok(());
         }
         let limit = loaded.resolved.limit();
+        // An unknown window has an infinite ceiling, which this never reaches. Past the ceiling it still starts: at
+        // the end of a turn, the next prompt then swaps it in instead of waiting for a summary.
         let Some(ceiling) = calculate_ceiling(limit.context, limit.input, settings.buffer.as_ref()) else { return Ok(()) };
         let estimate = self.estimate_prompt(loaded);
-        if self.compaction_due_with(loaded, Some(ceiling), Some(estimate)) {
-            return Ok(());
-        }
         let model_ref = loaded.resolved.model_ref();
         let messages = &loaded.messages;
         // On a small window the lead is at most half the room the cycle started with, so the summary still covers
@@ -1497,7 +1491,7 @@ impl Engine {
         let failed = existing.as_ref().is_some_and(|e| e.state.load(Ordering::SeqCst) == 2);
         let failures = existing.as_ref().map(|e| e.failures).unwrap_or(0) + failed as u32;
         if let Some(existing) = existing {
-            let index = held_index(&existing, messages, &loaded.initial, &model_ref);
+            let index = held_index(&existing, messages);
             let keep = match index {
                 Some(i) if !failed && tail_tokens(messages, i) <= existing.tail_limit => true,
                 // Summarizing up to the same response again would repeat the same request.
@@ -1555,8 +1549,6 @@ impl Engine {
             Precomputed {
                 first_id: messages.first().map(|m| m.id().to_string()),
                 keep_id: anchor.id.clone(),
-                model: model_ref,
-                initial: loaded.initial.clone(),
                 tail_limit: tail_limit(cap),
                 failures,
                 usage,

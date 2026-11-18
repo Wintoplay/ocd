@@ -437,10 +437,13 @@ fn mcp_timeout_schema_order_and_recovery() {
 #[test]
 fn compaction_leaves() {
     let (encoded, d) = normalized(json!({ "compaction": {
-        "auto": false, "preserve_recent_tokens": 1000, "keep": { "tokens": 2000 },
-        "reserved": 3000, "buffer": 4000, "tail_turns": 2, "prune": true,
+        "buffer": 4000, "reserved": 3000, "background": false, "auto": false, "preserve_recent_tokens": 1000,
+        "keep": { "tokens": 2000 }, "tail_turns": 2, "prune": true,
     }}));
-    assert_eq!(encoded["compaction"], json!({ "auto": false, "keep": { "tokens": 2000 }, "buffer": 4000 }));
+    assert_eq!(
+        serde_json::to_string(&encoded["compaction"]).unwrap(),
+        r#"{"auto":false,"background":false,"keep":{"tokens":2000},"buffer":4000}"#
+    );
     assert_eq!(
         d.iter().map(|x| (x.kind, x.path.clone())).collect::<Vec<_>>(),
         vec![
@@ -450,6 +453,17 @@ fn compaction_leaves() {
             (DiagnosticKind::Conflict, pv(&[&["compaction", "buffer"]])[0].clone()),
         ]
     );
+}
+
+// 2.3.1: `compaction.background` decodes like `auto`.
+#[test]
+fn compaction_background() {
+    assert_eq!(normalized(json!({ "compaction": { "background": true } })).0["compaction"], json!({ "background": true }));
+    let (encoded, d) = normalized(json!({ "compaction": { "background": "yes", "auto": true } }));
+    assert_eq!(encoded["compaction"], json!({ "auto": true }));
+    assert_eq!(paths(&d, DiagnosticKind::Invalid), pv(&[&["compaction", "background"]]));
+    let info = Info::decode(&json!({ "compaction": { "background": false } })).unwrap();
+    assert_eq!(info.compaction.unwrap().background, Some(false));
 }
 
 // 2.2.5: a buffer is also a share of the window, from "1%" up to (not including) "100%".
@@ -537,7 +551,7 @@ fn native_policies_after_migrated() {
         "disabled_providers": ["openai"],
         "policies": [{ "action": "provider.use", "resource": "native", "effect": "deny" }],
         "experimental": {
-            "portable_shell_scanner": true, "todo": true, "background_compaction": true, "subagent_depth": 0,
+            "portable_shell_scanner": true, "todo": true, "media_blob": true, "part_rows": true, "subagent_depth": 0,
             "location_idle_timeout": "2 hours",
             "policies": [{ "action": "provider.use", "resource": "custom", "effect": "allow" }],
         },
@@ -548,7 +562,8 @@ fn native_policies_after_migrated() {
         json!({
             "portable_shell_scanner": true,
             "todo": true,
-            "background_compaction": true,
+            "media_blob": true,
+            "part_rows": true,
             "subagent_depth": 0,
             "location_idle_timeout": "7200000 millis",
         })
@@ -1175,17 +1190,21 @@ fn v2_3_0_provider_tls_and_freeform() {
     }
 }
 
-/// 2.3.0 `experimental` keys (`normalization.test.ts`): every registered flag as a boolean, `all_flags`,
-/// `part_rows`, the deprecated `codemode_vm` (the retired `codemodeVm` alias is ignored), in the schema's key order.
+/// 2.3.1 `experimental` keys (`normalization.test.ts`): every registered flag as a boolean, `all_flags`,
+/// `part_rows`, the deprecated `codemode_vm` (the retired `codemodeVm` alias is ignored) and `schedules` (the old
+/// name of `automations`, after the registry), in the schema's key order. The retired `background_compaction` and
+/// `shell_timeout_background` are dropped without a diagnostic, like any unknown key.
 #[test]
-fn v2_3_0_experimental_keys() {
+fn v2_3_1_experimental_keys() {
     let (encoded, d) = normalized(json!({ "experimental": {
         "subagent_depth": 0, "image_generate": { "model": "openai/gpt-image-2" }, "part_rows": true, "codemodeVm": true,
-        "mcp_events": true, "console_watches": false, "shell_timeout_background": true, "artifacts": true, "media_blob": true,
-        "all_flags": true, "codemode_vm": false, "portable_shell_scanner": true,
+        "schedules": true, "full_codemode": true, "mcp_events": true, "console_watches": false,
+        "shell_timeout_background": true, "video_generate": false, "artifacts": true, "automations": false,
+        "media_blob": true, "background_compaction": true, "todo": true, "all_flags": true, "codemode_vm": false,
+        "portable_shell_scanner": true,
     } }));
     assert!(d.is_empty(), "{d:?}");
-    let expected = r#"{"portable_shell_scanner":true,"codemode_vm":false,"all_flags":true,"media_blob":true,"artifacts":true,"shell_timeout_background":true,"console_watches":false,"mcp_events":true,"part_rows":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-2"}},"subagent_depth":0}"#;
+    let expected = r#"{"portable_shell_scanner":true,"codemode_vm":false,"all_flags":true,"todo":true,"media_blob":true,"automations":false,"artifacts":true,"video_generate":false,"console_watches":false,"mcp_events":true,"full_codemode":true,"schedules":true,"part_rows":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-2"}},"subagent_depth":0}"#;
     assert_eq!(serde_json::to_string(&encoded["experimental"]).unwrap(), expected);
     let info = Info::decode(&encoded).unwrap();
     assert_eq!(serde_json::to_string(&info.experimental).unwrap(), expected);
@@ -1197,9 +1216,10 @@ fn v2_3_0_experimental_keys() {
     assert!(encoded.get("experimental").is_none());
     assert!(d.is_empty(), "{d:?}");
 
-    let (encoded, d) = normalized(json!({ "experimental": { "todo": true, "media_blob": false, "schedules": "yes" } }));
-    assert_eq!(encoded["experimental"], json!({ "todo": true, "media_blob": false }));
-    assert_eq!(d.iter().map(|x| (x.kind.as_str(), x.log_path())).collect::<Vec<_>>(), [("invalid", "$.experimental.schedules".to_string())]);
+    // "normalizes every registered flag as a boolean".
+    let (encoded, d) = normalized(json!({ "experimental": { "todo": true, "media_blob": false, "automations": "yes", "full_codemode": true } }));
+    assert_eq!(encoded["experimental"], json!({ "todo": true, "media_blob": false, "full_codemode": true }));
+    assert_eq!(d.iter().map(|x| (x.kind.as_str(), x.log_path())).collect::<Vec<_>>(), [("invalid", "$.experimental.automations".to_string())]);
 
     assert_eq!(normalized(json!({ "experimental": { "all_flags": false } })).0["experimental"], json!({ "all_flags": false }));
     let (encoded, d) = normalized(json!({ "experimental": { "all_flags": "yes" } }));
@@ -1215,7 +1235,7 @@ fn v2_2_config_keys() {
         "username": "u",
         "timezone": "America/Los_Angeles",
         "experimental": {
-            "background_compaction": true, "media_blob": true,
+            "media_blob": true,
             "image_generate": { "model": "openai/gpt-image-1" }, "schedules": true, "subagent_depth": 2,
         },
         "providers": { "custom": {
@@ -1233,7 +1253,7 @@ fn v2_2_config_keys() {
     assert_eq!(encoded["timezone"], "America/Los_Angeles");
     assert_eq!(
         serde_json::to_string(&encoded["experimental"]).unwrap(),
-        r#"{"background_compaction":true,"media_blob":true,"schedules":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-1"}},"subagent_depth":2}"#
+        r#"{"media_blob":true,"schedules":true,"image_generate":{"model":{"providerID":"openai","model":"gpt-image-1"}},"subagent_depth":2}"#
     );
     let custom = &encoded["providers"]["custom"];
     assert_eq!(serde_json::to_string(&custom["settings"]).unwrap(), r#"{"cache":{"ttl":"1h"},"transport":"http","baseURL":"https://x"}"#);

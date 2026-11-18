@@ -18,8 +18,8 @@ agent/provider registries. It uses the functions below to do that work.
   `Reference`, `Plugin`, `Worktree`, `Warming`/`WarmingInfo`/`Duration`, `WebSearch`,
   `Provider`/`ProviderModel` (with `type`)/`Settings`/`ModelSettings`/`VariantSettings` (no `cache`)/`Cache`/`Compatibility`/`Capabilities`/`Variant`/
   `Cost`/`CostSetting`/`Limit`, `Experimental` (incl. 2.2.2's `media_blob`, `image_generate`/`ImageGenerate`,
-  `schedules` (scheduled prompts, `oc_core::schedule`) and 2.2.5's `artifacts`, accepted and normalized; `image_generate`
-  drives the image tool, see `fold::image_generate`)/`Policy`, `UpdatePolicy`,
+  `schedules` (since 2.3.1 the deprecated old name of `automations`) and 2.2.5's `artifacts`, accepted and normalized;
+  `image_generate` drives the image tool, see `fold::image_generate`)/`Policy`, `UpdatePolicy`,
   `Share`, `Patch`; `Info.timezone`.
 - 2.2.7 keys, accepted, normalized and echoed in upstream's key order: `experimental.all_flags`,
   `console_watches`, `part_rows`; MCP `pool` on local and remote servers;
@@ -27,11 +27,16 @@ agent/provider registries. It uses the functions below to do that work.
   `boolean | {interval?, duration?}` with raw strings). The features behind `console_watches`,
   `part_rows`, `pool` and warming are opt-in upstream and not ported: ocd has no Console
   watches, writes whole messages, connects MCP servers per location and sends no keep-alive requests.
-- 2.3.0 keys: the flags `experimental.shell_timeout_background` and `mcp_events` (accepted and echoed; their features
-  are not ported); `experimental.codemode_vm` is a deprecated, ignored key right after `portable_shell_scanner`, and
+- 2.3.0 keys: the flag `experimental.mcp_events` (accepted and echoed; its feature is not ported);
+  `experimental.codemode_vm` is a deprecated, ignored key right after `portable_shell_scanner`, and
   the retired `codemodeVm` alias is ignored without a diagnostic; provider `settings.tls` (`Tls`:
   `{cert, key, passphrase?}`, after `encoding`; a wrong shape invalidates the provider, extra keys are dropped);
   model `capabilities.freeform` (`FreeformFormat[]`: `text`, `regex`, `lark`, after `tools`).
+- 2.3.1 keys: `compaction.background` (after `auto`; background summaries, on unless `false`); the flags
+  `experimental.automations`, `video_generate` and `full_codemode` (accepted and echoed; automations, video
+  generation and the full Code Mode are not ported yet), and `schedules` moved after the registry as the deprecated
+  old name of `automations`. The retired `background_compaction` and `shell_timeout_background` are dropped from the
+  decoded and echoed config without a diagnostic, like any unknown key.
 - `Compaction.buffer` is a `CompactionBuffer`: `Tokens(u64)` or `Percent(String)` (`Config.Compaction.Percent`,
   `^([1-9]\d?(\.\d+)?)%$`, kept as written); `tokens(window)` is `Math.round(window * pct / 100)`. The legacy
   `reserved` key stays a token count.
@@ -110,11 +115,13 @@ agent/provider registries. It uses the functions below to do that work.
 - `update_shell(dir, Option<&str>)` implements `PATCH /api/experimental/config`. It edits the
   JSONC text while preserving comments.
 
-### `flag`: the 2.3.0 flag registry (`core/src/flag.ts`)
-- `REGISTRY` (`todo`, `background_compaction`, `media_blob`, `schedules`, `artifacts`, `shell_timeout_background`,
-  `console_watches`, `mcp_events`), `resolve(entries, channel, overrides)` → per key `{enabled, source}`: `OPENCODE_FLAGS`
+### `flag`: the 2.3.1 flag registry (`core/src/flag.ts`, `schema/src/config/flag.ts`)
+- `REGISTRY` (`todo`, `media_blob`, `automations`, `artifacts`, `video_generate`, `console_watches`, `mcp_events`,
+  `full_codemode`), `resolve(entries, channel, overrides)` → per key `{enabled, source}`: `OPENCODE_FLAGS`
   (`key`, `-key`, `all`), then `experimental.<key>` of the latest `experimental` document, then `all_flags: true`
-  of the latest document that sets it, then on only for the `local` and `dev` channels.
+  of the latest document that sets it, then on only for the `local` and `dev` channels. `OPT_IN_ONLY`
+  (`full_codemode`) skips `all` and `all_flags` and is off on every channel; `ALIASES` (`schedules` → `automations`)
+  reads the old name below the new one, in `OPENCODE_FLAGS` and in config.
 - `enabled(entries, key)` with this build's channel and the process's `OPENCODE_FLAGS`; every gate in oc-core reads
   it.
 

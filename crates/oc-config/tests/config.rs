@@ -839,7 +839,7 @@ fn per_key_folds() {
         doc(json!({
             "formatter": { "prettier": { "command": ["a"], "environment": { "A": "1" } } },
             "mcp": { "timeout": { "catalog": 1 }, "servers": { "s": { "type": "local", "command": ["x"], "timeout": { "execution": 5 } } } },
-            "compaction": { "auto": false, "keep": { "tokens": 10 } },
+            "compaction": { "auto": false, "background": false, "keep": { "tokens": 10 } },
             "media": { "image": { "max_width": 100 } },
             "watcher": { "ignore": ["a"] },
             "tool_output": { "max_lines": 5, "max_bytes": 6 },
@@ -869,7 +869,15 @@ fn per_key_folds() {
 
     let servers = fold::mcp_servers(&entries);
     assert_eq!(serde_json::to_value(&servers).unwrap(), json!({ "s": { "type": "remote", "url": "https://x", "timeout": { "startup": 2, "catalog": 1 } } }));
-    assert_eq!(fold::compaction(&entries), fold::CompactionSettings { auto: Some(false), buffer: Some(oc_config::schema::CompactionBuffer::Tokens(3)), keep: Some(10) });
+    assert_eq!(
+        fold::compaction(&entries),
+        fold::CompactionSettings {
+            auto: Some(false),
+            background: Some(false),
+            buffer: Some(oc_config::schema::CompactionBuffer::Tokens(3)),
+            keep: Some(10),
+        }
+    );
     let image = fold::media_image(&entries);
     assert_eq!((image.auto_resize, image.max_width, image.max_height), (false, 100, 2000));
     assert_eq!(fold::watcher_ignore(&entries), vec!["a", "b"]);

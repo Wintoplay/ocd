@@ -1,5 +1,5 @@
 //! Compaction sized from the provider's reported token count (#59441) and background summaries
-//! (`experimental.background_compaction`): upstream's `test/session-compaction.test.ts` cases for `measured` and
+//! (`compaction.background`, on by default since 2.3.1): upstream's `test/session-compaction.test.ts` cases for `measured` and
 //! `precompute`, against an OpenAI-compatible mock. One test function: the cases share one engine (the XDG
 //! environment is process-wide), each on its own session.
 
@@ -250,13 +250,14 @@ async fn scenarios() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    // `summary`: a 25k buffer with background summaries on; `on`: background summaries on; `off`: the defaults.
+    // `summary`: a 25k buffer; `on`: the defaults (background summaries on); `off`: background summaries off. The
+    // retired flag no longer turns them on or off.
     let summary = root.join("summary");
     let on = root.join("on");
     let off = root.join("off");
-    write_config(&summary, port, json!({"compaction": {"buffer": BUFFER}, "experimental": {"background_compaction": true}}));
-    write_config(&on, port, json!({"experimental": {"background_compaction": true}}));
-    write_config(&off, port, json!({}));
+    write_config(&summary, port, json!({"compaction": {"buffer": BUFFER}}));
+    write_config(&on, port, json!({"experimental": {"background_compaction": false}}));
+    write_config(&off, port, json!({"compaction": {"background": false}, "experimental": {"background_compaction": true}}));
 
     let global = oc_util::Global::acquire().unwrap();
     let db = oc_storage::Database::open(&global.database("latest"), &global.data).unwrap();
@@ -349,7 +350,7 @@ async fn scenarios() {
     })
     .await;
 
-    // ---- background summaries stay off unless enabled
+    // ---- background summaries stay off when disabled
     Box::pin(async {
         h.reset();
         let history = precompute_history();
@@ -511,13 +512,52 @@ async fn scenarios() {
         h.engine.precompute(&near, false).await.unwrap();
         assert_eq!(h.auto(&h.with(&near, burst)).await, CompactOutcome::Completed);
         assert!(h.requests().last().unwrap()["messages"].to_string().contains("Burst handled"));
-        // A different model would replay a summary written for the previous one.
+    })
+    .await;
+
+    // ---- a background summary is swapped in for a different model (2.3.1: the summary is plain text)
+    Box::pin(async {
         h.reset();
+        let history = precompute_history();
+        let near = h.context(&on, history.near.clone()).await;
         h.engine.precompute(&near, false).await.unwrap();
         let mut switched = h.with(&near, history.due.clone());
         switched.resolved.model.id = "other".into();
         assert_eq!(h.auto(&switched).await, CompactOutcome::Completed);
-        assert!(h.requests().last().unwrap()["messages"].to_string().contains("Third answer"));
+        // The one request ended before the response the summary started from.
+        let requests = h.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0]["messages"].to_string().contains("Second answer"));
+    })
+    .await;
+
+    // ---- an overflow compaction swaps in the background summary (2.3.1)
+    Box::pin(async {
+        h.reset();
+        let history = precompute_history();
+        let near = h.context(&on, history.near.clone()).await;
+        h.engine.precompute(&near, false).await.unwrap();
+        let due = h.with(&near, history.due.clone());
+        assert_eq!(h.engine.compact(&due, Trigger::Overflow, CancellationToken::new()).await.unwrap(), CompactOutcome::Completed);
+        let requests = h.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0]["messages"].to_string().contains("Second answer"));
+    })
+    .await;
+
+    // ---- a background summary starts when the latest response already passed the threshold (2.3.1)
+    Box::pin(async {
+        h.reset();
+        let history = precompute_history();
+        // The turn ended past the threshold; the summary is written while the session is idle.
+        let due = h.context(&on, history.due.clone()).await;
+        h.engine.precompute(&due, false).await.unwrap();
+        let next = [history.due.clone(), vec![text_user("Fourth question")]].concat();
+        assert_eq!(h.auto(&h.with(&due, next)).await, CompactOutcome::Completed);
+        let requests = h.requests();
+        assert_eq!(requests.len(), 1);
+        let summarized = requests[0]["messages"].to_string();
+        assert!(summarized.contains("Third question") && !summarized.contains("Third answer"), "{summarized}");
     })
     .await;
 
