@@ -60,6 +60,7 @@
   "result": {
    "ok": true,
    "value": [
+    "Buffer",
     "atob",
     "btoa"
    ],
@@ -79,15 +80,8 @@
   "code": "import { Buffer } from \"buffer\"",
   "extension": false,
   "result": {
-   "ok": false,
-   "error": {
-    "kind": "ExecutionFailure",
-    "message": "SyntaxError: \"buffer\" has no export named \"Buffer\". (line 1, col 10)",
-    "location": {
-     "line": 1,
-     "column": 10
-    }
-   },
+   "ok": true,
+   "value": null,
    "toolCalls": []
   }
  },
@@ -198,7 +192,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"yaml\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 8)",
+    "message": "Error: Cannot import \"yaml\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 8)",
     "location": {
      "line": 1,
      "column": 8
@@ -214,7 +208,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"child_process\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 1)",
+    "message": "Error: Cannot import \"child_process\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 1)",
     "location": {
      "line": 1,
      "column": 1
@@ -239,7 +233,7 @@
    "ok": true,
    "value": [
     "Error",
-    "Cannot import \"child_process\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`."
+    "Cannot import \"child_process\": it isn't available here, where packages and files can't be loaded. Use the provided globals."
    ],
    "toolCalls": []
   }
@@ -253,7 +247,7 @@
    "warnings": [
     {
      "kind": "ExecutionFailure",
-     "message": "Unhandled rejection from an un-awaited promise: Error: Cannot import \"nope\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 11)",
+     "message": "Unhandled rejection from an un-awaited promise: Error: Cannot import \"nope\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 11)",
      "location": {
       "line": 1,
       "column": 11
@@ -270,7 +264,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"fs\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 10)",
+    "message": "Error: Cannot import \"fs\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 10)",
     "location": {
      "line": 1,
      "column": 10
@@ -286,7 +280,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"fs/promises\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 10)",
+    "message": "Error: Cannot import \"fs/promises\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 10)",
     "location": {
      "line": 1,
      "column": 10
@@ -362,7 +356,7 @@
    "ok": true,
    "value": [
     "Error",
-    "Cannot import \"left-pad\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`."
+    "Cannot import \"left-pad\": it isn't available here, where packages and files can't be loaded. Use the provided globals."
    ],
    "toolCalls": []
   }
@@ -374,7 +368,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"left-pad\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 1)",
+    "message": "Error: Cannot import \"left-pad\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 1)",
     "location": {
      "line": 1,
      "column": 1
@@ -671,7 +665,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"undefined\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 8)",
+    "message": "Error: Cannot import \"undefined\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 8)",
     "location": {
      "line": 1,
      "column": 8
@@ -738,6 +732,7 @@
      "TextDecoder"
     ],
     [
+     "Buffer",
      "atob",
      "btoa"
     ]
@@ -891,7 +886,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"[object Object]\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 2, col 20)",
+    "message": "Error: Cannot import \"[object Object]\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 2, col 20)",
     "location": {
      "line": 2,
      "column": 20
@@ -907,7 +902,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"[object Object]\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 17)",
+    "message": "Error: Cannot import \"[object Object]\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 17)",
     "location": {
      "line": 1,
      "column": 17
@@ -934,7 +929,7 @@
   "extension": false,
   "result": {
    "ok": true,
-   "value": "Cannot import \"undefined\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`.",
+   "value": "Cannot import \"undefined\": it isn't available here, where packages and files can't be loaded. Use the provided globals.",
    "toolCalls": []
   }
  },
@@ -981,7 +976,7 @@
   "extension": false,
   "result": {
    "ok": true,
-   "value": "Cannot import \"fs\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`.",
+   "value": "Cannot import \"fs\": it isn't available here, where packages and files can't be loaded. Use the provided globals.",
    "toolCalls": []
   }
  },
@@ -992,7 +987,7 @@
    "ok": false,
    "error": {
     "kind": "ExecutionFailure",
-    "message": "Error: Cannot import \"node:yaml\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`. (line 1, col 8)",
+    "message": "Error: Cannot import \"node:yaml\": it isn't available here, where packages and files can't be loaded. Use the provided globals. (line 1, col 8)",
     "location": {
      "line": 1,
      "column": 8

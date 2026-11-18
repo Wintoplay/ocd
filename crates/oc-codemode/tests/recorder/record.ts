@@ -5,6 +5,7 @@ import path from "node:path"
 import { Cause, Effect, Exit, Schema } from "effect"
 import { HttpClientRequest } from "effect/http"
 import { isAsync } from "./extension.js"
+import { HostFailure } from "../language/runtime/model.js"
 import { isNamespace } from "./namespace.js"
 import { isTool, type Tool } from "./tool.js"
 import {
@@ -179,6 +180,7 @@ export const encode = (value: unknown): unknown => {
       }
       if (item instanceof Date) return { $date: Number.isNaN(item.getTime()) ? null : item.toISOString() }
       if (item instanceof RegExp) return { $regexp: { source: item.source, flags: item.flags } }
+      if (Buffer.isBuffer(item)) return { $buffer: item.toString("base64") }
       if (item instanceof Uint8Array) return { $bytes: Buffer.from(item).toString("base64") }
       if (item instanceof ArrayBuffer) return { $bytes: Buffer.from(new Uint8Array(item)).toString("base64") }
       if (item instanceof Map) return { $map: [...item].map(([key, entry]) => [go(key), go(entry)]) }
@@ -435,7 +437,7 @@ export class Execution {
     if (this.done) return
     this.done = true
     open.delete(this)
-    const tree = treeOf(this.info.root as TrieNode)
+    const tree = treeOf((this.info.root ?? emptyTrie) as TrieNode)
     const record: Record<string, unknown> = { file: this.file }
     if (this.test !== undefined) record.test = this.test
     record.seq = this.seq
@@ -474,11 +476,24 @@ export class Execution {
  */
 export type Via = "codemode" | "executeProgram" | "program" | "resume"
 
-/** What `CodeMode.make` adds to a run's setup when recording. */
-export type RunInfo = {
-  readonly via: Via
+/** What `CodeMode.make` adds to its language runtime's setup when recording. */
+export type RuntimeInfo = {
+  readonly root: unknown
+  readonly limits: Record<string, number | undefined>
+  readonly hooks: Record<string, unknown>
   readonly extensions: ReadonlyArray<{ readonly name: string; readonly globals: Record<string, unknown> }>
-  readonly bindings: unknown
+}
+
+const emptyTrie: TrieNode = { children: new Map() }
+
+// A language result carries the run's `metadata`; Code Mode reports the tool calls kept there instead.
+const reported = (value: unknown): unknown => {
+  if (value === null || typeof value !== "object" || !("metadata" in value)) return value
+  const { metadata, ...rest } = value as { metadata: unknown } & Record<string, unknown>
+  if (metadata === null) return { ...rest, toolCalls: [] }
+  const calls = (metadata as { calls?: unknown }).calls
+  if (!Array.isArray(calls)) return value
+  return { ...rest, toolCalls: calls.map((call: { name: string }) => ({ name: call.name })) }
 }
 
 export type ExecutionInfo = {
@@ -507,7 +522,7 @@ export const execution = <A, E, R>(
       Effect.sync(() => {
         if (Exit.isSuccess(exit) && (exit.value as { ok?: unknown } | null)?.ok === "suspended")
           recording.finish({ suspended: true })
-        else if (Exit.isSuccess(exit)) recording.finish({ result: encode(exit.value) })
+        else if (Exit.isSuccess(exit)) recording.finish({ result: encode(reported(exit.value)) })
         else if (Cause.hasInterruptsOnly(exit.cause)) recording.finish({ interrupted: true })
         else recording.finish({ defect: encode(Cause.squash(exit.cause)) })
       }),
@@ -520,13 +535,17 @@ process.on("exit", () => {
   if (current !== undefined) testEnd(current)
 })
 
+// Each run's recording, by its `run` object (the one its host globals get).
 const executions = new WeakMap<object, Execution>()
 
-export const bindTools = (tools: object, recording: Execution | undefined): void => {
-  if (recording !== undefined) executions.set(tools, recording)
+export const bindRun = (run: object, recording: Execution | undefined): void => {
+  if (recording !== undefined) executions.set(run, recording)
 }
 
-export const executionOf = (tools: object): Execution | undefined => (enabled ? executions.get(tools) : undefined)
+export const ofRun = (run: object): Execution | undefined => (enabled ? executions.get(run) : undefined)
+
+/** Runs `prepare` (which makes the run's runtime): kept for symmetry with older kits; the run is bound after. */
+export const preparing = <A>(_recording: Execution | undefined, prepare: () => A): A => prepare()
 
 // --- Hooks ---
 
@@ -616,15 +635,25 @@ export class ToolCallRecording {
     this.recording.push({ type: "decode", id: this.id, ok: false, error: messageOf(error), arity: true })
   }
 
+  /** The call's one argument as JSON, as it reached the tool's input decoding (2.3.1: host copies, then JSON). */
+  converted(json: unknown): void {
+    this.json = { value: encode(json) }
+  }
+
+  private json: { value: unknown } | undefined
+
   decodeFailed(error: unknown): void {
     const event: Event = { type: "decode", id: this.id, ok: false, error: messageOf(error) }
+    if (this.json !== undefined) event.json = this.json.value
     const suggestions = (error as { suggestions?: ReadonlyArray<string> }).suggestions
     if (suggestions !== undefined) event.suggestions = [...suggestions]
     this.recording.push(event)
   }
 
   decoded(input: unknown): void {
-    this.recording.push({ type: "decode", id: this.id, ok: true, input: encode(input) })
+    const event: Event = { type: "decode", id: this.id, ok: true, input: encode(input) }
+    if (this.json !== undefined) event.json = this.json.value
+    this.recording.push(event)
   }
 
   admitted(count: number): void {
@@ -685,8 +714,8 @@ export class ToolCallRecording {
         else {
           const failure = failureFields(exit.cause)
           const error = failure.error
-          const kind = error instanceof Error ? (error as { kind?: unknown }).kind : undefined
-          const runtime = error instanceof Error && error.name === "ToolRuntimeError" && typeof kind === "string"
+          const kind = error instanceof HostFailure ? error.kind : undefined
+          const runtime = kind !== undefined && kind !== "ToolFailure"
           event.outcome = runtime ? (kind === "InvalidToolOutput" ? "invalidOutput" : "rejected") : "failure"
           event.error = failure.message
           event.errorClass = failure.errorClass
@@ -709,10 +738,6 @@ export class ToolCallRecording {
 export const returnedKind = (result: unknown, threw: boolean): "value" | "throw" | "promise" =>
   threw ? "throw" : Effect.isEffect(result) || result instanceof Promise ? "promise" : "value"
 
-// An extension call's steps (its hooks, the host call, how it settles) run as separate host requests that share the
-// call's argument array, so the recording is found by it.
-const extensionCalls = new WeakMap<object, ExtensionCallRecording>()
-
 export class ExtensionCallRecording {
   private settled = false
 
@@ -722,13 +747,12 @@ export class ExtensionCallRecording {
   ) {}
 
   static start(
-    tools: object,
+    recording: Execution | undefined,
     label: string,
     call: { readonly extension: string; readonly name: string } | undefined,
     args: ReadonlyArray<unknown>,
     host: Function,
   ): ExtensionCallRecording | undefined {
-    const recording = executionOf(tools)
     if (recording === undefined) return undefined
     const event: Event = { type: "extension", xid: recording.extensionId(), label, global: call !== undefined }
     if (call !== undefined) {
@@ -738,13 +762,40 @@ export class ExtensionCallRecording {
     event.async = isAsync(host)
     event.args = encode(args)
     recording.push(event)
-    const recorded = new ExtensionCallRecording(recording, event)
-    extensionCalls.set(args, recorded)
-    return recorded
+    return new ExtensionCallRecording(recording, event)
   }
 
-  static of(args: object): ExtensionCallRecording | undefined {
-    return extensionCalls.get(args)
+  /** Calls a host function with no hooks: records what it returned, then how that settled. */
+  observe(call: () => unknown): unknown {
+    let result: unknown
+    try {
+      result = call()
+    } catch (error) {
+      this.returned("throw")
+      this.end(Exit.fail(error))
+      throw error
+    }
+    this.returned(returnedKind(result, false))
+    if (Effect.isEffect(result)) return this.settle(result as Effect.Effect<unknown, unknown, unknown>)
+    if (result instanceof Promise) {
+      result.then(
+        (value) => this.end(Exit.succeed(value)),
+        (error) => this.end(Exit.fail(error)),
+      )
+      return result
+    }
+    this.end(Exit.succeed(result))
+    return result
+  }
+
+  /** Taps how the call ended, unless it handed back pending work (an Effect), which `settle` taps instead. */
+  settleUnlessPending<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
+    return Effect.onExit(effect, (exit) =>
+      Effect.sync(() => {
+        if (Exit.isSuccess(exit) && Effect.isEffect(exit.value)) return
+        this.end(exit)
+      }),
+    )
   }
 
   hooks<H extends Record<string, unknown>>(hooks: H): H {

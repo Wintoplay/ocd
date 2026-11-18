@@ -112,6 +112,7 @@ fn inspect(o: &Obj, item: &mut dyn FnMut(&Value, &mut HashSet<usize>) -> String,
             }
             format!("Headers {}", crate::data::stringify(&serde_json::Value::Object(map), ""))
         }
+        ObjKind::Bytes(b) if b.node => crate::stdlib::buffer::inspect(&b.to_vec()),
         ObjKind::Bytes(b) => {
             let bytes = b.to_vec();
             format!("Uint8Array({}) [{}]", bytes.len(), bytes.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))

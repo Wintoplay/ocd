@@ -65,18 +65,24 @@ pub struct ArrayData {
     pub elements: Attributes,
 }
 
-/// A `Uint8Array` view over a shared buffer (`subarray` shares bytes).
+/// A `Uint8Array` view over a shared buffer (`subarray` shares bytes). `node` marks a Node `Buffer` (2.3.1, #64365):
+/// a Uint8Array whose text conversions default to UTF-8 and which crosses to the host as a Buffer.
 #[derive(Clone)]
 pub struct BytesData {
     pub buffer: Rc<RefCell<Vec<u8>>>,
     pub offset: usize,
     pub length: usize,
+    pub node: bool,
 }
 
 impl BytesData {
     pub fn new(bytes: Vec<u8>) -> BytesData {
         let length = bytes.len();
-        BytesData { buffer: Rc::new(RefCell::new(bytes)), offset: 0, length }
+        BytesData { buffer: Rc::new(RefCell::new(bytes)), offset: 0, length, node: false }
+    }
+    /// A Node `Buffer` of these bytes.
+    pub fn node(bytes: Vec<u8>) -> BytesData {
+        BytesData { node: true, ..BytesData::new(bytes) }
     }
     pub fn to_vec(&self) -> Vec<u8> {
         self.buffer.borrow()[self.offset..self.offset + self.length].to_vec()

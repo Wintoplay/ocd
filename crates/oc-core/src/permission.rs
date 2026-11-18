@@ -41,6 +41,41 @@ pub fn current_unattended() -> Option<Ruleset> {
     UNATTENDED.try_with(Clone::clone).ok()
 }
 
+/// Calls made by another call, such as the calls inside a Code Mode program, by ID: the parent each one's requests
+/// show on (2.3.1, #64324). Call IDs are unique across the process.
+static PARENTS: std::sync::LazyLock<Mutex<HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// `Permission.nested`: marks `call` as made by `parent`. It has an ID of its own but no row, so until the guard is
+/// dropped, requests naming it as their source show on `parent`'s row.
+pub fn nested(call: &str, parent: &str) -> Nested {
+    PARENTS.lock().insert(call.to_string(), parent.to_string());
+    Nested(call.to_string())
+}
+
+/// The call whose row a nested call's requests show on, while it is marked; see [`nested`].
+pub fn nested_parent(call: &str) -> Option<String> {
+    PARENTS.lock().get(call).cloned()
+}
+
+/// Keeps a call marked as nested; see [`nested`].
+pub struct Nested(String);
+
+impl Drop for Nested {
+    fn drop(&mut self) {
+        PARENTS.lock().remove(&self.0);
+    }
+}
+
+/// The row a request's source shows on: a nested call's parent's.
+fn row(source: &Option<Source>) -> Option<Source> {
+    let source = source.as_ref()?;
+    let parent = PARENTS.lock().get(&source.id).cloned();
+    Some(match parent {
+        Some(id) => Source { id, ..source.clone() },
+        None => source.clone(),
+    })
+}
+
 pub fn missing_agent_permissions() -> Ruleset {
     vec![PermissionRule { action: "*".into(), resource: "*".into(), effect: Effect::Deny }]
 }
@@ -169,7 +204,7 @@ impl Permissions {
         if let Some(metadata) = &input.metadata {
             event.insert("metadata".into(), Value::Object(metadata.clone()));
         }
-        if let Some(source) = &input.source {
+        if let Some(source) = row(&input.source) {
             event.insert("source".into(), serde_json::to_value(source).unwrap_or_default());
         }
         event.insert("effect".into(), Value::String(effect.into()));
@@ -200,7 +235,7 @@ impl Permissions {
             resources: input.resources.clone(),
             save: input.save.clone(),
             metadata: input.metadata.clone(),
-            source: input.source.clone(),
+            source: row(&input.source),
             message: None,
         }
     }
@@ -482,6 +517,25 @@ mod tests {
             source: None,
             agent: Some("build".into()),
         }
+    }
+
+    // permission.test.ts "shows a nested call's request on its parent's row until the scope closes" (2.3.1, #64324)
+    #[tokio::test]
+    async fn shows_a_nested_calls_request_on_its_parents_row_until_the_scope_closes() {
+        let perms = Permissions::new(Arc::new(Ctx::default()));
+        let source = Source { kind: "tool".into(), message_id: "msg_test".into(), id: "call_child_64324".into() };
+        let ask = |id: &str| {
+            let mut asked = input(id, "ses_1", "a.txt", false);
+            asked.source = Some(source.clone());
+            perms.ask(asked)
+        };
+        {
+            let _nested = nested("call_child_64324", "call_parent_64324");
+            ask("per_nested").await;
+        }
+        ask("per_after").await;
+        assert_eq!(perms.get("per_nested").unwrap().source, Some(Source { id: "call_parent_64324".into(), ..source.clone() }));
+        assert_eq!(perms.get("per_after").unwrap().source, Some(source));
     }
 
     // permission.test.ts "checks for a deny without asking"

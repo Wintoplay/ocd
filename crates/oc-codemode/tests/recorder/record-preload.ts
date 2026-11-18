@@ -2,7 +2,7 @@
 // recorder knows the running test: describe titles and the test title joined with " > ", `test.each` titles
 // formatted. Does nothing unless CODEMODE_RECORD_DIR is set.
 import * as real from "bun:test"
-import * as Recorder from "./src/record.js"
+import * as Recorder from "./src/codemode/record.js"
 
 const fileOfCaller = (): string | undefined => {
   const stack = new Error().stack ?? ""

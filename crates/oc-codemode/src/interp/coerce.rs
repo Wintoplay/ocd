@@ -60,6 +60,7 @@ pub fn obj_to_string(o: &Obj) -> JsStr {
         ObjKind::RegExp(r) => JsStr::from(r.display()),
         ObjKind::URLSearchParams(p) => JsStr::from(p.serialize()),
         ObjKind::URL(u) => JsStr::from(u.href()),
+        ObjKind::Bytes(b) if b.node => crate::stdlib::buffer::utf8_text(&b.to_vec()),
         ObjKind::Bytes(b) => {
             let s: Vec<String> = b.to_vec().iter().map(|x| x.to_string()).collect();
             JsStr::from(s.join(","))

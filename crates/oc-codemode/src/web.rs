@@ -101,6 +101,10 @@ impl HostFunction for Fetch {
             if let Some(authorize) = authorize {
                 authorize(url.clone(), args.clone()).await?;
             }
+            // Bun's fetch refuses a URL that does not parse (`fetch(undefined)`, a relative path).
+            if parsed.is_none() {
+                return Err(type_error("fetch() URL is invalid"));
+            }
             let mut request = build_request(&args)?;
             // One deadline covers the whole redirect chain and the body.
             let deadline = tokio::time::Instant::now() + Duration::from_millis(TIMEOUT_MS);
@@ -210,7 +214,7 @@ fn build_request(args: &[HostValue]) -> Result<HttpRequest, HostValue> {
     }
     let body = match init.and_then(|i| i.field("body")) {
         None | Some(HostValue::Undefined) | Some(HostValue::Null) => None,
-        Some(HostValue::Bytes(b)) => Some(b.clone()),
+        Some(HostValue::Bytes(b) | HostValue::Buffer(b)) => Some(b.clone()),
         Some(HostValue::SearchParams(pairs)) => {
             if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
                 headers.push(("content-type".into(), "application/x-www-form-urlencoded;charset=UTF-8".into()));

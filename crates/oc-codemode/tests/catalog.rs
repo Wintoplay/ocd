@@ -1,6 +1,6 @@
-//! Catalog summarization and instruction texts against goldens produced by upstream core 2.2.7
+//! Catalog summarization and instruction texts against goldens produced by upstream core 2.3.1
 //! (`packages/core/src/codemode/{catalog,instructions}.ts`), regenerated with
-//! `bun tests/recorder/gen-catalog-golden.ts <opencode-2.2.7> tests/fixtures/catalog-golden.json <out>`.
+//! `bun tests/recorder/gen-catalog-golden.ts <opencode-2.3.1> tests/fixtures/catalog-golden.json <out>`.
 
 use oc_codemode::catalog::{lookup, render, summarize, update, CatalogEntry, Summary};
 use serde_json::Value as Json;

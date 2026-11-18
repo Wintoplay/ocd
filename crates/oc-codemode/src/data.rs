@@ -64,7 +64,7 @@ impl Walk<'_> {
                 && !self.boundary
             {
                 return Err(invalid_data(
-                    "JSON.stringify received an un-awaited Promise; await it first - e.g. `const result = await tools.ns.tool(...)`.",
+                    "JSON.stringify received an un-awaited Promise; await it first - e.g. `const result = await load(...)`.",
                 ));
             }
             let settled = match &raw {

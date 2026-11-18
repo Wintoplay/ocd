@@ -255,7 +255,7 @@ fn reaction_handler(value: &Value, method: &str) -> JsResult<Option<Value>> {
     }
     if value.js_typeof() == "function" {
         return Err(type_error(format!(
-            "{method} cannot use this callable as a handler; wrap it in an arrow function, e.g. (value) => tools.ns.tool(value)."
+            "{method} cannot use this callable as a handler; wrap it in an arrow function, e.g. (value) => fn(value)."
         )));
     }
     Ok(None)

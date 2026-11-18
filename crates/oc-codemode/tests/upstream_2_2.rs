@@ -127,7 +127,7 @@ fn gated_runtime() -> CodeMode {
     CodeMode::new(tools, Arc::new(Gates::default()), Vec::new(), ExecutionLimits::default()).unwrap()
 }
 
-const STALLED: &str = "Error: The program is waiting on a promise that can never settle: nothing else is running, so nothing can resolve it. Code Mode has no timers or sleep, so don't wait or poll inside a program.";
+const STALLED: &str = "Error: The program is waiting on a promise that can never settle: nothing else is running, so nothing can resolve it. There are no timers or sleep, so don't wait or poll inside a program.";
 
 #[test]
 fn a_program_that_can_never_finish_fails_at_the_stuck_await() {

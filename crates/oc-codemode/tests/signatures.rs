@@ -76,11 +76,11 @@ fn check_tree(node: &Json, path: &mut Vec<String>, failures: &mut Vec<String>, s
     }
 }
 
-/// Both recorded corpora, or only the one `OC_CODEMODE_CORPUS` names.
+/// Every recorded corpus, or only the one `OC_CODEMODE_CORPUS` names.
 fn corpora() -> Vec<std::path::PathBuf> {
     match std::env::var("OC_CODEMODE_CORPUS") {
         Ok(_) => vec![fixtures()],
-        Err(_) => vec![corpus(""), corpus("2.3.0")],
+        Err(_) => vec![corpus(""), corpus("2.3.0"), corpus("2.3.1")],
     }
 }
 
@@ -181,7 +181,13 @@ fn search_signature_and_tool_expressions() {
     for dir in corpora() {
         let d: Json =
             serde_json::from_str(&std::fs::read_to_string(dir.join("search-signature.json")).unwrap()).unwrap();
-        assert_eq!(d["searchSignature"].as_str().unwrap(), SEARCH_SIGNATURE);
+        // Before 2.3.1 (#64347), `search` took only the options object.
+        let expected = if dir.ends_with("upstream-2.3.1") {
+            SEARCH_SIGNATURE.to_string()
+        } else {
+            SEARCH_SIGNATURE.replacen("search(query: string | {", "search({", 1)
+        };
+        assert_eq!(d["searchSignature"].as_str().unwrap(), expected, "{}", dir.display());
         for pair in d["toolExpression"].as_array().unwrap() {
             assert_eq!(tool_expression(pair[0].as_str().unwrap()), pair[1].as_str().unwrap(), "{pair}");
         }

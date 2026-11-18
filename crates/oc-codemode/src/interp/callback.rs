@@ -24,7 +24,7 @@ pub fn apply_collection_callback(callback: &Value, name: &str) -> JsResult<Callb
     if !is_supported_callback(callback) {
         if callback.js_typeof() == "function" {
             return Err(type_error(format!(
-                "{name} cannot use this callable as a callback; wrap it in an arrow function, e.g. (value) => tools.ns.tool(value)."
+                "{name} cannot use this callable as a callback; wrap it in an arrow function, e.g. (value) => fn(value)."
             )));
         }
         return Err(type_error(format!("{name} expects a function callback.")));

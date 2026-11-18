@@ -79,6 +79,12 @@ async fn hook_executions_replay_2_3_0() {
     replay_hooks_of(corpus("2.3.0")).await;
 }
 
+/// opencode 2.3.1's suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_executions_replay_2_3_1() {
+    replay_hooks_of(corpus("2.3.1")).await;
+}
+
 async fn replay_hooks_of(dir: std::path::PathBuf) {
     let mut total = 0;
     let mut failures = Vec::new();
@@ -113,7 +119,10 @@ async fn replay_hooks_of(dir: std::path::PathBuf) {
         )
         .unwrap()
         .with_bindings(bindings_of(&record));
-        let ours = runtime.execute(record["code"].as_str().unwrap()).await.to_json();
+        let ours = match tokio::time::timeout(std::time::Duration::from_secs(10), runtime.execute(record["code"].as_str().unwrap())).await {
+            Ok(result) => result.to_json(),
+            Err(_) => serde_json::json!("replay timed out"),
+        };
         let expected = decode(&record["result"]).unwrap();
         if !json_eq(&ours, &expected) {
             failures.push(format!("{}: result\n  expected {expected}\n  got      {ours}", record["test"]));

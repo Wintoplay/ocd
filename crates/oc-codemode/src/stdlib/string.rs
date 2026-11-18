@@ -826,7 +826,7 @@ fn replace_method(name: &'static str) -> Method {
             }
             if replacer.js_typeof() == "function" {
                 return NResult::err(type_error(format!(
-                    "String.{name} cannot use this callable as a replacer; wrap it in an arrow function, e.g. (match) => tools.ns.tool(match)."
+                    "String.{name} cannot use this callable as a replacer; wrap it in an arrow function, e.g. (match) => fn(match)."
                 )));
             }
             if let Some(rx) = as_regexp(&pattern) {

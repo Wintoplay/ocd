@@ -4,8 +4,9 @@ Rust port of opencode's `@opencode/codemode` (upstream `packages/codemode`, plus
 `packages/core/src/codemode`): a confined, tree-walking interpreter for a JavaScript subset that lets a model script
 host tools from a single `execute` tool call.
 
-Programs can only use the supported JavaScript built-ins, the `tools` tree, the `search(...)` discovery function
-(synchronous, and its result can also be awaited or chained like a Promise), and globals the host adds through extensions (core adds only `fetch`). `import`, `import()` and
+Programs can only use the supported JavaScript built-ins (with Node's `Buffer` since 2.3.1), the `tools` tree, the
+`search(...)` discovery function (synchronous, and its result can also be awaited or chained like a Promise), and
+globals the host adds through extensions (core adds only `fetch`). `import`, `import()` and
 `require` load those globals by Node module name (see Modules). Classes, getters/setters, BigInt, arbitrary symbols,
 timers, exports, `eval`/`Function`, and TypeScript syntax are rejected with the same diagnostics as upstream. The exact support matrix is upstream's `interpreter-support.md`; behaviour, diagnostics, and model-visible
 strings match upstream byte for byte (verified by replaying upstream's recorded test executions, see Tests).
@@ -20,7 +21,7 @@ strings match upstream byte for byte (verified by replaying upstream's recorded 
 | `interp::eval` | Evaluator (`interpreter.ts`): statements, expressions, closures, destructuring, generators, async functions |
 | `interp::runner` | The job queue (`runner.ts`): promise jobs in V8 order, promise states and reactions, `await`, host work settling through an inbox, blocking host calls, stall detection, unhandled-rejection warnings |
 | `interp::promises`, `generators`, `iteration`, `coerce`, `callback`, `errors`, `globals`, `extensions`, `modules` | Promise built-ins and combinators, generator state machines, iterator cursors and CreateAsyncFromSyncIterator, ToPrimitive, callback admission, diagnostics, global table, host-value boundary, `import`/`require` module resolution (`modules.ts`) |
-| `stdlib::*` | Standard library (`stdlib/*.ts`): Object, Array, String, RegExp (`regress`), Number, Math, Date, JSON, Map/Set/Weak*, Iterator, URL/URLSearchParams, Headers, Uint8Array, TextEncoder/Decoder (`decode(bytes, { stream: true })` keeps a split character for the next chunk and strips only a stream's first BOM, 2.3.0), atob/btoa, crypto, structuredClone, console |
+| `stdlib::*` | Standard library (`stdlib/*.ts`): Object, Array, String, RegExp (`regress`), Number, Math, Date, JSON, Map/Set/Weak*, Iterator, URL/URLSearchParams, Headers, Uint8Array, Node's Buffer (2.3.1, `stdlib/buffer.rs`; see Buffer), TextEncoder/Decoder (`decode(bytes, { stream: true })` keeps a split character for the next chunk and strips only a stream's first BOM, 2.3.0), atob/btoa, crypto, structuredClone, console |
 | `data` | JSON boundary (`data.ts`): `toJson`/`toBoundary`/`fromJson`, JS-compatible JSON text |
 | `tool_runtime`, `tool_schema` | Tool trie, `search`, admission/limits/hooks (`tool-runtime.ts`); JSON Schema → TypeScript signatures (`tool-schema.ts`) |
 | `codemode` | Public runtime API, limits, output bounding (`codemode.ts`, `interpreter/execute.ts`) |
@@ -81,7 +82,9 @@ let json = result.to_json();                    // upstream CodeMode.Result shap
   `ToolDef.input`/`output` are `tool_schema::ToolSchema::Json` (render-only JSON Schema) or `ToolSchema::Document`
   (a pre-built schema document with top-level definitions). `output: None` renders `Promise<void>` and the program
   receives `undefined`.
-- `search({ query?, namespace?, limit?, offset? })` ranks tools as 2.3.0 does (#62984): field-weighted BM25 (k1 1.2,
+- `search("text")` or `search({ query?, namespace?, limit?, offset? })` (a plain string is the query since 2.3.1,
+  #64347, also as `tools.search("text")`; bad input suggests `Pass search a query string or an object, such as
+  search("issues") or search({ namespace: "github" }).`) ranks tools as 2.3.0 does (#62984): field-weighted BM25 (k1 1.2,
   b 0.75; the tool's name 3, its namespace 2, description 1, namespace descriptions 0.4, parameter names 0.3) over
   whole words (split at case changes and non-alphanumerics, camelCase words also whole, plural endings stemmed), a
   4+-letter query word also matching longer words it starts with at 0.3, a boost for short names, ties by path. The
@@ -117,8 +120,19 @@ Extensions (`host::Extension`, `SimpleExtension`) expose `HostFunction`s as glob
 runs before the host function, so a denied call never reaches the host: a host function marked asynchronous
 (`HostFunction::asynchronous`, `host::host_fn_async`; upstream's `async` functions and `Extension.async`, e.g. `fetch`)
 always returns a promise, which a denial rejects, while a synchronous one throws. Values cross as `HostValue`
-copies (plain data, Date, RegExp, URL, URLSearchParams, Headers, Map, Set, bytes, errors with name/message/cause/own
-fields, and nested host functions that become callable program functions). `HostValue::Live` is a host object with
+copies (plain data, Date, RegExp, URL, URLSearchParams, Headers, Map, Set, bytes, Node `Buffer`s, errors with
+name/message/cause/own fields, and nested host functions that become callable program functions). Arguments cross
+as upstream 2.3.1's core translates them for every host function, tools included (#64487, #64513): a function
+anywhere is left out (an object's key skipped, an array item `null`, a Map or Set entry or a whole argument
+`undefined`), a promise is replaced by its value (a pending one is awaited first and the call made again: an
+asynchronous call's promise follows that call's, a synchronous call waits where it is, as `await` would; a rejection
+fails the call with its reason), and a program's own `toJSON` is never run. An iterator, a generator, a symbol or
+`tools` itself fails with `Argument <n> to <label> contains <what>, which cannot be passed to the host.` (rejecting an
+asynchronous call's promise, thrown by a synchronous one), and a value deeper than 32 levels with `... exceeds the
+maximum value depth of 32.` A tool then receives that copy as JSON (`tool_runtime::host_to_json`, upstream's
+`toJson`): Dates as ISO text (`null` when invalid), URLs as `href`, URLSearchParams as their query, Headers as an
+object, Sets as arrays, errors as `{name, message, ...own fields}`, Maps and RegExps as `{}`, and a Uint8Array or
+Buffer refused with `InvalidDataValue` `A Uint8Array cannot cross to a tool; pass text instead, ...`. `HostValue::Live` is a host object with
 accessors read from the host on every access (non-enumerable) and `Symbol.asyncIterator` methods (`HostKey`,
 `HostProperty`); `fetch` builds its streaming responses from it. A host function returns
 `HostCall::Ready` (synchronous) or `HostCall::Pending` (the program sees a promise).
@@ -149,13 +163,14 @@ execution is interrupted.
 
 - `execute_tool::{NAME, DESCRIPTION, input_schema()}` — the tool definition (verbatim upstream description).
 - `execute_tool::format_result(&ExecResult)` — the text output (value as text or compact JSON since 2.3.0, #63258, or
-  error message plus suggestions, then `Warnings:` and `Logs:` sections); `execute_tool::format_execute_output(text)`
+  error message plus suggestions, then `Warnings:` and `Logs:` sections; since 2.3.1, #64344, a `null` value is left
+  out when warnings or logs follow, so a program that only logs gives `Logs:\n...`); `execute_tool::format_execute_output(text)`
   re-indents it for display as clients do (`@opencode/util/execute-output`: the JSON result through `JSON.parse` and
   `JSON.stringify(_, null, 2)`, the sections apart; the TUI's execute dialog uses it); `execute_tool::output(...)` builds the
   `{ output, toolCalls, error?, files }` structure; `ProgressRows` tracks `{ tool, status, input? }` progress rows
   from the host hooks (fetch rows show `{ method, url }`); `display_input`, `fetch_display`, `output_file`.
 - `catalog::inventory(&catalog, &namespaces, &pinned)` builds the catalog tree; `catalog::summarize(&inventory,
-  None)` applies the 2 000-token inline budget (chars/4 rounded; every namespace line shown; pinned listings always
+  None)` applies the 2 000-token inline budget (inline descriptions cut at 500 UTF-16 units since 2.3.1, #64341) (chars/4 rounded; every namespace line shown; pinned listings always
   shown; remaining listings round-robin per namespace in path order, a namespace stopping at its first listing that
   does not fit). The stored summary is `{total, namespaces: [{name, description?, tools: [every path], entries}]}`
   (2.2.7); a 2.2.5 summary does not decode, so core restates the whole catalog. `catalog::render(&summary)` produces
@@ -177,24 +192,37 @@ execution is interrupted.
 `cargo test -p oc-codemode` (all green):
 
 - `tests/upstream_replay.rs` — replays every program execution recorded from upstream's test suite and requires an
-  identical `Result`. Two corpora, both generated by `tests/recorder/record.sh`, which instruments upstream (format
+  identical `Result`. Three corpora, all generated by `tests/recorder/record.sh`, which instruments upstream (format
   in `tests/fixtures/upstream/README.md`):
+  - `tests/fixtures/upstream-2.3.1/`: the 2.3.1 suite, after the language/Code Mode split. 1 873 of 1 875
+    recordings match; the 2 others, in `tests/fixtures/replay-skips-2.3.1.txt`, are the 2 permanent divergences (a
+    timed-out tool's uninterruptible cleanup). Its tool calls also check each argument as it reached the tool (the
+    recording's `json`), and `tests/upstream_2_3_1.rs` covers what the suite does not.
   - `tests/fixtures/upstream/`: the 2.2.2 suite on the legacy interpreter (with 2.2.7's three changed results).
-    1 798 of 1 802 recordings match; the 4 others are in `tests/fixtures/replay-skips.txt`: 2 permanent divergences
-    and 2 results 2.3.0 changed (BM25 `search` no longer finds `get_timezones` for "zones", and calling a namespace
-    names its tools), which the 2.3.0 corpus carries.
-  - `tests/fixtures/upstream-2.3.0/`: the 2.3.0 suite on the bytecode VM, the only engine from 2.3.0. 1 841 of
-    1 843 recordings match; the 2 others, in `tests/fixtures/replay-skips-2.3.0.txt`, are the same 2 permanent
-    divergences (no 2.3.0 feature is left unported; a record listed with a batch tag such as `P5:` must still differ,
-    so a batch that ports its feature deletes the line). No recorded program differs because of the engine: on the 1 859 programs both
+    1 771 of 1 802 recordings match; the 31 others are in `tests/fixtures/replay-skips.txt`: 2 permanent divergences,
+    2 results 2.3.0 changed (BM25 `search` no longer finds `get_timezones` for "zones", and calling a namespace
+    names its tools) and 27 that 2.3.1 changed (reworded diagnostics and the `search` suggestion), each naming the
+    record of the later corpus that carries the new result.
+  - `tests/fixtures/upstream-2.3.0/`: the 2.3.0 suite on the bytecode VM, the only engine from 2.3.0. 1 815 of
+    1 843 recordings match; the 28 others, in `tests/fixtures/replay-skips-2.3.0.txt`, are the same 2 permanent
+    divergences and 26 results 2.3.1 changed (a record listed with a batch tag such as `P5:` must still differ, so a
+    batch that ports its feature deletes the line). No recorded program differs because of the engine: on the 1 859 programs both
     suites run, upstream's own results are identical except the namespace-call message, and so are the 3 340
     sampled test262 files. Replayed once against the full 2.3.0 test262 recording (13 330 files), ocd is identical
     except 9 files that write array indices near 2^32, beyond this crate's dense 10 000 000-element arrays (the
     sample's one documented divergence and 8 outside the sample, where 2.2 gave the same results).
 
-  The recorder kit (`tests/recorder/`) now targets 2.3.0's `runtime/execute.ts`, `runtime/extensions.ts` and
-  `tool-runtime.ts`. `OC_CODEMODE_CORPUS=2.3.0` points the tests that read one corpus (`fixtures()`, e.g.
-  `tests/openapi.rs`) at the 2.3.0 recording.
+  The recorder kit (`tests/recorder/`) now targets 2.3.1's `codemode/{codemode,tool-runtime}.ts`,
+  `language/runtime.ts` and `language/runtime/{execute,extensions}.ts` (`tests/fixtures/upstream-2.3.1/README.md`).
+  `OC_CODEMODE_CORPUS=2.3.0` (or `2.3.1`) points the tests that read one corpus (`fixtures()`, e.g.
+  `tests/openapi.rs`) at that recording.
+- `tests/upstream_2_3_1.rs` — 1 188 programs run through upstream 2.3.1 (`tests/fixtures/cases-2.3.1.json`,
+  regenerated by `tests/recorder/cases-2.3.1.ts`) with an echo tool and echo extensions: arguments crossing to tools
+  and extensions (left-out functions, awaited promises, `toJSON` not run, the refused values and their messages,
+  ordering against program jobs), `search("text")`, the reworded diagnostics, and about 800 `Buffer` programs
+  (every encoding, the statics, views, `toString` ranges, `indexOf`/`write`/`fill`/`copy`/`compare` with their
+  argument checks, every number read and write with its range errors, swaps, `console.log`, JSON, the `buffer`
+  module, crossing to and from the host). All identical.
 - `tests/upstream_2_2.rs` — the cases upstream added in 2.2: promise jobs in V8 order (29 cases), stalled awaits,
   tool results settling like I/O, located parse errors, the nesting-depth failure, timeouts inside built-in work,
   promise-like `search` results, `for...in` over inherited keys, generator receiver checks, and extension `before`
@@ -202,9 +230,11 @@ execution is interrupted.
 - `tests/upstream_2_1.rs` — the cases upstream added up to 2.1.4: jobs run to completion, the `Uint8Array.from`
   mapper, non-coercing byte searches, `flatMap` holes, the host's `Number#toString` radix check, `fetch` refusing
   `file:` URLs, the fetch display method fallback, and recursion depth as 2.1.4 reports it.
-- `tests/extensions_replay.rs` (44 recordings; 63 from 2.3.0, 5 of which a replay cannot rebuild, listed in
-  `tests/fixtures/extension-skips-2.3.0.txt`) and `tests/hooks.rs` (16 recordings, both corpora) — extension host
-  functions and call hooks, including hook ordering and denials.
+- `tests/extensions_replay.rs` (44 recordings from 2.2, 63 from 2.3.0 and 77 from 2.3.1; the `extension-skips*.txt`
+  lists hold the records a replay cannot rebuild, those 2.3.1 changed (5 and 8), and on 2.3.1 the constructible
+  globals and object-valued globals of the host API core does not use, 13 in all) and `tests/hooks.rs` (16
+  recordings per corpus) — extension host functions and call hooks, including hook ordering and denials. The 2.3.1
+  test262 run is byte-identical to 2.3.0's, which `tests/test262_sample.rs` replays.
 - `tests/test262_sample.rs` — a deterministic quarter (3 340 files) of upstream's test262 conformance runs with a port
   of its harness, recorded from 2.2.2 and from 2.3.0 (whose harness defines `assert` in a one-line program prelude
   over the host's `$assert`); all identical except 1 documented in `tests/fixtures/test262-skips.txt` (and
@@ -245,10 +275,11 @@ execution is interrupted.
   (the `gap` of `tests/upstream_2_3_0.rs`).
 - `tests/openapi.rs` — every recorded `OpenAPI.fromSpec` call and HTTP round trip, plus 49 extra upstream-generated
   cases.
-- `tests/fetch_stream.rs` — 46 programs reading streaming responses from a local server (readers, `for await`
+- `tests/fetch_stream.rs` — 54 programs reading streaming responses from a local server (readers, `for await`
   with a streaming `TextDecoder`, one-shot bodies, null bodies, lock and reader errors, `Headers`, the response as
-  JSON, a redirect) with the `execute` outputs upstream core 2.3.0 gave against the same routes
-  (`tests/fixtures/fetch-2.3.0.json`, `tests/recorder/fetch-cases.ts`), plus the bodies the server sees cancelled
+  JSON, a redirect, arguments that are promises or hold functions, programs that only log) with the `execute`
+  outputs upstream core 2.3.1 gave against the same routes (`tests/fixtures/fetch-2.3.1.json`,
+  `tests/recorder/fetch-cases.ts`), plus the bodies the server sees cancelled
   (left open at the program's end, a cancelled reader, a `break`, a redirect's body) and a pending request aborted
   when `execute` is interrupted.
 - `tests/fetch.rs` (including the 2.2.7 fragment, credential and redirect rules), `tests/teardown.rs`, and unit
@@ -259,9 +290,9 @@ execution is interrupted.
 Programs parse with acorn's `allowImportExportEverywhere` (still sloppy-mode scripts). A module is a global, by its Node
 module name: `node:` is stripped, a global of that name is used (built-ins, bindings and extension globals), else the
 aliases `fs/promises` (`fs.promises`), `url` (`{URL, URLSearchParams}`), `util` (`{TextEncoder, TextDecoder}`) and
-`buffer` (`{Buffer, atob, btoa}`, only the globals that exist). Anything else fails with ``Error: Cannot import
-"<name>": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools
-through `tools`.``
+`buffer` (`{Buffer, atob, btoa}`, only the globals that exist; `Buffer` since 2.3.1). Anything else fails with
+``Error: Cannot import "<name>": it isn't available here, where packages and files can't be loaded. Use the provided
+globals.`` (2.3.1's wording).
 
 - Top-level import declarations bind immutably before any code runs (before hoisting): a default import binds the
   module, `* as ns` a null-prototype namespace of the module's own enumerable properties plus `default`, a named import
@@ -277,6 +308,26 @@ through `tools`.``
   one is `UnsupportedSyntax` when reached. `import.meta` parses and is `UnsupportedSyntax` (`MetaProperty`).
 - Upstream's object-valued extension globals (#61151 lets `Extension.make` take objects, e.g. an `fs` object whose
   functions fire the hooks) are not part of this crate's host API, which only takes functions; core never uses them.
+
+## Buffer (upstream 2.3.1, #64365)
+
+`Buffer` is a global wherever the host has one, as on Bun, so in every run: a Uint8Array (`instanceof Uint8Array`,
+`Object.prototype.toString` says `[object Uint8Array]`) whose prototype `Buffer.prototype` inherits
+`Uint8Array.prototype`. `Buffer.from` (strings in `utf8`/`utf-8`, `hex`, `base64`, `base64url`, `latin1`/`binary`,
+`ascii`, `ucs2`/`ucs-2`/`utf16le`/`utf-16le`, any case; arrays, array-likes, `{type: "Buffer", data}`, a Uint8Array
+with an offset and length), `Buffer(...)` and `new Buffer(...)`, `alloc` (with a fill and its encoding),
+`allocUnsafe`, `allocUnsafeSlow`, `byteLength`, `concat`, `compare`, `isBuffer`, `isEncoding` and `poolSize`;
+`toString(encoding, start, end)`, `toJSON` (`{type: "Buffer", data}`, so `JSON.stringify` and a returned Buffer give
+that), `slice`/`subarray` (Buffers over the same memory), `equals`, and, handed to the host Buffer upstream, so with
+Node's argument checks and error texts as Bun gives them (`code` `ERR_OUT_OF_RANGE`, `ERR_INVALID_ARG_TYPE`,
+`ERR_UNKNOWN_ENCODING`, `ERR_INVALID_ARG_VALUE`, `ERR_INVALID_BUFFER_SIZE`, `ERR_BUFFER_OUT_OF_BOUNDS`): `compare`,
+`indexOf`, `lastIndexOf`, `includes`, `write`, `fill`, `copy`, every `read*`/`write*` integer and float method
+(`readUIntLE(offset, byteLength)` and the like up to 6 bytes) and `swap16`/`swap32`/`swap64`. Text decoding replaces
+invalid UTF-8 as WHATWG does, base64 decoding is Node's forgiving decoder (either alphabet, other characters skipped,
+stopping at `=`), hex stops at the first pair that is not one. `console.log` shows `<Buffer 68 69>` (50 bytes at
+most), `String(buffer)` its UTF-8 text. A Buffer crosses to an extension as a `HostValue::Buffer` and one coming back
+is a Buffer again; a tool refuses it like any Uint8Array. `structuredClone` copies it as a plain Uint8Array, as
+upstream does. Every behaviour above is checked against upstream 2.3.1 (`tests/upstream_2_3_1.rs`).
 
 ## Unsupported JavaScript (same as upstream, same diagnostics)
 

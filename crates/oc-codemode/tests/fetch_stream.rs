@@ -1,7 +1,9 @@
 //! Streaming `fetch` responses (2.3.0, #63436) against a local HTTP server: every program of
-//! `tests/fixtures/fetch-2.3.0.json` must give the `execute` output upstream core 2.3.0 gave against the same routes
+//! `tests/fixtures/fetch-2.3.1.json` must give the `execute` output upstream core 2.3.1 gave against the same routes
 //! (`tests/recorder/fetch-cases.ts` regenerates it), and the server must see the same bodies cancelled: a body still
-//! open when the program ends, a cancelled reader, a `break` out of `for await`, and a redirect's body.
+//! open when the program ends, a cancelled reader, a `break` out of `for await`, and a redirect's body. Since 2.3.1
+//! `fetch`'s arguments cross as JSON would carry them (#64513), and a program that only logs has no `null` line
+//! (#64344).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -201,7 +203,7 @@ async fn interrupting_execute_aborts_a_pending_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streaming_fetch_matches_upstream() {
     let (base, closed) = server().await;
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch-2.3.0.json");
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch-2.3.1.json");
     let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let mut failures = Vec::new();
     for case in fixture["cases"].as_array().unwrap() {

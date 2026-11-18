@@ -7,3 +7,11 @@ extensions.test.ts	37	a Proxy over an ArrayBuffer: recorded as a plain ArrayBuff
 extensions.test.ts	44	a host object whose getter throws while it is copied: getters are not recorded
 extensions.test.ts	45	a function whose name and length change between reads: recorded without its getters
 suspend.test.ts	2	a loop of sync extension calls stopped by a 100 ms timeout: how many calls run first is timing
+extensions.test.ts	4	2.3.1 changed this: a function in an argument is left out, so the call goes ahead (#64513; 2.3.1 corpus, extensions.test.ts 4 passes an iterator instead)
+extensions.test.ts	23	2.3.1 changed this: a function argument is left out (#64513; 2.3.1 corpus, extensions.test.ts 33)
+extensions.test.ts	24	2.3.1 changed this: "which cannot be passed to the host" (#64487; 2.3.1 corpus, extensions.test.ts 34)
+extensions.test.ts	25	2.3.1 changed this: a promise argument is awaited (#64513; 2.3.1 corpus, extensions.test.ts 33)
+extensions.test.ts	26	2.3.1 changed this: "which cannot be passed to the host" (#64487; 2.3.1 corpus, extensions.test.ts 35)
+extensions.test.ts	51	2.3.1 changed this: the import error no longer names Code Mode or `tools` (#64487; 2.3.1 corpus, extensions.test.ts 61)
+extensions.test.ts	52	2.3.1 changed this: the import error wording (#64487; 2.3.1 corpus, extensions.test.ts 62)
+extensions.test.ts	54	2.3.1 changed this: the import error wording (#64487; 2.3.1 corpus, extensions.test.ts 64)

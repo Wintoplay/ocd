@@ -101,6 +101,7 @@ pub fn to_host(value: &Json, label: &str, events: &Events) -> HostValue {
                     flags: v["flags"].as_str().unwrap_or("").into(),
                 },
                 "$bytes" => HostValue::Bytes(base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap_or("")).unwrap_or_default()),
+                "$buffer" => HostValue::Buffer(base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap_or("")).unwrap_or_default()),
                 "$map" => HostValue::Map(
                     v.as_array().unwrap().iter().map(|p| (next(&p[0], label.to_string()), next(&p[1], label.to_string()))).collect(),
                 ),

@@ -1414,7 +1414,7 @@ impl Frame {
             match &callable {
                 Value::Tool(t) => {
                     if t.path().is_empty() {
-                        return Err(located(type_error("The tools root is not callable."), callee.map(|c| c.loc()).or(node)));
+                        return Err(located(type_error("tools is not a function."), callee.map(|c| c.loc()).or(node)));
                     }
                     let promise = self.create_tool_call_promise(t.path().to_vec(), args, node)?;
                     return Ok(Value::Object(promise));
@@ -1440,27 +1440,12 @@ impl Frame {
         })
     }
 
-    // The call returns its promise at once. Arguments cross on the caller's stack, since `toJSON` is program code, and a
-    // promise argument is awaited first; the host call starts once they have crossed, so admission and hooks happen at
-    // the call site, and runs concurrently with the program.
+    // The call returns its promise at once (2.3.1, tools are async host functions under a host namespace). The
+    // arguments cross now, as host copies (`extensions::cross_arguments`): one that can't cross rejects the promise,
+    // and promises in them are awaited first, after which the call is made again and the promise follows that call's.
+    // The host call starts once they have crossed, and runs concurrently with the program.
     fn create_tool_call_promise(&self, path: Vec<Rc<str>>, args: Vec<Value>, node: Option<Loc>) -> JsResult<Obj> {
-        let rt = self.rt.clone();
-        let site = self.site(node);
-        let made = self.rt.runner.resolving(&self.rt.runner.new_promise(&self.rt)?, None);
-        let promise = made.promise.clone();
-        let task = async move {
-            let mut json = Vec::with_capacity(args.len());
-            for arg in args {
-                match crate::data::to_boundary(&rt, arg, site).await {
-                    Ok(j) => json.push(j),
-                    Err(error) => return made.reject(&rt, error),
-                }
-            }
-            let path: Vec<String> = path.iter().map(|s| s.to_string()).collect();
-            crate::tool_runtime::start_tool(&rt, crate::tool_runtime::ToolTarget::Path(path), json, made, node);
-        };
-        self.rt.runner.spawn_async(Box::pin(task), &promise);
-        Ok(promise)
+        tool_call(&self.rt, path, args, node)
     }
 
     async fn call_arguments(&self, env: &Env, nodes: &[ExprOrSpread]) -> JsResult<Vec<Value>> {
@@ -2224,7 +2209,7 @@ impl Frame {
         match object_value {
             Value::Tool(t) => {
                 let EvKey::Str(s) = key else {
-                    return Err(type_error_at("Tool paths must use string property names.", property_node));
+                    return Err(type_error_at("tools paths must use string property names.", property_node));
                 };
                 let mut path = t.path().to_vec();
                 path.push(Rc::from(s.to_rust().as_str()));
@@ -2266,7 +2251,7 @@ impl Frame {
         // Reject unknown promise properties so a missing await cannot hide.
         if target.is_promise() && !has(target, key) {
             return Err(invalid_data_at(
-                "This value is an un-awaited Promise; await it first - e.g. `const result = await tools.ns.tool(...)`.",
+                "This value is an un-awaited Promise; await it first - e.g. `const result = await load(...)`.",
                 node.object.loc(),
             ));
         }
@@ -2518,3 +2503,34 @@ pub fn native_future(f: impl std::future::Future<Output = JsResult<Value>> + 'st
 
 #[allow(dead_code)]
 fn _assert_hashmap(_: HashMap<u8, u8>) {}
+
+/// A call of the tool at `path` (see `Evaluator::create_tool_call_promise`).
+pub(crate) fn tool_call(rt: &Rt, path: Vec<Rc<str>>, args: Vec<Value>, node: Option<Loc>) -> JsResult<Obj> {
+    let label = path.iter().fold(String::from("tools"), |at, key| crate::tool_runtime::member(&at, key));
+    let promise = rt.runner.new_promise(rt)?;
+    let made = rt.runner.resolving(&promise, node);
+    match super::extensions::cross_arguments(&args, &label) {
+        Err(error) => made.reject(rt, error),
+        Ok(super::extensions::Crossed::Ready(host_args)) => {
+            let path: Vec<String> = path.iter().map(|s| s.to_string()).collect();
+            crate::tool_runtime::start_tool(rt, crate::tool_runtime::ToolTarget::Path(path), host_args, made, node);
+        }
+        Ok(super::extensions::Crossed::Waiting(waiting)) => {
+            let task_rt = rt.clone();
+            let task = async move {
+                let rt = task_rt;
+                for p in waiting {
+                    if let Err(e) = super::runner::await_value(&rt, Value::Object(p), None).await {
+                        return made.reject(&rt, e);
+                    }
+                }
+                match tool_call(&rt, path, args, node) {
+                    Ok(again) => made.resolve(&rt, Value::Object(again)),
+                    Err(e) => made.reject(&rt, e),
+                }
+            };
+            rt.runner.spawn_async(Box::pin(task), &promise);
+        }
+    }
+    Ok(promise)
+}

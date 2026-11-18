@@ -344,6 +344,7 @@ pub fn uint8_array_global(rt: &Rt) -> Value {
                     buffer: view.buffer.clone(),
                     offset: view.offset + start,
                     length: end.saturating_sub(start),
+                    node: false,
                 };
                 Value::Object(Obj::new(Some(rt.builtins.uint8_array.clone()), ObjKind::Bytes(sub)))
             }))

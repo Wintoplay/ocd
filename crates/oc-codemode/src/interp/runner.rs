@@ -86,6 +86,18 @@ impl Reaction {
     }
 }
 
+/// A fulfilled promise's value; `None` while it is pending or once it rejected.
+pub fn fulfilled_value(promise: &Obj) -> Option<Value> {
+    let state = promise_state(promise)?;
+    if state.state() != PState::Fulfilled {
+        return None;
+    }
+    match &*state.result.borrow() {
+        Some(Ok(v)) => Some(v.clone()),
+        _ => None,
+    }
+}
+
 pub fn promise_state(promise: &Obj) -> Option<&Rc<PromiseState>> {
     match promise.kind() {
         ObjKind::Promise(p) => Some(p),
@@ -577,7 +589,7 @@ impl Runner {
             let node = self.stuck_await();
             let stalled = Thrown::Pending(Rc::new(PendingThrow {
                 error_type: ErrorType::Error,
-                message: "The program is waiting on a promise that can never settle: nothing else is running, so nothing can resolve it. Code Mode has no timers or sleep, so don't wait or poll inside a program.".into(),
+                message: "The program is waiting on a promise that can never settle: nothing else is running, so nothing can resolve it. There are no timers or sleep, so don't wait or poll inside a program.".into(),
                 node: RefCell::new(node),
                 kind: DiagnosticKind::ExecutionFailure,
                 suggestions: None,

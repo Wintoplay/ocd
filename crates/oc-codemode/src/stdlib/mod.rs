@@ -1,6 +1,7 @@
 //! The standard library available to programs. Port of `packages/codemode/src/stdlib`.
 
 pub mod array;
+pub mod buffer;
 pub mod bytes;
 pub mod collections;
 pub mod console;

@@ -124,11 +124,10 @@ fn entries(snapshot: &Snapshot) -> Vec<ToolEntry> {
                 description: definition.description,
                 input: ToolSchema::Json(definition.input_schema),
                 freeform: definition.freeform.is_some(),
-                // Without a declared output the value is the joined text or null (`Schema.NullOr(Schema.String)`).
+                // Without a declared output the value is the joined text or null. JSON Schema, which Code Mode renders
+                // but does not check: a plugin may have renamed the call to a tool with another output (#64333).
                 output: Some(ToolSchema::Json(
-                    definition
-                        .output_schema
-                        .unwrap_or_else(|| json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })),
+                    definition.output_schema.unwrap_or_else(|| json!({ "type": ["string", "null"] })),
                 )),
             }));
         }
@@ -296,8 +295,11 @@ struct Throttle {
 
 /// The host bridging programs to the registry's CodeMode tools.
 struct ExecuteHost {
-    tools: Vec<(String, String, Arc<dyn Tool>)>,
+    tools: Arc<Vec<(String, String, Arc<dyn Tool>)>>,
     ctx: ToolContext,
+    /// The program's calls, marked as made by the `execute` call until it ends: their permission requests show on its
+    /// row (2.3.1, #64324).
+    nested: Mutex<Vec<crate::permission::Nested>>,
     /// `tool.execute.before/after` for nested calls (`beforeExecute` → `executeTool`).
     hooks: Arc<dyn ExecuteHooks>,
     rows: ProgressRows,
@@ -365,6 +367,23 @@ impl ExecuteHost {
     }
 }
 
+/// The tool a call runs after the plugin hooks: a plugin may rename a call in a Code Mode program, as it may a direct
+/// call, to another of the program's tools (2.3.1, #63633).
+fn renamed(
+    tools: &[(String, String, Arc<dyn Tool>)],
+    name: String,
+    tool: Arc<dyn Tool>,
+    hooked: String,
+) -> Result<(String, Arc<dyn Tool>), ToolError> {
+    if hooked == name {
+        return Ok((name, tool));
+    }
+    match tools.iter().find(|(_, registered, _)| *registered == hooked) {
+        Some((_, registered, tool)) => Ok((registered.clone(), tool.clone())),
+        None => Err(ToolError::new(format!("Tool is not available for this request: {hooked}"))),
+    }
+}
+
 fn output_files(content: &[ToolContent]) -> Vec<ExecuteFile> {
     content
         .iter()
@@ -394,7 +413,10 @@ impl Host for ExecuteHost {
             index
         };
         let mut ctx = self.ctx.clone();
+        // Its own ID, so plugin hooks and traces can tell the program's calls apart. It has no row, so until the
+        // program ends its permission requests show on the execute call's (#64324).
         ctx.call_id = oc_schema::id::ascending("call");
+        self.nested.lock().unwrap().push(crate::permission::nested(&ctx.call_id, &self.ctx.call_id));
         // Progress replaces the execute call's own, so an inner tool's updates would hide the call rows (#60480).
         ctx.progress = Arc::new(|_| {});
         // A stop is the execute call's to handle: a nested call never fails it with its own error (2.3.0).
@@ -402,6 +424,7 @@ impl Host for ExecuteHost {
         let files = self.files.clone();
         let hooks = self.hooks.clone();
         let stop = self.stop.clone();
+        let tools = self.tools.clone();
         Box::pin(async move {
             let Some((_, name, tool)) = found else {
                 return Err(ToolCallError::failure("Execute context is unavailable"));
@@ -419,6 +442,7 @@ impl Host for ExecuteHost {
             let mut input = input.unwrap_or(Value::Null);
             let mut hooked = name.clone();
             hooks.before(&mut hooked, &mut input, &ctx).await.map_err(fail)?;
+            let (name, tool) = renamed(&tools, name, tool, hooked).map_err(fail)?;
             let executed = run_tool(tool.as_ref(), &name, input, ctx, hooks.as_ref()).await.map_err(fail)?;
             let collected = output_files(&executed.content);
             if !collected.is_empty() {
@@ -461,14 +485,17 @@ pub async fn execute_with(snapshot: &Snapshot, input: Value, ctx: ToolContext, h
         ));
     };
     let files = Arc::new(Mutex::new(Vec::new()));
-    let tools = snapshot
-        .codemode
-        .iter()
-        .map(|(name, tool)| (qualified_name(tool.as_ref()), name.clone(), tool.clone()))
-        .collect();
+    let tools = Arc::new(
+        snapshot
+            .codemode
+            .iter()
+            .map(|(name, tool)| (qualified_name(tool.as_ref()), name.clone(), tool.clone()))
+            .collect(),
+    );
     let stop = Stopper::default();
     let host = Arc::new_cyclic(|this| ExecuteHost {
         tools,
+        nested: Mutex::new(Vec::new()),
         ctx: ctx.clone(),
         hooks,
         rows: ProgressRows::new(),
@@ -480,6 +507,14 @@ pub async fn execute_with(snapshot: &Snapshot, input: Value, ctx: ToolContext, h
     });
     let runtime = runtime(snapshot, host.clone(), Some((fetch_authorize(ctx.clone(), stop.clone()), fetch_redirect_check(ctx.clone()))));
     let cancel = ctx.cancel.clone();
+    // The program's calls stop showing on this call's row once it ends, however it ends.
+    struct Unnest(Arc<ExecuteHost>);
+    impl Drop for Unnest {
+        fn drop(&mut self) {
+            self.0.nested.lock().unwrap().clear();
+        }
+    }
+    let _unnest = Unnest(host.clone());
     let result = tokio::select! {
         result = runtime.execute(&code) => result,
         _ = cancel.cancelled() => {
@@ -523,7 +558,7 @@ pub async fn execute_with(snapshot: &Snapshot, input: Value, ctx: ToolContext, h
 /// The host of a schedule check (`CodeModeTool.check`): nested calls get the ids `call_<messageID>_<n>`, run
 /// through the plugin hooks, and see the declared output (or the joined text) like an `execute` call.
 struct CheckHost {
-    tools: Vec<(String, String, Arc<dyn Tool>)>,
+    tools: Arc<Vec<(String, String, Arc<dyn Tool>)>>,
     ctx: ToolContext,
     hooks: Arc<dyn ExecuteHooks>,
     calls: Mutex<usize>,
@@ -545,6 +580,7 @@ impl Host for CheckHost {
         ctx.stop = oc_tools::Stop::none();
         let hooks = self.hooks.clone();
         let unattended = self.unattended.clone();
+        let tools = self.tools.clone();
         let run = async move {
             let Some((_, name, tool)) = found else {
                 return Err(ToolCallError::failure("Execute context is unavailable"));
@@ -553,6 +589,7 @@ impl Host for CheckHost {
             let mut hooked = name.clone();
             let fail = |e: ToolError| ToolCallError::Failure(e.model_message());
             hooks.before(&mut hooked, &mut input, &ctx).await.map_err(fail)?;
+            let (name, tool) = renamed(&tools, name, tool, hooked).map_err(fail)?;
             let executed = run_tool(tool.as_ref(), &name, input, ctx, hooks.as_ref()).await.map_err(fail)?;
             Ok(Some(result_value(&executed)))
         };
@@ -573,11 +610,13 @@ pub async fn check(
     ctx: ToolContext,
     hooks: Arc<dyn ExecuteHooks>,
 ) -> oc_codemode::codemode::ExecResult {
-    let tools = snapshot
-        .codemode
-        .iter()
-        .map(|(name, tool)| (qualified_name(tool.as_ref()), name.clone(), tool.clone()))
-        .collect();
+    let tools = Arc::new(
+        snapshot
+            .codemode
+            .iter()
+            .map(|(name, tool)| (qualified_name(tool.as_ref()), name.clone(), tool.clone()))
+            .collect(),
+    );
     let host = Arc::new(CheckHost {
         tools,
         ctx,

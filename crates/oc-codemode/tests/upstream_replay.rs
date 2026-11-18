@@ -48,17 +48,21 @@ pub fn replayable(record: &Json) -> bool {
 pub async fn replay(record: &Json) -> Option<String> {
     let entries = tree_entries(&record["tree"]);
     let host = host_arc(record);
-    let runtime = match CodeMode::new(entries, host, Vec::new(), limits_of(record)) {
+    let runtime = match CodeMode::new(entries, host.clone(), Vec::new(), limits_of(record)) {
         Ok(r) => r.with_bindings(bindings_of(record)),
         Err(e) => return Some(format!("make failed: {e}")),
     };
     let code = record["code"].as_str().unwrap_or("");
-    let ours = runtime.execute(code).await.to_json();
+    let ours = match tokio::time::timeout(std::time::Duration::from_secs(20), runtime.execute(code)).await {
+        Ok(result) => result.to_json(),
+        Err(_) => return Some("replay timed out".into()),
+    };
     let expected = decode(&record["result"]).unwrap_or(Json::Null);
-    if json_eq(&ours, &expected) {
+    let crossed = host.crossing_mismatches();
+    if json_eq(&ours, &expected) && crossed.is_empty() {
         None
     } else {
-        Some(format!("expected {expected}\n     got {ours}"))
+        Some(format!("expected {expected}\n     got {ours}{}", crossed.join("")))
     }
 }
 
@@ -156,9 +160,16 @@ async fn upstream_executions_replay_exactly() {
     replay_corpus(corpus(""), "replay-skips.txt").await;
 }
 
-/// opencode 2.3.0's suite, recorded on its bytecode VM. The differences that 2.3.0 features not yet ported explain
-/// are listed with their batch in `replay-skips-2.3.0.txt`.
+/// opencode 2.3.0's suite, recorded on its bytecode VM. The records whose result 2.3.1 changed are listed in
+/// `replay-skips-2.3.0.txt` with the 2.3.1 record that replaces them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upstream_2_3_0_executions_replay() {
     replay_corpus(corpus("2.3.0"), "replay-skips-2.3.0.txt").await;
+}
+
+/// opencode 2.3.1's suite, after the language/Code Mode split (#64487); `replay-skips-2.3.1.txt` lists its known
+/// divergences.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upstream_2_3_1_executions_replay() {
+    replay_corpus(corpus("2.3.1"), "replay-skips-2.3.1.txt").await;
 }

@@ -1,0 +1,7 @@
+# Recorded extension executions of the 2.2 corpus (upstream/) whose result opencode 2.3.1 changed; ocd follows 2.3.1.
+# Format: <test file>\t<seq>\t<reason>.
+extensions.test.ts	4	2.3.1 changed this: a function in an argument is left out, so the call goes ahead (#64513; 2.3.1 corpus, extensions.test.ts 4 passes an iterator instead)
+extensions.test.ts	23	2.3.1 changed this: a function argument is left out (#64513; 2.3.1 corpus, extensions.test.ts 33)
+extensions.test.ts	24	2.3.1 changed this: "which cannot be passed to the host" (#64487; 2.3.1 corpus, extensions.test.ts 34)
+extensions.test.ts	25	2.3.1 changed this: a promise argument is awaited (#64513; 2.3.1 corpus, extensions.test.ts 33)
+extensions.test.ts	26	2.3.1 changed this: "which cannot be passed to the host" (#64487; 2.3.1 corpus, extensions.test.ts 35)

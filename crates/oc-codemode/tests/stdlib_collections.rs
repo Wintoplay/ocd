@@ -1168,7 +1168,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         r#"const ws = new WeakSet(); try { ws.add(tools) } catch (e) { return [e.name, e.message] }"#,
-        r#"{"ok":true,"value":["TypeError","Invalid value used in weak set: a tool reference cannot be held weakly."],"toolCalls":[]}"#,
+        r#"{"ok":true,"value":["TypeError","Invalid value used in weak set: a namespace reference cannot be held weakly."],"toolCalls":[]}"#,
     ),
     (
         r#"const k = {}; const ws = new WeakSet([k]); return [ws.has(k), ws.has({}), ws.add(k) === ws, ws.delete(k), ws.has(k), ws.has(null)]"#,

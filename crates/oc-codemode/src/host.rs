@@ -122,6 +122,9 @@ pub enum HostValue {
     Map(Vec<(HostValue, HostValue)>),
     Set(Vec<HostValue>),
     Bytes(Vec<u8>),
+    /// A Node `Buffer` (2.3.1): bytes that cross into the program as a `Buffer`, and that a program's `Buffer` crosses
+    /// out as.
+    Buffer(Vec<u8>),
     /// An error: its name, message, `cause`, and own enumerable fields.
     Error { name: String, message: String, cause: Option<Box<HostValue>>, fields: Vec<(String, HostValue)> },
     /// A host function; inside results it becomes a callable program function.
@@ -167,6 +170,7 @@ impl fmt::Debug for HostValue {
             HostValue::Map(m) => write!(f, "Map({m:?})"),
             HostValue::Set(s) => write!(f, "Set({s:?})"),
             HostValue::Bytes(b) => write!(f, "Uint8Array({b:?})"),
+            HostValue::Buffer(b) => write!(f, "Buffer({b:?})"),
             HostValue::Error { name, message, .. } => write!(f, "{name}: {message}"),
             HostValue::Function(func) => write!(f, "[Function {}]", func.name()),
             HostValue::Unrepresentable(d) => write!(f, "<{d}>"),

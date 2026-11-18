@@ -69,7 +69,7 @@ pub fn module(rt: &Rt, specifier: &str, site: Option<Loc>) -> JsResult<Value> {
         return Err(error_at(
             ErrorType::Error,
             format!(
-                "Cannot import \"{specifier}\": it isn't available in Code Mode, which can't load packages or files. Use the provided globals, or call tools through `tools`."
+                "Cannot import \"{specifier}\": it isn't available here, where packages and files can't be loaded. Use the provided globals."
             ),
             site,
         ));

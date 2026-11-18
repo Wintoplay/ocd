@@ -61,6 +61,8 @@ pub struct Builtins {
     pub url_search_params: Obj,
     pub headers: Obj,
     pub uint8_array: Obj,
+    /// `Buffer.prototype`, whose prototype is `Uint8Array.prototype` (2.3.1).
+    pub buffer: Obj,
     pub text_encoder: Obj,
     pub text_decoder: Obj,
     pub promise: Obj,
@@ -99,6 +101,7 @@ impl Builtins {
         }
         let iterator = plain();
         let async_iterator = plain();
+        let uint8_array = plain();
         Builtins {
             array: Obj::array(&object, Vec::new()),
             string: plain(),
@@ -113,7 +116,8 @@ impl Builtins {
             url: plain(),
             url_search_params: plain(),
             headers: plain(),
-            uint8_array: plain(),
+            buffer: Obj::ordinary(&uint8_array),
+            uint8_array,
             text_encoder: plain(),
             text_decoder: plain(),
             promise: plain(),
@@ -306,7 +310,7 @@ pub fn describe_value(value: &Value) -> String {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
         Value::Object(o) => o.describe(),
-        Value::Tool(_) => "a tool reference".into(),
+        Value::Tool(_) => "a namespace reference".into(),
         other => format!("a {}", other.js_typeof()),
     }
 }

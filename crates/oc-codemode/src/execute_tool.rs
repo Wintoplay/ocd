@@ -158,7 +158,12 @@ pub fn format_result(result: &ExecResult) -> String {
         Some(l) if !l.is_empty() => Some(format!("Logs:\n{}", l.join("\n"))),
         _ => None,
     };
-    [Some(output), warnings, logs].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n")
+    // A program that only logs returns undefined (sent as null); a "null" line before its logs says nothing (2.3.1).
+    let output = match result {
+        ExecResult::Success { value: Json::Null, .. } if warnings.is_some() || logs.is_some() => None,
+        _ => Some(output),
+    };
+    [output, warnings, logs].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
 fn js_trim(s: &str) -> &str {

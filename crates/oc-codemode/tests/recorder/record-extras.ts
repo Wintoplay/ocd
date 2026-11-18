@@ -2,7 +2,7 @@
 // and toolExpression for curated edge cases followed by every tool path in the recorded trees.
 import fs from "node:fs"
 import path from "node:path"
-import { searchSignature, toolExpression } from "../src/tool-runtime.js"
+import { searchSignature, toolExpression } from "../src/codemode/tool-runtime.js"
 
 const dir = process.argv[2]
 if (dir === undefined) throw new Error("usage: bun run script/record-extras.ts <recording dir>")

@@ -28,7 +28,7 @@ pub fn enumerable_source(rt: &Rt, label: &str, value: &Value, node: Option<Loc>)
             "{label} received an un-awaited Promise; await it before inspecting the result."
         )))),
         Value::Tool(_) => Err(at(invalid_data(format!(
-            "{label} cannot read tool references: they are not plain data. Use Object.keys(tools) for names, or search({{ query }}) for signatures."
+            "{label} cannot read tools: it is a namespace of host functions, not plain data. Use Object.keys(tools) for its names."
         )))),
         Value::String(s) => Ok(Obj::array(&rt.builtins.array, iteration::string_code_points(s))),
         Value::Object(o) => Ok(o.clone()),

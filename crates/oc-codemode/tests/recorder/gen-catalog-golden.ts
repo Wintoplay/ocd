@@ -1,5 +1,5 @@
-// Regenerates crates/oc-codemode/tests/fixtures/catalog-golden.json from upstream core 2.2.7:
-//   bun gen-catalog-golden.ts <opencode-2.2.7 checkout> <old golden> <out>
+// Regenerates crates/oc-codemode/tests/fixtures/catalog-golden.json from upstream core (last run: 2.3.1):
+//   bun gen-catalog-golden.ts <opencode checkout> <old golden> <out>
 // Inventories are taken from the old golden; summaries, renders and update texts come from
 // packages/core/src/codemode/{catalog,instructions}.ts.
 const [root, oldPath, out] = process.argv.slice(2)

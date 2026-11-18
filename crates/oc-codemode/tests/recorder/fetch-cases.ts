@@ -2,7 +2,7 @@
 // VM and `codemode/fetch.ts`) against a local server, and writes each program's `execute` output for
 // tests/fetch_stream.rs, which serves the same routes. The server's origin is written as `http://BASE`.
 //
-//   bun run fetch-cases.ts <opencode> crates/oc-codemode/tests/fixtures/fetch-2.3.0.json
+//   bun run fetch-cases.ts <opencode> crates/oc-codemode/tests/fixtures/fetch-2.3.1.json
 //
 // Every route also has to be served the same way by tests/fetch_stream.rs: keep them in sync.
 const [root, file] = process.argv.slice(2)
@@ -154,6 +154,16 @@ const programs: Array<string> = [
   `${fetchAt("/redirect")} return [res.redirected, res.url === BASE + "/json", res.status, await res.json()]`,
   // A response can be returned from a function and read later.
   `const get = async (p) => (await fetch(BASE + p)).text(); return await Promise.all([get("/text"), get("/json"), get("/chunks")])`,
+  // Arguments cross as JSON would carry them (2.3.1, #64513): a promise is awaited, a function is left out.
+  `const res = await fetch(Promise.resolve(BASE + "/text")); return await res.text()`,
+  `const res = await fetch(BASE + "/text", { method: Promise.resolve("GET"), headers: { "x-a": "1", f: () => 1 }, signal: () => 1 }); return [res.status, await res.text()]`,
+  `return await fetch(BASE + "/text", { headers: Promise.reject(new Error("no headers")) }).catch((e) => [e.name, e.message])`,
+  `return await fetch(() => 1).catch((e) => [e.name, e.message])`,
+  `return await fetch(BASE + "/text", [1].keys()).catch((e) => [e.name, e.message])`,
+  // A program that only logs has no "null" line before its logs (2.3.1, #64344).
+  `${fetchAt("/text")} console.log(await res.text())`,
+  `${fetchAt("/text")} console.log(res.status); return null`,
+  `${fetchAt("/missing")} console.log(res.status); return res.status`,
 ]
 
 const cases = []

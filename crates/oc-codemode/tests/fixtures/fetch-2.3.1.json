@@ -797,6 +797,124 @@
     ],
     "files": []
    }
+  },
+  {
+   "code": "const res = await fetch(Promise.resolve(BASE + \"/text\")); return await res.text()",
+   "output": {
+    "output": "hello world",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/text\", { method: Promise.resolve(\"GET\"), headers: { \"x-a\": \"1\", f: () => 1 }, signal: () => 1 }); return [res.status, await res.text()]",
+   "output": {
+    "output": "[200,\"hello world\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "return await fetch(BASE + \"/text\", { headers: Promise.reject(new Error(\"no headers\")) }).catch((e) => [e.name, e.message])",
+   "output": {
+    "output": "[\"Error\",\"no headers\"]",
+    "toolCalls": [],
+    "files": []
+   }
+  },
+  {
+   "code": "return await fetch(() => 1).catch((e) => [e.name, e.message])",
+   "output": {
+    "output": "[\"TypeError\",\"fetch() URL is invalid\"]",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "error",
+      "input": {
+       "method": "GET",
+       "url": "undefined"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "return await fetch(BASE + \"/text\", [1].keys()).catch((e) => [e.name, e.message])",
+   "output": {
+    "output": "[\"TypeError\",\"Argument 2 to fetch contains an iterator, which cannot be passed to the host.\"]",
+    "toolCalls": [],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/text\"); console.log(await res.text())",
+   "output": {
+    "output": "Logs:\nhello world",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/text\"); console.log(res.status); return null",
+   "output": {
+    "output": "Logs:\n200",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/text"
+      }
+     }
+    ],
+    "files": []
+   }
+  },
+  {
+   "code": "const res = await fetch(BASE + \"/missing\"); console.log(res.status); return res.status",
+   "output": {
+    "output": "404\n\nLogs:\n404",
+    "toolCalls": [
+     {
+      "tool": "fetch",
+      "status": "completed",
+      "input": {
+       "method": "GET",
+       "url": "http://BASE/missing"
+      }
+     }
+    ],
+    "files": []
+   }
   }
  ],
  "closed": [

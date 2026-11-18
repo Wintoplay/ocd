@@ -314,6 +314,7 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "URLSearchParams",
     "Headers",
     "Uint8Array",
+    "Buffer",
     "TextEncoder",
     "TextDecoder",
     "encodeURI",
@@ -334,11 +335,12 @@ pub const GLOBAL_NAMES: &[&str] = &[
     "AggregateError",
 ];
 
+// Since 2.3.1 `search` is a host function made from core's `searchCall(args, call)`, whose name and length it shows.
 fn search_global(rt: &Rt) -> Value {
     Value::Object(native(
         &rt.builtins.function,
-        "search",
-        0,
+        "searchCall",
+        2,
         NativeFn {
             call: Rc::new(|rt, site, _, args| {
                 let rt = rt.clone();
@@ -401,6 +403,7 @@ pub fn globals(rt: &Rt) -> Vec<(&'static str, Value)> {
             "URLSearchParams" => stdlib::url::url_search_params_global(rt),
             "Headers" => stdlib::headers::headers_global(rt),
             "Uint8Array" => stdlib::bytes::uint8_array_global(rt),
+            "Buffer" => stdlib::buffer::buffer_global(rt),
             "TextEncoder" => stdlib::bytes::text_encoder_global(rt),
             "TextDecoder" => stdlib::bytes::text_decoder_global(rt),
             "encodeURI" | "encodeURIComponent" | "decodeURI" | "decodeURIComponent" => {

@@ -2,6 +2,7 @@
 //! `interpreter/extensions.ts`.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -11,37 +12,80 @@ use super::errors::{type_error, ErrorType, JsResult, Thrown};
 use super::function::{native, NResult, NativeFn};
 use super::globals::create_error_value;
 use super::limits::MAX_VALUE_DEPTH;
-use super::{describe_value, Rt};
+use super::{describe_value, Rt, Site};
 use crate::host::{CallResult, ExtensionInvocation, HostCall, HostFunction, HostKey, HostProperty, HostValue};
 use crate::object::{define, define_accessor, define_data, get, has, keys, BytesData, Getter, MapData, Obj, ObjKind, HIDDEN};
 use crate::value::{PropKey, Sym, Value};
 
 const UNCROSSED: [&str; 4] = ["stack", "constructor", "toString", "__proto__"];
 
-/// A program value as a host copy.
-pub fn to_host(value: &Value, label: &str, depth: usize, seen: &mut HashSet<usize>) -> JsResult<HostValue> {
+/// How the arguments of one host call crossed: as host copies, or not yet, because promises in them have not
+/// fulfilled; the call is made again once they settle (upstream `HostCalls.call` and `$vmHostWait`).
+pub enum Crossed {
+    Ready(Vec<HostValue>),
+    Waiting(Vec<Obj>),
+}
+
+/// A host call's arguments as host copies, each labelled `Argument <n> to <label>` in diagnostics (2.3.1,
+/// `hostGlobals`' `toHost` under core's translation, #64487/#64513): a function anywhere is left out, as
+/// `JSON.stringify` leaves it out (an object's key is skipped, an array's item is `null`, a Map's or Set's entry is
+/// `undefined`, and an argument is `undefined`), and a promise is replaced by its value once fulfilled. A program's
+/// `toJSON` is never run.
+pub fn cross_arguments(values: &[Value], label: &str) -> JsResult<Crossed> {
+    let mut waiting = Vec::new();
+    let mut args = Vec::with_capacity(values.len());
+    for (i, v) in values.iter().enumerate() {
+        let copied = to_host(v, &format!("Argument {} to {label}", i + 1), 0, &mut HashSet::new(), &mut waiting)?;
+        args.push(copied.unwrap_or(HostValue::Undefined));
+    }
+    Ok(if waiting.is_empty() { Crossed::Ready(args) } else { Crossed::Waiting(waiting) })
+}
+
+/// A program value as a host copy; `None` when it is left out (a function). A promise that has not fulfilled goes to
+/// `waiting` (its place holds `undefined` until the copy is made again).
+pub fn to_host(
+    value: &Value,
+    label: &str,
+    depth: usize,
+    seen: &mut HashSet<usize>,
+    waiting: &mut Vec<Obj>,
+) -> JsResult<Option<HostValue>> {
     if depth > MAX_VALUE_DEPTH {
         return Err(type_error(format!("{label} exceeds the maximum value depth of {MAX_VALUE_DEPTH}.")));
     }
     let o = match value {
-        Value::Undefined => return Ok(HostValue::Undefined),
-        Value::Null => return Ok(HostValue::Null),
-        Value::Bool(b) => return Ok(HostValue::Bool(*b)),
-        Value::Number(n) => return Ok(HostValue::Number(*n)),
-        Value::String(s) => return Ok(HostValue::String(s.to_rust())),
+        Value::Undefined => return Ok(Some(HostValue::Undefined)),
+        Value::Null => return Ok(Some(HostValue::Null)),
+        Value::Bool(b) => return Ok(Some(HostValue::Bool(*b))),
+        Value::Number(n) => return Ok(Some(HostValue::Number(*n))),
+        Value::String(s) => return Ok(Some(HostValue::String(s.to_rust()))),
+        // `typeof` "function": program and host functions, and paths into `tools`.
+        Value::Object(o) if o.is_callable() => return Ok(None),
+        Value::Tool(t) if !t.path().is_empty() => return Ok(None),
+        Value::Object(o) if seen.contains(&o.addr()) => {
+            return Err(type_error(format!("{label} contains a circular value.")));
+        }
+        Value::Object(o) if o.is_promise() => {
+            let Some(result) = super::runner::fulfilled_value(o) else {
+                waiting.push(o.clone());
+                return Ok(Some(HostValue::Undefined));
+            };
+            seen.insert(o.addr());
+            let copied = to_host(&result, label, depth + 1, seen, waiting);
+            seen.remove(&o.addr());
+            return copied;
+        }
         Value::Object(o) if !o.is_opaque() => o.clone(),
         other => {
             return Err(type_error(format!(
-                "{label} contains {}, which cannot be passed to an extension.",
+                "{label} contains {}, which cannot be passed to the host.",
                 describe_value(other)
             )));
         }
     };
-    if !seen.insert(o.addr()) {
-        return Err(type_error(format!("{label} contains a circular value.")));
-    }
+    seen.insert(o.addr());
     let result = (|| -> JsResult<HostValue> {
-        let mut next = |item: &Value| to_host(item, label, depth + 1, &mut seen.clone());
+        let mut next = |item: &Value| to_host(item, label, depth + 1, seen, waiting);
         Ok(match o.kind() {
             ObjKind::Error(_) => {
                 let name = coerce_to_string(&get(&o, &PropKey::str("name"))?).to_rust();
@@ -59,12 +103,12 @@ pub fn to_host(value: &Value, label: &str, depth: usize, seen: &mut HashSet<usiz
                     }
                 }
                 for key in names {
-                    if UNCROSSED.contains(&key.as_str()) || !has(&o, &PropKey::str(&key)) {
+                    if UNCROSSED.contains(&key.as_str()) || key == "message" || !has(&o, &PropKey::str(&key)) {
                         continue;
                     }
                     let item = match next(&get(&o, &PropKey::str(&key))?) {
-                        Ok(v) => v,
-                        Err(Thrown::Pending(_)) => continue,
+                        Ok(Some(v)) => v,
+                        Ok(None) | Err(Thrown::Pending(_)) => continue,
                         Err(e) => return Err(e),
                     };
                     if key == "cause" {
@@ -75,22 +119,34 @@ pub fn to_host(value: &Value, label: &str, depth: usize, seen: &mut HashSet<usiz
                 }
                 HostValue::Error { name, message, cause, fields }
             }
-            ObjKind::Array(_) => HostValue::Array(o.array_values().iter().map(&mut next).collect::<JsResult<_>>()?),
+            ObjKind::Array(_) => HostValue::Array(
+                o.array_values()
+                    .iter()
+                    .map(|v| Ok(next(v)?.unwrap_or(HostValue::Null)))
+                    .collect::<JsResult<_>>()?,
+            ),
             ObjKind::Date(t) => HostValue::Date(t.get()),
             ObjKind::RegExp(r) => HostValue::RegExp { source: r.source(), flags: r.flags.clone() },
             ObjKind::URL(u) => HostValue::Url(u.href()),
             ObjKind::URLSearchParams(p) => HostValue::SearchParams(p.pairs()),
             ObjKind::Headers(h) => HostValue::Headers(h.borrow().list()),
+            ObjKind::Bytes(b) if b.node => HostValue::Buffer(b.to_vec()),
             ObjKind::Bytes(b) => HostValue::Bytes(b.to_vec()),
             ObjKind::Map(m) => {
                 let entries: Vec<(Value, Value)> = m.borrow().iter().cloned().collect();
-                HostValue::Map(entries.iter().map(|(k, v)| Ok((next(k)?, next(v)?))).collect::<JsResult<_>>()?)
+                let mut out = Vec::with_capacity(entries.len());
+                for (k, v) in &entries {
+                    let k = next(k)?.unwrap_or(HostValue::Undefined);
+                    out.push((k, next(v)?.unwrap_or(HostValue::Undefined)));
+                }
+                HostValue::Map(out)
             }
             ObjKind::Set(s) => {
                 let items: Vec<Value> = s.borrow().iter().map(|(k, _)| k.clone()).collect();
-                HostValue::Set(items.iter().map(&mut next).collect::<JsResult<_>>()?)
+                HostValue::Set(
+                    items.iter().map(|v| Ok(next(v)?.unwrap_or(HostValue::Undefined))).collect::<JsResult<_>>()?,
+                )
             }
-            ObjKind::WeakMap(_) | ObjKind::WeakSet(_) => HostValue::Object(Vec::new()),
             _ => {
                 let mut fields = Vec::new();
                 for key in keys(&o) {
@@ -98,14 +154,16 @@ pub fn to_host(value: &Value, label: &str, depth: usize, seen: &mut HashSet<usiz
                         continue;
                     }
                     let item = get(&o, &PropKey::Str(key.clone()))?;
-                    fields.push((key.to_rust(), next(&item)?));
+                    if let Some(item) = next(&item)? {
+                        fields.push((key.to_rust(), item));
+                    }
                 }
                 HostValue::Object(fields)
             }
         })
     })();
     seen.remove(&o.addr());
-    result
+    result.map(Some)
 }
 
 /// A host value as program values.
@@ -130,6 +188,7 @@ pub fn from_host(rt: &Rt, value: &HostValue, label: &str, depth: usize) -> JsRes
             Value::Object(crate::stdlib::regexp::construct_regexp_literal(rt, source, flags)?)
         }
         HostValue::Bytes(bytes) => Value::Object(Obj::new(Some(b.uint8_array.clone()), ObjKind::Bytes(BytesData::new(bytes.clone())))),
+        HostValue::Buffer(bytes) => Value::Object(Obj::new(Some(b.buffer.clone()), ObjKind::Bytes(BytesData::node(bytes.clone())))),
         HostValue::Error { name, message, cause, fields } => {
             let t = ErrorType::from_name(name).unwrap_or(ErrorType::Error);
             let copied = create_error_value(b.error(t), Some(message));
@@ -219,13 +278,16 @@ impl Drop for ExtensionGuard {
     }
 }
 
-/// A host function as a program function. Arguments cross in; for a global, the `extension.before` hook runs before
-/// the host function is called, so a call it denies never reaches the host. The host's result, or what it threw,
-/// crosses out so the program catches a copy, and `extension.after` sees how the call ended. Functions inside
-/// results are part of a value's API and skip the hooks. A denied call fails the way the global would: an async
-/// global rejects its promise, a sync one throws.
+/// A host function as a program function. Arguments cross in (see [`cross_arguments`]); for a global, the
+/// `extension.before` hook runs before the host function is called, so a call it denies never reaches the host. The
+/// host's result, or what it threw, crosses out so the program catches a copy, and `extension.after` sees how the call
+/// ended. Functions inside results are part of a value's API and skip the hooks. A denied call fails the way the global
+/// would: an async global rejects its promise, a sync one throws. An argument that can't cross rejects an async call's
+/// promise and throws from a sync call; promises in the arguments are awaited first, and the call is then made again
+/// (an async call's promise follows the one that call returns; a sync call waits where it is, as `await` would).
 pub fn wrap(rt: &Rt, f: Arc<dyn HostFunction>, label: &str, extension: Option<String>) -> Value {
-    let label = label.to_string();
+    let label: Rc<str> = Rc::from(label);
+    let extension: Option<Rc<str>> = extension.map(|e| Rc::from(e.as_str()));
     let name = f.name().to_string();
     let length = f.length();
     Value::Object(native(
@@ -233,54 +295,100 @@ pub fn wrap(rt: &Rt, f: Arc<dyn HostFunction>, label: &str, extension: Option<St
         &name,
         length,
         NativeFn {
-            call: std::rc::Rc::new(move |rt, site, _, values| {
-                let mut args = Vec::with_capacity(values.len());
-                for (i, v) in values.iter().enumerate() {
-                    match to_host(v, &format!("Argument {} to {label}", i + 1), 0, &mut HashSet::new()) {
-                        Ok(h) => args.push(h),
-                        Err(e) => return NResult::err(e),
-                    }
-                }
-                let host = rt.tools.host.clone();
-                let invocation = extension.as_ref().map(|extension| ExtensionInvocation {
-                    id: rt.tools.next_call_id(),
-                    extension: extension.clone(),
-                    name: label.clone(),
-                    args: args.clone(),
-                });
-                let hooked = Hooked { host, invocation, label: label.clone() };
-                if f.asynchronous() {
-                    let f = f.clone();
-                    let work: BoxFuture<'static, Result<HostValue, HostValue>> = Box::pin(async move {
-                        hooked.before().await?;
-                        let called = f.call(args);
-                        hooked.settle(called).await
-                    });
-                    return NResult::Ready(pending(rt, work, label.clone(), site.node));
-                }
-                if let Err(reason) = hooked.blocking_before(rt) {
-                    return NResult::err(reason);
-                }
-                match f.call(args) {
-                    HostCall::Pending(work) => {
-                        let work: BoxFuture<'static, Result<HostValue, HostValue>> =
-                            Box::pin(async move { hooked.settle(HostCall::Pending(work)).await });
-                        NResult::Ready(pending(rt, work, label.clone(), site.node))
-                    }
-                    ready => {
-                        let settled = rt.runner.block_on(rt, hooked.settle(ready));
-                        NResult::Ready(match settled {
-                            Err(e) => Err(e),
-                            Ok(Ok(v)) => from_host(rt, &v, &label, 0),
-                            Ok(Err(reason)) => Err(cross(rt, &reason, &label)),
-                        })
-                    }
-                }
-            }),
+            call: Rc::new(move |rt, site, _, values| call_host(rt, site, f.clone(), label.clone(), extension.clone(), values)),
             construct: None,
             callback: true,
         },
     ))
+}
+
+fn call_host(
+    rt: &Rt,
+    site: Site,
+    f: Arc<dyn HostFunction>,
+    label: Rc<str>,
+    extension: Option<Rc<str>>,
+    values: Vec<Value>,
+) -> NResult {
+    let crossed = cross_arguments(&values, &label);
+    if f.asynchronous() {
+        let promise = match rt.runner.new_promise(rt) {
+            Ok(p) => p,
+            Err(e) => return NResult::err(e),
+        };
+        let resolving = rt.runner.resolving(&promise, site.node);
+        match crossed {
+            Err(e) => resolving.reject(rt, e),
+            Ok(Crossed::Waiting(waiting)) => {
+                let task_rt = rt.clone();
+                let task = async move {
+                    let rt = task_rt;
+                    for p in waiting {
+                        if let Err(e) = super::runner::await_value(&rt, Value::Object(p), None).await {
+                            return resolving.reject(&rt, e);
+                        }
+                    }
+                    match call_host(&rt, site, f, label, extension, values).resolve().await {
+                        Ok(v) => resolving.resolve(&rt, v),
+                        Err(e) => resolving.reject(&rt, e),
+                    }
+                };
+                rt.runner.spawn_async(Box::pin(task), &promise);
+            }
+            Ok(Crossed::Ready(args)) => {
+                let hooked = hooks(rt, &label, &extension, &args);
+                let work: BoxFuture<'static, Result<HostValue, HostValue>> = Box::pin(async move {
+                    hooked.before().await?;
+                    let called = f.call(args);
+                    hooked.settle(called).await
+                });
+                settle_later(rt, work, label.to_string(), resolving);
+            }
+        }
+        return NResult::ok(Value::Object(promise));
+    }
+    let args = match crossed {
+        Err(e) => return NResult::err(e),
+        Ok(Crossed::Waiting(waiting)) => {
+            let rt = rt.clone();
+            return NResult::future(async move {
+                for p in waiting {
+                    super::runner::await_value(&rt, Value::Object(p), None).await?;
+                }
+                call_host(&rt, site, f, label, extension, values).resolve().await
+            });
+        }
+        Ok(Crossed::Ready(args)) => args,
+    };
+    let hooked = hooks(rt, &label, &extension, &args);
+    if let Err(reason) = hooked.blocking_before(rt) {
+        return NResult::err(reason);
+    }
+    match f.call(args) {
+        HostCall::Pending(work) => {
+            let work: BoxFuture<'static, Result<HostValue, HostValue>> =
+                Box::pin(async move { hooked.settle(HostCall::Pending(work)).await });
+            NResult::Ready(pending(rt, work, label.to_string(), site.node))
+        }
+        ready => {
+            let settled = rt.runner.block_on(rt, hooked.settle(ready));
+            NResult::Ready(match settled {
+                Err(e) => Err(e),
+                Ok(Ok(v)) => from_host(rt, &v, &label, 0),
+                Ok(Err(reason)) => Err(cross(rt, &reason, &label)),
+            })
+        }
+    }
+}
+
+fn hooks(rt: &Rt, label: &str, extension: &Option<Rc<str>>, args: &[HostValue]) -> Hooked {
+    let invocation = extension.as_ref().map(|extension| ExtensionInvocation {
+        id: rt.tools.next_call_id(),
+        extension: extension.to_string(),
+        name: label.to_string(),
+        args: args.to_vec(),
+    });
+    Hooked { host: rt.tools.host.clone(), invocation, label: label.to_string() }
 }
 
 /// What the host threw, as the program catches it.
@@ -339,6 +447,17 @@ impl Hooked {
 fn pending(rt: &Rt, work: BoxFuture<'static, Result<HostValue, HostValue>>, label: String, site: Option<crate::ast::Loc>) -> JsResult<Value> {
     let promise = rt.runner.new_promise(rt)?;
     let resolving = rt.runner.resolving(&promise, site);
+    settle_later(rt, work, label, resolving);
+    Ok(Value::Object(promise))
+}
+
+// Settles `resolving` with the host's work, in a later job, like I/O.
+fn settle_later(
+    rt: &Rt,
+    work: BoxFuture<'static, Result<HostValue, HostValue>>,
+    label: String,
+    resolving: super::runner::Resolving,
+) {
     rt.runner.host(Box::pin(async move {
         let outcome = work.await;
         Box::new(move || {
@@ -352,7 +471,6 @@ fn pending(rt: &Rt, work: BoxFuture<'static, Result<HostValue, HostValue>>, labe
             }
         }) as Box<dyn FnOnce()>
     }));
-    Ok(Value::Object(promise))
 }
 
 

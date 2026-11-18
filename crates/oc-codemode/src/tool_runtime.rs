@@ -7,7 +7,9 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as Json};
 
-use crate::data::{from_json, quote, to_boundary};
+use crate::data::{from_json, quote};
+use crate::host::HostValue;
+use crate::interp::extensions::Crossed;
 use crate::host::{CallResult, Host, ToolCallError, ToolInvocation};
 use futures::future::LocalBoxFuture;
 
@@ -111,6 +113,15 @@ pub fn compare_text(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
+/// How a program reads `key` from `base` (upstream `member`): `base.key`, or `base["key"]` for a key that isn't an
+/// ASCII identifier.
+pub fn member(base: &str, key: &str) -> String {
+    let mut chars = key.chars();
+    let identifier = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    if identifier { format!("{base}.{key}") } else { format!("{base}[{}]", quote(key)) }
+}
+
 pub fn tool_expression(path: &str) -> String {
     let mut out = String::from("tools");
     for segment in path.split('.') {
@@ -126,8 +137,9 @@ pub fn tool_expression(path: &str) -> String {
     out
 }
 
-/// Exact callable signature of the built-in `search` function, for host-owned instructions.
-pub const SEARCH_SIGNATURE: &str = "search({\n  query?: string,\n  namespace?: string,\n  /** @integer @exclusiveMinimum 0 */\n  limit?: number,\n  /** @integer @minimum 0 */\n  offset?: number,\n}): {\n  items: Array<{\n      path: string,\n      description: string,\n      signature: string,\n    }>,\n  /** @integer @minimum 0 */\n  remaining: number,\n  next: {\n      /** @integer @minimum 0 */\n      offset: number,\n    } | null,\n}";
+/// Exact callable signature of the built-in `search` function, for host-owned instructions (a query string or the
+/// options object since 2.3.1, #64347).
+pub const SEARCH_SIGNATURE: &str = "search(query: string | {\n  query?: string,\n  namespace?: string,\n  /** @integer @exclusiveMinimum 0 */\n  limit?: number,\n  /** @integer @minimum 0 */\n  offset?: number,\n}): {\n  items: Array<{\n      path: string,\n      description: string,\n      signature: string,\n    }>,\n  /** @integer @minimum 0 */\n  remaining: number,\n  next: {\n      /** @integer @minimum 0 */\n      offset: number,\n    } | null,\n}";
 
 pub fn signature_of(def: &ToolDef) -> String {
     let input = if let Some(parameter) = def.string_parameter() {
@@ -647,7 +659,7 @@ impl Drop for AfterGuard {
 
 /// One host tool call (`ToolRuntime.execute`/`search`): resolution, input decoding, admission, hooks, the call, and
 /// output handling. Its synchronous part (everything up to the first host suspension) runs when it is first polled.
-fn tool_work(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>) -> LocalBoxFuture<'static, Result<Option<Json>, Thrown>> {
+fn tool_work(rt: &Rt, target: ToolTarget, args: Vec<HostValue>) -> LocalBoxFuture<'static, Result<Option<Json>, Thrown>> {
     let rt = rt.clone();
     Box::pin(async move {
         let tools = &rt.tools;
@@ -665,6 +677,15 @@ fn tool_work(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>) -> Local
                 }
             }
         };
+        // `search("notes")` is shorthand for `search({ query: "notes" })` (2.3.1, #64347).
+        let mut args = args;
+        if def.is_none()
+            && let Some(HostValue::String(query)) = args.first()
+        {
+            args[0] = HostValue::Object(vec![("query".into(), HostValue::String(query.clone()))]);
+        }
+        // Arguments arrive as host copies and become JSON here (2.3.1, `tool-runtime.ts` `toJson`).
+        let json_args = args.iter().map(host_to_json).collect::<Result<Vec<_>, Thrown>>()?;
         let normalized: Vec<Option<Json>> = if json_args.is_empty() { vec![Some(json!({}))] } else { json_args };
         if normalized.len() != 1 {
             return Err(tool_runtime_error(
@@ -684,7 +705,7 @@ fn tool_work(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>) -> Local
                 DiagnosticKind::InvalidToolInput,
                 format!("Invalid input for tool '{name}': {message}"),
                 if def.is_none() {
-                    Vec::new()
+                    vec![SEARCH_SUGGESTION.into()]
                 } else {
                     vec!["The signature may have changed. Use search to get the current signature.".into()]
                 },
@@ -728,8 +749,8 @@ fn tool_work(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>) -> Local
 
 /// Starts a tool call as host work that runs concurrently with the program; `made` settles in a later job, after
 /// the jobs already queued, like I/O. A defect is located at `site`, the call that started the work.
-pub fn start_tool(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>, made: Resolving, site: Option<Loc>) {
-    let work = tool_work(rt, target, json_args);
+pub fn start_tool(rt: &Rt, target: ToolTarget, args: Vec<HostValue>, made: Resolving, site: Option<Loc>) {
+    let work = tool_work(rt, target, args);
     rt.runner.host(Box::pin(async move {
         let outcome = work.await;
         Box::new(move || {
@@ -745,15 +766,95 @@ pub fn start_tool(rt: &Rt, target: ToolTarget, json_args: Vec<Option<Json>>, mad
     }));
 }
 
-/// The built-in `search`: arguments cross as JSON, then the call runs to completion before any other job, and the
-/// result comes back as values that can also be awaited or chained like a Promise.
+/// The built-in `search`: arguments cross as host copies (promises in them awaited where the call is, as `await`
+/// would), then the call runs to completion before any other job, and the result comes back as values that can also
+/// be awaited or chained like a Promise.
 pub async fn run_search(rt: &Rt, args: Vec<Value>, site: Site) -> JsResult<Value> {
-    let mut json_args: Vec<Option<Json>> = Vec::with_capacity(args.len());
-    for a in args {
-        json_args.push(to_boundary(rt, a, site).await?);
-    }
-    let value = rt.runner.block_on(rt, tool_work(rt, ToolTarget::Search, json_args))??;
+    let _ = site;
+    let host_args = loop {
+        match crate::interp::extensions::cross_arguments(&args, "search")? {
+            Crossed::Ready(host_args) => break host_args,
+            Crossed::Waiting(waiting) => {
+                for p in waiting {
+                    crate::interp::runner::await_value(rt, Value::Object(p), None).await?;
+                }
+            }
+        }
+    };
+    let value = rt.runner.block_on(rt, tool_work(rt, ToolTarget::Search, host_args))??;
     Ok(crate::interp::promises::promise_like(rt, from_json(rt, value.as_ref())))
+}
+
+/// What a search input error suggests (2.3.1, #64347).
+pub const SEARCH_SUGGESTION: &str =
+    "Pass search a query string or an object, such as search(\"issues\") or search({ namespace: \"github\" }).";
+
+/// A tool argument as JSON, as `JSON.stringify` would give it, with a few departures so a mistake is not a silent
+/// `{}` (2.3.1, `tool-runtime.ts` `toJson`): an Error gives its name, message and own fields, a Set its items, a
+/// URLSearchParams its query string, and a Uint8Array asks to be encoded as text first. A `__proto__` key is dropped.
+pub fn host_to_json(value: &HostValue) -> Result<Option<Json>, Thrown> {
+    Ok(Some(match value {
+        HostValue::Undefined | HostValue::Function(_) | HostValue::Unrepresentable(_) => return Ok(None),
+        HostValue::Null => Json::Null,
+        HostValue::Bool(b) => Json::Bool(*b),
+        HostValue::String(s) => Json::String(s.clone()),
+        HostValue::Number(n) => crate::data::json_number(*n),
+        HostValue::Date(t) => {
+            if t.is_finite() { Json::String(crate::stdlib::date::iso_string(*t)) } else { Json::Null }
+        }
+        HostValue::Url(href) => Json::String(href.clone()),
+        HostValue::SearchParams(pairs) => Json::String(
+            url::form_urlencoded::Serializer::new(String::new()).extend_pairs(pairs.iter()).finish(),
+        ),
+        HostValue::Headers(list) => {
+            // `Object.fromEntries(headers)`: a repeated name (only `set-cookie`) keeps its last value.
+            let mut out: Vec<(String, Json)> = Vec::new();
+            for (k, v) in list {
+                match out.iter_mut().find(|(name, _)| name == k) {
+                    Some(existing) => existing.1 = Json::String(v.clone()),
+                    None => out.push((k.clone(), Json::String(v.clone()))),
+                }
+            }
+            Json::Object(crate::data::js_ordered(out))
+        }
+        HostValue::Bytes(_) | HostValue::Buffer(_) => {
+            return Err(tool_runtime_error(
+                DiagnosticKind::InvalidDataValue,
+                "A Uint8Array cannot cross to a tool; pass text instead, e.g. `new TextDecoder().decode(bytes)` or `bytes.toBase64()`.".to_string(),
+                Vec::new(),
+            ));
+        }
+        HostValue::Array(items) | HostValue::Set(items) => Json::Array(
+            items.iter().map(|item| Ok(host_to_json(item)?.unwrap_or(Json::Null))).collect::<Result<_, Thrown>>()?,
+        ),
+        HostValue::Map(_) | HostValue::RegExp { .. } => Json::Object(Map::new()),
+        HostValue::Error { name, message, fields, .. } => {
+            let mut out = vec![("name".to_string(), Json::String(name.clone())), ("message".to_string(), Json::String(message.clone()))];
+            object_fields(fields, &mut out)?;
+            Json::Object(crate::data::js_ordered(out))
+        }
+        HostValue::Object(fields) => {
+            let mut out = Vec::new();
+            object_fields(fields, &mut out)?;
+            Json::Object(crate::data::js_ordered(out))
+        }
+        HostValue::Live(_) => Json::Object(Map::new()),
+    }))
+}
+
+fn object_fields(fields: &[(String, HostValue)], out: &mut Vec<(String, Json)>) -> Result<(), Thrown> {
+    for (key, item) in fields {
+        if key == "__proto__" {
+            continue;
+        }
+        if let Some(json) = host_to_json(item)? {
+            match out.iter_mut().find(|(k, _)| k == key) {
+                Some(existing) => existing.1 = json,
+                None => out.push((key.clone(), json)),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn tool_error(e: ToolCallError) -> Thrown {

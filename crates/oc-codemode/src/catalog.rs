@@ -58,7 +58,7 @@ pub struct Summary {
     pub namespaces: Vec<NamespaceSummary>,
 }
 
-const DESCRIPTION_LIMIT: usize = 120;
+const DESCRIPTION_LIMIT: usize = 500;
 const CHARACTERS_PER_TOKEN: f64 = 4.0;
 /// Inline budget in "tokens" (characters / 4, rounded).
 pub const INLINE_BUDGET: usize = 2_000;

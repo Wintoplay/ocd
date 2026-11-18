@@ -13,9 +13,9 @@ use oc_codemode::tool_runtime::{ToolDef, ToolEntry};
 use oc_codemode::tool_schema::ToolSchema;
 use serde_json::{Map, Value as Json};
 
-/// The recorded corpus the replay tests read by default: `OC_CODEMODE_CORPUS=2.3.0` switches every test that calls
-/// `fixtures()` to the opencode 2.3.0 recording (`tests/fixtures/upstream-2.3.0/`); unset (or `2.2`) keeps the
-/// recording ocd is held to in full (`tests/fixtures/upstream/`, upstream 2.2.2 plus the 2.2.7 edits).
+/// The recorded corpus the replay tests read by default: `OC_CODEMODE_CORPUS=2.3.0` (or `2.3.1`) switches every test
+/// that calls `fixtures()` to that opencode recording (`tests/fixtures/upstream-2.3.0/`); unset (or `2.2`) keeps the
+/// 2.2 recording (`tests/fixtures/upstream/`, upstream 2.2.2 plus the 2.2.7 edits).
 pub fn fixtures() -> PathBuf {
     corpus(&std::env::var("OC_CODEMODE_CORPUS").unwrap_or_default())
 }
@@ -171,11 +171,13 @@ pub fn tree_entries(tree: &Json) -> Vec<ToolEntry> {
     out
 }
 
-/// A host that replays recorded tool behaviour.
+/// A host that replays recorded tool behaviour. Where the recording has it (2.3.1), it also checks each argument as it
+/// reached the tool's input decoding (`json`, after crossing as a host copy) against what ocd hands it.
 pub struct ReplayHost {
     decodes: Mutex<VecDeque<(String, Json)>>,
     settles: Mutex<Vec<(String, Json, bool)>>,
     pub after: Mutex<Vec<(String, String)>>,
+    crossed: Mutex<Vec<String>>,
 }
 
 impl ReplayHost {
@@ -198,7 +200,17 @@ impl ReplayHost {
                 _ => {}
             }
         }
-        ReplayHost { decodes: Mutex::new(decodes), settles: Mutex::new(settles), after: Mutex::new(Vec::new()) }
+        ReplayHost {
+            decodes: Mutex::new(decodes),
+            settles: Mutex::new(settles),
+            after: Mutex::new(Vec::new()),
+            crossed: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Arguments that reached a tool differently from the recording.
+    pub fn crossing_mismatches(&self) -> Vec<String> {
+        self.crossed.lock().unwrap().clone()
     }
 }
 
@@ -207,6 +219,21 @@ impl Host for ReplayHost {
         let mut decodes = self.decodes.lock().unwrap();
         let Some(i) = decodes.iter().position(|(n, _)| n == path) else { return Ok(input) };
         let (_, e) = decodes.remove(i).unwrap();
+        if let Some(json) = e.get("json") {
+            let recorded = decode(json);
+            let same = match (&recorded, &input) {
+                (Some(a), Some(b)) => json_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                self.crossed.lock().unwrap().push(format!(
+                    "\n     {path} received {} where upstream's got {}",
+                    input.as_ref().map(|v| v.to_string()).unwrap_or("undefined".into()),
+                    recorded.map(|v| v.to_string()).unwrap_or("undefined".into())
+                ));
+            }
+        }
         if e["ok"] == Json::Bool(true) {
             return Ok(decode(&e["input"]));
         }
