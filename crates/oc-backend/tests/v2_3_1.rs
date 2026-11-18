@@ -224,3 +224,77 @@ async fn plugin_list_names_the_automation_tool_plugin() {
     assert!(text.contains("\"opencode.tool.automation\""), "{text}");
     assert!(!text.contains("opencode.tool.schedule"));
 }
+
+fn unknown_error(r: &Res, message: &str) {
+    assert_eq!(r.status, 500, "{}", String::from_utf8_lossy(&r.body));
+    let v = r.json();
+    assert_eq!((v["_tag"].as_str(), v["message"].as_str()), (Some("UnknownError"), Some(message)), "{v}");
+    let reference = v["ref"].as_str().unwrap();
+    assert!(reference.len() == 12 && reference.starts_with("err_") && reference[4..].chars().all(|c| c.is_ascii_hexdigit()), "{reference}");
+    assert_eq!(v.as_object().unwrap().len(), 3);
+}
+
+/// `defect-response.test.ts` "a write on a full disk answers 500 with the storage reason instead of an empty body".
+#[tokio::test]
+async fn a_write_on_a_full_disk_answers_the_storage_reason() {
+    let h = harness();
+    let id = h.session().await;
+    // A real SQLITE_FULL: SQLite never lowers the limit below the current size, so 1 means the database may not grow.
+    h.app.db.with(|c| c.execute_batch("PRAGMA max_page_count = 1")).unwrap();
+    let r = h.post(&format!("/api/session/{id}/prompt"), json!({ "text": "x".repeat(60_000) })).await;
+    unknown_error(&r, "Storage is full");
+    h.app.db.with(|c| c.execute_batch("PRAGMA max_page_count = 1073741823")).unwrap();
+}
+
+/// `defect-response.test.ts` "other defects answer 500 with a ref, and unknown routes keep their 404".
+#[tokio::test]
+async fn other_defects_answer_a_ref_and_unknown_routes_keep_their_404() {
+    let h = harness();
+    let id = h.session().await;
+    // A query that is simply wrong is a bug, not a storage failure: an empty table shadows the sessions.
+    h.app.db.with(|c| c.execute_batch("CREATE TEMP TABLE session_v2 (shadow text)")).unwrap();
+    let r = h.get(&format!("/api/session/{id}")).await;
+    h.app.db.with(|c| c.execute_batch("DROP TABLE temp.session_v2")).unwrap();
+    unknown_error(&r, "Server failed to handle the request. Check server logs for details.");
+    assert_eq!(h.get("/api/does-not-exist").await.status, 404);
+}
+
+/// `storage-failure.test.ts`: storage failures by primary result code; a constraint, a bad statement and other
+/// errors are not storage failures; a transaction SQLite rolled back itself fails with the storage failure.
+#[test]
+fn storage_failures_are_classified_by_their_primary_code() {
+    use oc_storage::failure;
+    let db = oc_storage::Database::memory().unwrap();
+    db.with(|c| c.execute_batch("CREATE TABLE probe (id TEXT PRIMARY KEY); INSERT INTO probe VALUES ('a'); PRAGMA max_page_count = 1"))
+        .unwrap();
+    let large = "x".repeat(60_000);
+    let full = db.with(|c| c.execute("INSERT INTO probe VALUES (?)", [&large])).unwrap_err();
+    assert_eq!(failure::message(&full), Some("Storage is full"));
+    let failed = db.immediate(|c| Ok(c.execute("INSERT INTO probe VALUES (?)", [&large])?)).unwrap_err();
+    assert_eq!(failure::message(&failed), Some("Storage is full"));
+    assert!(failure::rolled_back(&failed));
+    // Nothing was left open: the connection takes the next transaction.
+    db.with(|c| c.execute_batch("PRAGMA max_page_count = 1073741823")).unwrap();
+    db.immediate(|c| Ok(c.execute("INSERT INTO probe VALUES ('ok')", [])?)).unwrap();
+
+    let constraint = db.with(|c| c.execute("INSERT INTO probe VALUES ('a')", [])).unwrap_err();
+    assert_eq!(failure::message(&constraint), None);
+    let missing = db.with(|c| c.execute("SELECT * FROM missing", [])).unwrap_err();
+    assert_eq!(failure::message(&missing), None);
+    assert_eq!(failure::message(&anyhow::anyhow!("database or disk is full")), None);
+    // An extended code (SQLITE_BUSY_SNAPSHOT, 517) is a storage failure by its primary code.
+    assert_eq!(failure::message_for_code(517), Some("Storage is in use by another process"));
+    for (code, message) in [
+        (5, "Storage is in use by another process"),
+        (6, "Storage is in use by another process"),
+        (8, "Storage is read-only"),
+        (10, "Storage couldn't be read or written"),
+        (11, "Storage is damaged"),
+        (13, "Storage is full"),
+        (14, "Storage couldn't be opened"),
+        (26, "Storage is damaged"),
+    ] {
+        assert_eq!(failure::message_for_code(code), Some(message));
+    }
+    assert_eq!(failure::message_for_code(19), None);
+}

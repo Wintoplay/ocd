@@ -151,7 +151,7 @@ impl Engine {
                     ApiError::Typed { body, .. } => {
                         body.get("message").and_then(serde_json::Value::as_str).map(str::to_string).unwrap_or_else(|| error.to_string())
                     }
-                    ApiError::Defect(message) => message.clone(),
+                    ApiError::Defect(message) | ApiError::Storage { cause: message, .. } => message.clone(),
                     other => other.to_string(),
                 })
             })

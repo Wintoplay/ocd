@@ -207,8 +207,7 @@ pub async fn serve(method: &Method, headers: &HeaderMap, file: FsFile, path: &st
     let body = match body(&file.source, offset, length).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, "fs.read failed to open file");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return crate::error::ApiError::defect(format!("fs.read failed to open file: {e}")).into_response();
         }
     };
     let mut res = (status, body).into_response();
@@ -265,8 +264,7 @@ pub async fn serve_blob(headers: &HeaderMap, id: &str, blob: crate::backend::Blo
     let body = match body(&FsSource::Path(blob.path.clone()), offset, length).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, "blob.get failed to open file");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return crate::error::ApiError::defect(format!("blob.get failed to open file: {e}")).into_response();
         }
     };
     let mut res = (status, body).into_response();

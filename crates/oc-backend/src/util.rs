@@ -68,9 +68,33 @@ pub fn job_info(job: oc_core::job::ListedJob) -> oc_server::generated::JobInfo {
     }
 }
 
-/// Any unexpected failure → defect.
-pub fn defect(e: impl std::fmt::Display) -> ApiError {
-    ApiError::defect(e.to_string())
+/// Any unexpected failure → defect: `500 UnknownError` with a ref, or with the storage reason when the failure is a
+/// storage failure (`StorageFailure.message`: a full disk, a locked, read-only or damaged database).
+pub fn defect<E: std::fmt::Display + 'static>(e: E) -> ApiError {
+    match storage_failure(&e) {
+        Some(reason) => ApiError::storage(reason, format!("{e:#}")),
+        None => ApiError::defect(e.to_string()),
+    }
+}
+
+/// [`defect`] of an `anyhow` error, logging its whole chain.
+pub fn defect_chain(e: anyhow::Error) -> ApiError {
+    match oc_storage::failure::message(&e) {
+        Some(reason) => ApiError::storage(reason, format!("{e:#}")),
+        None => ApiError::defect(format!("{e:#}")),
+    }
+}
+
+/// The storage reason of an error of any type that can carry a SQLite failure.
+pub fn storage_failure<E: 'static>(e: &E) -> Option<&'static str> {
+    let any = e as &dyn std::any::Any;
+    if let Some(e) = any.downcast_ref::<anyhow::Error>() {
+        return oc_storage::failure::message(e);
+    }
+    if let Some(e) = any.downcast_ref::<rusqlite::Error>() {
+        return oc_storage::failure::from_sqlite(e);
+    }
+    None
 }
 
 /// `SessionInbox.LifecycleConflict` raised by the projector (the row was already consumed or the

@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::Engine;
 use crate::store;
-use crate::util::{conv, defect, from_json, is_lifecycle_conflict};
+use crate::util::{conv, defect, defect_chain, from_json, is_lifecycle_conflict};
 
 /// `Session.NotFoundError` / anything else → API error.
 pub fn session_error(e: SessionError) -> ApiError {
@@ -25,7 +25,7 @@ pub fn session_error(e: SessionError) -> ApiError {
             format!("Prompt message ID conflicts with an existing durable record: {id}"),
             Some(id),
         ),
-        SessionError::Other(e) => defect(format!("{e:#}")),
+        SessionError::Other(e) => defect_chain(e),
     }
 }
 
@@ -153,8 +153,8 @@ impl Engine {
     }
 
     pub async fn create_session(&self, cwd: &str, body: api::SessionCreateBody) -> Result<api::SessionInfo, ApiError> {
-        // Upstream resolves the project of a relative directory and fails with a defect (500, empty
-        // body); `AbsolutePath` carries no check, so it is not a 400.
+        // Upstream resolves the project of a relative directory and fails with a defect (500
+        // `UnknownError` with a ref); `AbsolutePath` carries no check, so it is not a 400.
         if let Some(dir) = body.location.as_ref().map(|l| &l.directory)
             && body.parent_id.is_none()
             && !std::path::Path::new(dir).has_root()
@@ -199,7 +199,7 @@ impl Engine {
             self.app.model_transport.close(id);
             let children = store::children(&self.app.db, id).map_err(defect)?;
             self.app.environments.lock().remove(id);
-            self.app.bus.commit_one(SessionEvent::Deleted { session_id: id.into() }).map_err(|e| defect(format!("{e:#}")))?;
+            self.app.bus.commit_one(SessionEvent::Deleted { session_id: id.into() }).map_err(|e| defect_chain(e))?;
             store::remove_aggregate(&self.app.db, id).map_err(defect)?;
             for child in children {
                 self.remove_session(&child).await?;
@@ -288,7 +288,7 @@ impl Engine {
                 instruction_entries: Some(entries),
             })
         })
-        .map_err(|e| defect(format!("{e:#}")))?;
+        .map_err(|e| defect_chain(e))?;
         let s = self.session(&new_id).map_err(|_| defect("forked session missing"))?;
         self.session_api(&s)
     }
@@ -502,7 +502,7 @@ impl Engine {
                     d,
                 ))
                 .await
-                    .map_err(|e| if is_lifecycle_conflict(&e) { conflict() } else { defect(format!("{e:#}")) })?;
+                    .map_err(|e| if is_lifecycle_conflict(&e) { conflict() } else { defect_chain(e) })?;
                 inbox::list(&self.app.bus, id)
                     .map_err(defect)?
                     .into_iter()
@@ -542,7 +542,7 @@ impl Engine {
                 self.session(id)?;
                 Ok(())
             }
-            Err(e) => Err(defect(format!("{e:#}"))),
+            Err(e) => Err(defect_chain(e)),
         }
     }
 
@@ -559,7 +559,7 @@ impl Engine {
                     Some(inbox_id.to_string()),
                 ));
             }
-            Err(e) => return Err(defect(format!("{e:#}"))),
+            Err(e) => return Err(defect_chain(e)),
         }
         if d == Delivery::Steer {
             self.wake(id, Scope::Input);
@@ -618,7 +618,7 @@ impl Engine {
                     SessionEvent::Moved { session_id: id.into(), location, project_id: project.id.clone(), subpath: Some(subpath) }.into(),
                 );
                 // `SessionMove` is a global service and the route has no location middleware: no envelope location.
-                unlocated(|| self.app.bus.commit(events)).map_err(|e| defect(format!("{e:#}")))?;
+                unlocated(|| self.app.bus.commit(events)).map_err(|e| defect_chain(e))?;
             } else {
                 let payload = json!({"location": {"directory": dir_s}, "projectID": project.id, "subpath": subpath});
                 self.app
@@ -628,7 +628,7 @@ impl Engine {
                         inbox_id: oc_schema::id::message(),
                         item: InboxItem { kind: "move".into(), payload, delivery: delivery(body.delivery).unwrap_or(Delivery::Steer) },
                     })
-                    .map_err(|e| defect(format!("{e:#}")))?;
+                    .map_err(|e| defect_chain(e))?;
             }
         }
         self.wake(id, Scope::Input);
@@ -721,7 +721,7 @@ impl Engine {
         self.app
             .bus
             .commit_one(SessionEvent::RevertStaged { session_id: id.into(), revert: revert.clone() })
-            .map_err(|e| defect(format!("{e:#}")))?;
+            .map_err(|e| defect_chain(e))?;
         conv(&revert)
     }
 
@@ -744,7 +744,7 @@ impl Engine {
                     .await
                     .map_err(|e| ApiError::unknown(format!("failed to clear session revert ({id}): {e}")))?;
             }
-            self.app.bus.commit_one(SessionEvent::RevertCleared { session_id: id.into() }).map_err(|e| defect(format!("{e:#}")))?;
+            self.app.bus.commit_one(SessionEvent::RevertCleared { session_id: id.into() }).map_err(|e| defect_chain(e))?;
         }
         self.wake(id, Scope::Input);
         Ok(())
@@ -757,7 +757,7 @@ impl Engine {
         }
         tracing::info!(session = id, "session.revert.commit");
         // The route runs outside any location since 2.2 (unlike a commit staged by the next prompt).
-        unlocated(|| self.app.sessions.commit_revert(&session)).map_err(|e| defect(format!("{e:#}")))
+        unlocated(|| self.app.sessions.commit_revert(&session)).map_err(|e| defect_chain(e))
     }
 
     /// `SessionDiff.turn`.
@@ -876,7 +876,7 @@ impl Engine {
         self.app
             .bus
             .commit_one(SessionEvent::SkillActivated { session_id: id.into(), id: skill.id, name: skill.name, text: skill.content })
-            .map_err(|e| defect(format!("{e:#}")))?;
+            .map_err(|e| defect_chain(e))?;
         if resume != Some(false)
             && let Some(c) = self.app.coordinator.get().cloned() {
                 let key = id.to_string();

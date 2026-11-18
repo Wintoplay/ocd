@@ -9,8 +9,10 @@ use crate::generated::ErrorEncoded;
 /// Error returned by [`Backend`](crate::Backend) methods and by request decoding.
 ///
 /// * [`ApiError::Typed`]: a declared error (`{"_tag": ..., ...}`) served as JSON with its status.
-/// * [`ApiError::Defect`]: an unexpected failure — `500` with an **empty** body (the message is
-///   only logged), like an Effect defect.
+/// * [`ApiError::Defect`]: an unexpected failure — `500 UnknownError{message, ref}` with a generic message; the
+///   cause is only logged with the ref (2.3.1 `defect-response.ts`).
+/// * [`ApiError::Storage`]: a defect caused by storage that can't be used (a full disk, a locked or damaged
+///   database) — `500 UnknownError{message, ref}` naming the reason (2.3.1 `StorageFailure`).
 /// * [`ApiError::Empty`]: a bare status with an empty body (e.g. the PTY pre-upgrade `403`).
 /// * [`ApiError::Text`]: a `text/plain` body (e.g. `415 Unsupported content-type`).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -19,6 +21,8 @@ pub enum ApiError {
     Typed { status: StatusCode, body: Value },
     #[error("defect: {0}")]
     Defect(String),
+    #[error("defect: {cause}")]
+    Storage { reason: &'static str, cause: String },
     #[error("{0}")]
     Empty(StatusCode),
     #[error("{status} {body}")]
@@ -48,9 +52,15 @@ impl ApiError {
         }
     }
 
-    /// A defect: `500` with an empty body; the message is logged.
+    /// A defect: `500 UnknownError` with a generic message and a ref; the message is logged with the ref.
     pub fn defect(message: impl Into<String>) -> Self {
         ApiError::Defect(message.into())
+    }
+
+    /// A storage failure (`StorageFailure.message`): `500 UnknownError` with `reason` as its message and a ref;
+    /// `cause` is logged with the ref.
+    pub fn storage(reason: &'static str, cause: impl Into<String>) -> Self {
+        ApiError::Storage { reason, cause: cause.into() }
     }
 
     /// Default body of unimplemented [`Backend`](crate::Backend) methods.
@@ -70,7 +80,7 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self {
             ApiError::Typed { status, .. } | ApiError::Text { status, .. } => *status,
-            ApiError::Defect(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Defect(_) | ApiError::Storage { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Empty(status) => *status,
         }
     }
@@ -454,7 +464,7 @@ impl ApiError {
 /// `rpc.call`: any defect becomes `RpcInternalError{type:"rpc.internal", message:"RPC call failed"}`.
 pub(crate) fn rpc_defect(error: ApiError) -> ApiError {
     match error {
-        ApiError::Defect(message) => {
+        ApiError::Defect(message) | ApiError::Storage { cause: message, .. } => {
             tracing::error!(defect = %message, "rpc call failed");
             ApiError::rpc_internal("rpc.internal", "RPC call failed")
         }
@@ -481,14 +491,41 @@ pub(crate) fn json_response(status: StatusCode, body: &Value) -> Response {
     res
 }
 
+/// `defect-response.ts`: the message of a defect that is not a storage failure.
+pub const DEFECT_MESSAGE: &str = "Server failed to handle the request. Check server logs for details.";
+
+/// `500 UnknownError{message, ref}` for a defect, logging `cause` with the ref.
+pub(crate) fn defect_response(message: &str, cause: &str) -> Response {
+    let r = format!("err_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    tracing::error!(r#ref = %r, cause = %cause, "request failed");
+    json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "_tag": "UnknownError", "message": message, "ref": r }))
+}
+
+/// A handler that panics answers like any other defect (`500 UnknownError` with a ref) instead of dropping the
+/// connection, as a thrown exception does in upstream's handlers.
+pub(crate) async fn catch_panic(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(next.run(req)).catch_unwind().await {
+        Ok(res) => res,
+        Err(panic) => {
+            let cause = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "handler panicked".into());
+            defect_response(DEFECT_MESSAGE, &cause)
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             ApiError::Typed { status, body } => json_response(status, &body),
-            ApiError::Defect(message) => {
-                tracing::error!(defect = %message, "request failed with a defect");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
+            // Effect answers a defect with an empty 500; 2.3.1's `defectResponseLayer` swaps exactly that for
+            // `UnknownError{message, ref}`: the reason when a person can act on it (storage), else a ref to the log.
+            ApiError::Defect(cause) => defect_response(DEFECT_MESSAGE, &cause),
+            ApiError::Storage { reason, cause } => defect_response(reason, &cause),
             ApiError::Empty(status) => status.into_response(),
             ApiError::Text { status, body } => {
                 let mut res = (status, body).into_response();

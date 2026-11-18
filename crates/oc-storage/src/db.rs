@@ -91,10 +91,16 @@ impl Database {
         conn.execute_batch(begin)?;
         match f(&conn) {
             Ok(v) => {
-                conn.execute_batch("COMMIT")?;
+                if let Err(e) = conn.execute_batch("COMMIT") {
+                    // SQLite keeps the transaction open after some commit failures.
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e.into());
+                }
                 Ok(v)
             }
             Err(e) => {
+                // After errors such as SQLITE_FULL, SQLite rolls the whole transaction back itself, so this rollback
+                // has nothing to undo and fails: the body's error is reported, never the rollback's.
                 let _ = conn.execute_batch("ROLLBACK");
                 Err(e)
             }

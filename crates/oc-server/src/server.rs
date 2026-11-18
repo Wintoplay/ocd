@@ -244,9 +244,11 @@ async fn vary_accept_encoding(req: axum::extract::Request, next: axum::middlewar
     res
 }
 
-/// Build the full HTTP application (CORS → compression → cross-site check → web UI → gate → API router).
+/// Build the full HTTP application (CORS → compression → cross-site check → web UI → gate → panic catch → API
+/// router).
 pub(crate) fn build_router(app: Arc<App>) -> Router {
     crate::router::api_router(app.clone())
+        .layer(axum::middleware::from_fn(crate::error::catch_panic))
         .layer(from_fn_with_state(app.clone(), crate::app::gate))
         .layer(from_fn_with_state(app.clone(), crate::webui::web_ui))
         .layer(from_fn_with_state(app.clone(), crate::request_site::middleware))

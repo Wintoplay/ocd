@@ -106,12 +106,48 @@ async fn unknown_routes_and_methods_are_empty_404() {
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn unimplemented_backend_method_is_500_empty() {
-    let h = harness(Some(PASSWORD));
-    let r = h.get(&format!("/api/model?location[directory]={}", enc(&h.dir()))).await;
+/// `defect-response.ts` (2.3.1): a defect answers `500 UnknownError` with a ref to the server log instead of an empty
+/// body; a storage failure names its reason.
+fn assert_defect(r: &Res, message: &str) {
     assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(r.headers.get("content-type").unwrap(), "application/json");
+    let v = r.json();
+    assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["_tag", "message", "ref"]);
+    assert_eq!((v["_tag"].as_str(), v["message"].as_str()), (Some("UnknownError"), Some(message)));
+    let reference = v["ref"].as_str().unwrap();
+    assert!(reference.len() == 12 && reference.starts_with("err_") && reference[4..].chars().all(|c| c.is_ascii_hexdigit()), "{reference}");
+}
+
+#[tokio::test]
+async fn defects_answer_a_readable_500_with_a_ref() {
+    let h = harness(Some(PASSWORD));
+    // An unimplemented backend method is a defect.
+    let r = h.get(&format!("/api/model?location[directory]={}", enc(&h.dir()))).await;
+    assert_defect(&r, oc_server::error::DEFECT_MESSAGE);
+    assert_eq!(oc_server::error::DEFECT_MESSAGE, "Server failed to handle the request. Check server logs for details.");
+    // A handler that panics answers the same way rather than dropping the connection.
+    let r = h.req("POST", "/api/rpc/a/panic", Some(json!({}))).await;
+    assert_defect(&r, oc_server::error::DEFECT_MESSAGE);
+    // Each defect gets its own ref.
+    let a = h.get(&format!("/api/model?location[directory]={}", enc(&h.dir()))).await.json();
+    let b = h.get(&format!("/api/model?location[directory]={}", enc(&h.dir()))).await.json();
+    assert_ne!(a["ref"], b["ref"]);
+    // Unknown routes keep their empty 404.
+    let r = h.get("/api/does-not-exist").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert!(r.body.is_empty());
+}
+
+#[tokio::test]
+async fn storage_failures_answer_their_reason() {
+    use axum::response::IntoResponse;
+    let res = oc_server::ApiError::storage("Storage is full", "database or disk is full").into_response();
+    let r = Res {
+        status: res.status(),
+        headers: res.headers().clone(),
+        body: axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+    };
+    assert_defect(&r, "Storage is full");
 }
 
 // ---- request decoding ------------------------------------------------------------------------

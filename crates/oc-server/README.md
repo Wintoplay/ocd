@@ -78,8 +78,8 @@ pub trait Backend: Send + Sync + 'static {
 }
 ```
 
-* **Every method has a default body** returning `ApiError::not_implemented` (HTTP 500, empty
-  body), so an engine can implement operations incrementally. `server_info`'s default builds
+* **Every method has a default body** returning `ApiError::not_implemented` (HTTP 500
+  `UnknownError` with a ref), so an engine can implement operations incrementally. `server_info`'s default builds
   `ServerInfo` from `ctx.server` with `capabilities: {persistentPty: false}` and the machine
   `hostname` (`os.hostname() || undefined`; the pre-ready 503 body has neither).
 * **Request** structs `<OpPascal>Request` carry the decoded path params, query params and
@@ -135,7 +135,11 @@ pub trait Backend: Send + Sync + 'static {
   `service_unavailable(msg, service)`, `vcs_init_not_supported`, … or `ApiError::typed(x)` for
   any generated `*ErrorEncoded` value (`ErrorEncoded::TAG/STATUS`). Keys are emitted `_tag`
   first in schema order; absent optional fields are omitted.
-* `ApiError::Defect(msg)` — `500` with an empty body (logged).
+* `ApiError::Defect(msg)` — `500 UnknownError{message:"Server failed to handle the request. Check server logs
+  for details.", ref}` (2.3.1 `defect-response.ts`); `msg` is logged with the ref. A handler that panics answers the
+  same way. `ApiError::storage(reason, cause)` — the same with a storage failure's reason as the message
+  (`Storage is full`, `Storage is in use by another process`, …; oc-backend classifies SQLite errors with
+  `oc_storage::failure`).
 * `ApiError::Empty(status)` / `ApiError::Text{status, body}` — bare statuses / `text/plain`.
 
 Schema decode failures produce `400 {"_tag":"InvalidRequestError","message":…,"kind":"Params"|"Query"|"Payload"}`

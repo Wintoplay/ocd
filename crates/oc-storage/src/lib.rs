@@ -1,6 +1,7 @@
 //! SQLite storage compatible with the upstream opencode database (`core/src/database`).
 
 pub mod db;
+pub mod failure;
 pub mod kv;
 pub mod migrate;
 pub mod projector;

@@ -202,6 +202,7 @@ impl Backend for Mock {
         self.record(ctx, &req);
         match req.method.as_str() {
             "die" => Err(ApiError::defect("kaboom")),
+            "panic" => panic!("handler bug"),
             "bad" => Err(ApiError::rpc("rpc.bad_input", "bad input", Some(json!({"x": 1})))),
             "none" => Ok(RpcOutput { output: None }),
             _ => Ok(RpcOutput { output: req.body.input }),

@@ -16,7 +16,7 @@ use crate::engine::Engine;
 use oc_core::form::FormError;
 use crate::sessions::{active_map, session_error};
 use crate::store;
-use crate::util::{conv, defect, from_json};
+use crate::util::{conv, defect, defect_chain, from_json};
 
 /// Not available until oc-core grows the service (documented in README).
 fn unavailable(service: &str) -> ApiError {
@@ -210,7 +210,7 @@ impl Backend for Engine {
             .await
             .map_err(|e| match self.session(&req.session_id) {
                 Err(nf) => nf,
-                Ok(_) => defect(format!("{e:#}")),
+                Ok(_) => defect_chain(e),
             })
     }
 
@@ -579,7 +579,7 @@ impl Backend for Engine {
         _ctx: &RequestContext,
         req: ExperimentalMediaGetRequest,
     ) -> Result<oc_server::MediaBlob, ApiError> {
-        let blob = self.app.db.with(|c| oc_storage::stored::read_blob(c, &req.hash)).map_err(|e| defect(e.to_string()))?;
+        let blob = self.app.db.with(|c| oc_storage::stored::read_blob(c, &req.hash)).map_err(defect)?;
         match blob {
             Some((mime, data)) => Ok(oc_server::MediaBlob { mime, data: data.into() }),
             None => Err(ApiError::file_not_found_message(
@@ -810,7 +810,7 @@ impl Backend for Engine {
                 Err(ApiError::conflict(format!("Session already exists: {id}"), Some(id)))
             }
             Err(oc_core::transfer::ImportError::Session(e)) => Err(crate::sessions::session_error(e)),
-            Err(oc_core::transfer::ImportError::Other(e)) => Err(defect(format!("{e:#}"))),
+            Err(oc_core::transfer::ImportError::Other(e)) => Err(defect_chain(e)),
         }
     }
 
@@ -1615,7 +1615,7 @@ impl Backend for Engine {
             return Err(ApiError::invalid_request(format!("Invalid time zone: {tz_name}")));
         };
         // `NumberFromString` decodes unparsable input to NaN, which upstream's stats query turns into a
-        // defect (500, empty body).
+        // defect (500 `UnknownError` with a ref).
         if req.from.is_some_and(f64::is_nan) || req.to.is_some_and(f64::is_nan) {
             return Err(ApiError::defect("stats range is NaN"));
         }
