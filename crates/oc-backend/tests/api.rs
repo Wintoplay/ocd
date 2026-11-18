@@ -706,6 +706,25 @@ async fn next_event(events: &mut tokio::sync::broadcast::Receiver<oc_core::bus::
     .unwrap_or_else(|_| panic!("no {kind}"))
 }
 
+/// The kinds of a location boot's `*.updated` burst, up to the plugin supervisor's `plugin.updated`.
+async fn boot_burst(events: &mut tokio::sync::broadcast::Receiver<oc_core::bus::Event>) -> Vec<String> {
+    let mut kinds = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let e = events.recv().await.unwrap();
+            if e.kind.ends_with(".updated") && e.kind != "project.updated" {
+                kinds.push(e.kind.clone());
+            }
+            if e.kind == "plugin.updated" {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no plugin.updated; saw {kinds:?}"));
+    kinds
+}
+
 #[tokio::test]
 async fn vcs_branch_follows_head() {
     if !git_available() {
@@ -718,8 +737,24 @@ async fn vcs_branch_follows_head() {
     git(&h.cwd, &["commit", "-qm", "init"]);
     let mut events = h.app.bus.subscribe();
     assert_eq!(h.get("/api/vcs").await.json()["data"]["branch"]["current"], "main");
-    // The boot refresh announces the branch, then the watcher starts in the background.
-    assert_eq!(next_event(&mut events, "vcs.branch.updated").await.data, json!({"branch": "main"}));
+    // The boot refresh announces the branch where the git plugin first changed the Vcs State (after the models,
+    // before the agents), then the watcher starts in the background.
+    assert_eq!(
+        boot_burst(&mut events).await,
+        [
+            "integration.updated",
+            "provider.updated",
+            "model.updated",
+            "vcs.branch.updated",
+            "agent.updated",
+            "command.updated",
+            "skill.updated",
+            "artifact.updated",
+            "websearch.updated",
+            "reference.updated",
+            "plugin.updated"
+        ]
+    );
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     git(&h.cwd, &["checkout", "-qb", "feature"]);
@@ -788,7 +823,24 @@ async fn vcs_branch_follows_mercurial_branch_file() {
     hg(&h.cwd, &["commit", "-q", "-A", "-m", "init", "-u", "test"]);
     let mut events = h.app.bus.subscribe();
     assert_eq!(h.get("/api/vcs").await.json()["data"]["branch"]["current"], "default");
-    assert_eq!(next_event(&mut events, "vcs.branch.updated").await.data, json!({"branch": "default"}));
+    // The hg plugin first changes the Vcs State right after the skills, before `opencode.provider.opencode`
+    // touches the artifact State.
+    assert_eq!(
+        boot_burst(&mut events).await,
+        [
+            "integration.updated",
+            "provider.updated",
+            "model.updated",
+            "agent.updated",
+            "command.updated",
+            "skill.updated",
+            "vcs.branch.updated",
+            "artifact.updated",
+            "websearch.updated",
+            "reference.updated",
+            "plugin.updated"
+        ]
+    );
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     hg(&h.cwd, &["branch", "-q", "feature"]);

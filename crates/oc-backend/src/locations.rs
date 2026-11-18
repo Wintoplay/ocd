@@ -369,9 +369,9 @@ async fn boot_notifications(app: &Arc<App>, git: &Git, loc: &Arc<Loc>, at: &oc_s
     // The VCS providers register in the same batch; the Vcs State notify refreshes the info and
     // announces the branch when it changed from unknown (core/src/vcs.ts `refresh`). The State
     // notifies where it was first changed: by the git plugin (after models, before agents), or in
-    // a Mercurial location, where the git plugin skips, by the hg plugin (after skills, before
-    // web search).
-    let vcs_slot = if loc.vcs() == Some("hg") { "websearch.updated" } else { "agent.updated" };
+    // a Mercurial location, where the git plugin skips, by the hg plugin (right after the skills,
+    // before the provider plugins, whose `opencode.provider.opencode` touches the artifact State).
+    let hg = loc.vcs() == Some("hg");
     // A configured plugin that registers artifact providers (`ctx.experimental.artifact.transform`) changes the
     // artifact State in the same batch, after the built-ins before the configured plugins and before the `post`
     // ones (the first to touch references is `opencode.config.reference`): its first notify always fires.
@@ -383,15 +383,20 @@ async fn boot_notifications(app: &Arc<App>, git: &Git, loc: &Arc<Loc>, at: &oc_s
     // at once is part of these notifications (a server that does not answer within the budget announces later).
     app.plugins.local.first_round(&loc.key, std::time::Duration::from_millis(250)).await;
     for kind in BOOT_NOTIFICATIONS {
-        if kind == vcs_slot {
+        if kind == "agent.updated" && !hg {
             crate::vcs_watch::refresh(app, loc).await;
         }
         if kind == "reference.updated" && artifacts && !console_artifacts {
             app.bus.publish("artifact.updated", json!({}), Some(at.clone()));
         }
         app.bus.publish(kind, json!({}), Some(at.clone()));
-        if kind == "skill.updated" && console_artifacts {
-            app.bus.publish("artifact.updated", json!({}), Some(at.clone()));
+        if kind == "skill.updated" {
+            if hg {
+                crate::vcs_watch::refresh(app, loc).await;
+            }
+            if console_artifacts {
+                app.bus.publish("artifact.updated", json!({}), Some(at.clone()));
+            }
         }
     }
     // A booted location's first notify always fires: whatever was recorded for an earlier instance is stale.
