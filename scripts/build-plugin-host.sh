@@ -2,9 +2,9 @@
 # Rebuilds the ocd plugin sidecar bundle (crates/oc-plugin/host/dist/host.js).
 #
 # Usage: scripts/build-plugin-host.sh <upstream-opencode-checkout>
-#   (or set OPENCODE_UPSTREAM). The checkout must be upstream's v2.3.0 tag with its
+#   (or set OPENCODE_UPSTREAM). The checkout must be upstream's v2.3.1 tag with its
 #   dependencies installed (`bun install` at its root). BUN selects the bun binary used to
-#   bundle (default: `bun` on PATH; upstream v2.3.0 pins bun 1.4.4).
+#   bundle (default: `bun` on PATH; upstream v2.3.1 pins bun 1.4.4).
 #
 # The bundle is committed; building ocd itself never needs bun or the upstream checkout.
 set -euo pipefail
