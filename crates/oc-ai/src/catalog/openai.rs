@@ -56,6 +56,10 @@ pub const FALLBACK_MODELS: &[&str] = &[
     "gpt-6.1-sol-fast",
     "gpt-6.1-terra",
     "gpt-6.1-terra-fast",
+    "gpt-6.2-astra",
+    "gpt-6.2-astra-fast",
+    "gpt-6.2-sol",
+    "gpt-6.2-sol-fast",
 ];
 
 /// The OAuth methods the context caps apply to.

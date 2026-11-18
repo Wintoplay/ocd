@@ -159,6 +159,34 @@ async fn codex_moves_a_direct_openai_base_url_but_keeps_a_proxy() {
     }
 }
 
+/// provider-chatgpt.test.ts "keeps the token-sharing safeguards when the token cannot be refreshed at load":
+/// loading reads the stored credential, so an expired token without a registered client ID still signs in as token
+/// sharing (HTTP transport, summary compaction, no effort updates) instead of as nothing.
+#[tokio::test]
+async fn token_sharing_keeps_its_safeguards_when_the_token_cannot_be_refreshed() {
+    let env = setup();
+    let config = entries(json!({}));
+    let value = CredentialValue::Oauth {
+        method_id: "chatgpt-token-sharing".into(),
+        refresh: "refresh".into(),
+        access: "stale-token".into(),
+        expires: 1,
+        metadata: None,
+    };
+    let id = create(&env, value).await;
+    let catalog = env.models.catalog_at(&config, Some(KEY)).await.unwrap();
+    assert_eq!(env.plugins.openai.get(KEY), SignIn::TokenSharing { connection: format!("credential:{id}") });
+    let settings = catalog.provider("openai").unwrap().settings.clone().unwrap();
+    assert_eq!(settings["transport"], "http");
+    assert_eq!(settings["compaction"], json!({"type": "summary"}));
+    let model = catalog.model("openai", "gpt-6.1-sol").unwrap();
+    assert_eq!(model.compatibility.as_ref().unwrap().supports_effort_updates, Some(false));
+    assert_eq!(model.settings.as_ref().unwrap()["compaction"], json!({"type": "summary"}));
+    // The stored token was left alone: nothing was refreshed.
+    let stored = env.models.integrations.store().get(&id).await.unwrap().unwrap().value;
+    assert!(matches!(stored, CredentialValue::Oauth { ref access, expires: 1, .. } if access == "stale-token"));
+}
+
 #[tokio::test]
 async fn token_sharing_routes_over_http_with_fallback_models_and_session_headers() {
     let env = setup();

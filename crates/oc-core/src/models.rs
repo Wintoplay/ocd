@@ -615,8 +615,9 @@ impl Models {
     }
 
     /// The OpenAI provider plugins' loaded state for a location: how the `openai` integration's
-    /// active connection signs in (its credential resolved, so an expiring OAuth token is refreshed;
-    /// a failed resolve signs in as nothing). Loaded again only when the active connection changes.
+    /// active connection signs in, read from its stored credential without resolving it (`storedCredential`),
+    /// so loading never refreshes a token and a token that cannot be refreshed still signs in as its method
+    /// (keeping the token-sharing safeguards). Loaded again only when the active connection changes.
     async fn openai_sign_in(&self, state: &LocationIntegrations) -> catalog::openai::SignIn {
         let integrations = &state.integrations;
         let connection = integrations.active(catalog::openai::INTEGRATION_ID).await.ok().flatten();
@@ -627,8 +628,10 @@ impl Models {
             return sign_in.clone();
         }
         let credential = match &connection {
-            Some(connection) => integrations.resolve(connection).await.ok().flatten(),
-            None => None,
+            Some(oc_ai::credentials::integration::ConnectionInfo::Credential { id, .. }) => {
+                integrations.store().get(id).await.ok().flatten().map(|stored| stored.value)
+            }
+            _ => None,
         };
         let sign_in = catalog::openai::SignIn::from_connection(key.as_deref(), credential.as_ref());
         *state.openai.lock() = Some((key, sign_in.clone()));
