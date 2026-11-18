@@ -360,13 +360,20 @@ fn lower_assistant(message: &Message, configured: Option<&str>, require_reasonin
     if !tool_calls.is_empty() {
         result.insert("tool_calls".into(), Value::Array(tool_calls));
     }
-    if let Some(d) = details {
+    // A model that declares a different reasoning field reads reasoning there, so structured details and opaque
+    // values from earlier turns (including another model served under the same provider metadata key) are not
+    // replayed.
+    let replays_structured = configured.is_none_or(|c| c == "reasoning_details");
+    if let Some(d) = details.filter(|_| replays_structured) {
         result.insert("reasoning_details".into(), Value::Array(d));
     }
-    if let Some(opaque) = opaque {
+    if let Some(opaque) = opaque.filter(|_| replays_structured) {
         result.insert("reasoning_opaque".into(), json!(opaque));
     }
-    if let (Some(field), Some(text)) = (field, reasoning_text) {
+    // `reasoning_details` is the structured list itself, so scalar text is never written over it.
+    if let (Some(field), Some(text)) = (field, reasoning_text)
+        && field != "reasoning_details"
+    {
         result.insert(field, json!(text));
     }
     Ok(result)

@@ -165,11 +165,7 @@ async fn openrouter_request_matches_the_recording() {
         "openrouter",
         "anthropic/claude-sonnet-4.6",
         json!({"apiKey": "fixture"}),
-    )
-    .with_compatibility(Compatibility {
-        reasoning_field: Some("reasoning".into()),
-        ..Default::default()
-    });
+    );
     let mut req = LLMRequest::new(model)
         .system("Think through the arithmetic, then reply with only the final integer.")
         .prompt("What is 173 multiplied by 219?")
