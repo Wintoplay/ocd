@@ -196,8 +196,17 @@ async fn the_automation_command_follows_the_flag() {
     assert_eq!(command["description"], "create an automation, or list, pause, resume and delete this project's automations");
     write(&a.cwd, json!({ "experimental": { "automations": false } }));
     a.engine.runner.as_ref().unwrap().reload_location(&a.cwd.display().to_string()).await.unwrap();
-    let (_, commands) = a.req("GET", "/api/command", None).await;
-    assert!(!commands["data"].as_array().unwrap().iter().any(|c| c["name"] == "automation"));
+    // The server drops its location services when it sees the reload's `config.updated` on the bus, in a task of its
+    // own (as for a config file change), so the command list follows shortly after rather than at once.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, commands) = a.req("GET", "/api/command", None).await;
+        if !commands["data"].as_array().unwrap().iter().any(|c| c["name"] == "automation") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "/automation is still listed after the reload: {commands}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(oc_core::automation::COMMAND_TEMPLATE.contains("Request: $ARGUMENTS"));
 }
 
