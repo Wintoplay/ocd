@@ -250,7 +250,19 @@ impl WellKnown {
         Ok(Entry { origin: origin.to_string(), integration_id: origin.to_string(), manifest })
     }
 
-    /// `entries()`: registered sources, loading the ones not cached yet.
+    /// `loadSource`: a registered source that can't be loaded is skipped with a warning (2.3.1), so one unreachable
+    /// source doesn't fail every other one.
+    async fn load_source(&self, origin: &str) -> Option<Entry> {
+        match self.load_entry(origin).await {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!(origin, error = %error, "skipping wellknown source");
+                None
+            }
+        }
+    }
+
+    /// `entries()`: registered sources, loading the ones not cached yet; unloadable ones are skipped.
     pub async fn entries(&self) -> Result<Vec<Entry>, WellKnownError> {
         let origins = self.sources().await?;
         let current = self.cache.lock().clone();
@@ -258,7 +270,7 @@ impl WellKnown {
         for origin in origins {
             match current.get(&origin) {
                 Some(entry) => entries.push(entry.clone()),
-                None => entries.push(self.load_entry(&origin).await?),
+                None => entries.extend(self.load_source(&origin).await),
             }
         }
         *self.cache.lock() = entries.iter().map(|e| (e.origin.clone(), e.clone())).collect();
@@ -278,8 +290,9 @@ impl WellKnown {
         }
         let mut next = IndexMap::new();
         for origin in origins {
-            let entry = self.load_entry(&origin).await?;
-            next.insert(entry.origin.clone(), entry);
+            if let Some(entry) = self.load_source(&origin).await {
+                next.insert(entry.origin.clone(), entry);
+            }
         }
         let changed = *self.cache.lock() != next;
         if !changed {

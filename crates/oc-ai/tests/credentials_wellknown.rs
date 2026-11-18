@@ -159,4 +159,14 @@ async fn add_cache_and_remove_sources() {
     assert_eq!(kv.get(&wellknown::config_key(&server.base)).await.unwrap(), None);
     assert!(service.snapshot().is_empty());
     assert!(service.cached(&server.base).await.is_empty());
+    assert!(service.entries().await.unwrap().is_empty());
+
+    // 2.3.1: an unreachable source is skipped instead of failing every source.
+    kv.set(wellknown::SOURCES_KEY, json!(["http://127.0.0.1:1", server.base])).await.unwrap();
+    let origins: Vec<String> = service.entries().await.unwrap().into_iter().map(|e| e.origin).collect();
+    assert_eq!(origins, vec![server.base.clone()]);
+    let fresh = WellKnown::new(http(), kv.clone(), map_env::<[(&str, &str); 0], &str, &str>([]));
+    fresh.refresh().await.unwrap();
+    let refreshed: Vec<String> = fresh.snapshot().into_iter().map(|e| e.origin).collect();
+    assert_eq!(refreshed, vec![server.base.clone()]);
 }
