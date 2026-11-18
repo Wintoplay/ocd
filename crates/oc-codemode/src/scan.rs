@@ -16,7 +16,8 @@ use crate::interp::errors::{Diagnostic, DiagnosticKind, Location};
 const STACK_SIZE: usize = 1 << 30;
 
 /// Extracts every `tools.<path>` referenced by a Code Mode program, in first-seen order. Fails on syntax errors,
-/// dynamic bracket access (`tools[name]`), or aliasing/passing `tools` rather than calling `tools.<path>(...)`.
+/// dynamic bracket access (`tools[name]`), aliasing/passing `tools` rather than calling `tools.<path>(...)`, or
+/// loading `tools` as a module (`import`/`require`, or one whose name is computed).
 pub fn scan_tools(code: &str) -> Result<Vec<String>, Diagnostic> {
     if code.trim_matches(|c: char| (c as u32) < 0x10000 && crate::number::is_js_whitespace(c as u16)).is_empty() {
         return Err(Diagnostic::new(DiagnosticKind::ParseError, "Code cannot be empty."));
@@ -94,6 +95,12 @@ impl<'a> Scanner<'a> {
                 }
             };
         }
+        // `import`/`require` of "tools" would reach tools the scan never sees.
+        if let Some(loaded) = loaded_module(node)
+            && loaded.is_none_or(|name| crate::interp::modules::module_name(name) == "tools")
+        {
+            return Some(fail(node, LOADED));
+        }
         let pushed = enter_node_scope(node);
         let had = pushed.is_some();
         if let Some(scope) = pushed {
@@ -155,8 +162,26 @@ fn is_reference_position(node: &Value, parent: Option<&Value>) -> bool {
     true
 }
 
-const DYNAMIC: &str = "Schedule checks must reference tools statically (e.g. tools.slack.read_thread), not with dynamic bracket expressions.";
-const ALIAS: &str = "Schedule checks must call tools directly as tools.<name>(...), not alias or pass the tools object.";
+const DYNAMIC: &str = "Automation code must reference tools statically (e.g. tools.slack.read_thread), not with dynamic bracket expressions.";
+const ALIAS: &str = "Automation code must call tools directly as tools.<name>(...), not alias or pass the tools object.";
+const LOADED: &str = "Automation code must call tools directly as tools.<name>(...), not import or require them.";
+
+/// `loadedModule(node)`: the module an `import` or `require(...)` loads, `Some(None)` when it is computed, or `None`
+/// for other nodes.
+fn loaded_module(node: &Value) -> Option<Option<&str>> {
+    let specifier = match kind(node) {
+        "ImportDeclaration" | "ImportExpression" => field(node, "source")?,
+        "CallExpression" => {
+            let callee = field(node, "callee")?;
+            if kind(callee) != "Identifier" || callee.get("name").and_then(Value::as_str) != Some("require") {
+                return None;
+            }
+            node.get("arguments").and_then(Value::as_array).and_then(|a| a.first())?
+        }
+        _ => return None,
+    };
+    Some(if kind(specifier) == "Literal" { specifier.get("value").and_then(Value::as_str) } else { None })
+}
 
 fn read_static_tool_call<'a>(root: &'a Value, ancestors: &[&'a Value]) -> Result<String, (&'a Value, &'static str)> {
     let mut segments: Vec<String> = Vec::new();

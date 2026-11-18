@@ -81,16 +81,7 @@ pub async fn tools(app: &Arc<App>, location: &Arc<Location>) -> Vec<Arc<dyn Tool
 /// Inserts the tools where the plugin registers them: after the tools of the built-in plugins before
 /// it (`opencode.tool.read`), before those after it.
 pub fn insert(registry: &mut Registry, tools: Vec<Arc<dyn Tool>>) {
-    let rank = |id: &str| crate::plugins::BUILTIN_PLUGINS.iter().position(|p| *p == id);
-    let own = rank(PLUGIN_ID).unwrap_or(usize::MAX);
-    let position = registry
-        .list()
-        .iter()
-        .position(|(_, tool)| crate::plugins::tool_plugin(tool.as_ref()).and_then(rank).is_none_or(|r| r > own))
-        .unwrap_or(registry.list().len());
-    for (offset, tool) in tools.into_iter().enumerate() {
-        let _ = registry.insert(position + offset, tool);
-    }
+    crate::plugins::insert_tools(registry, PLUGIN_ID, tools);
 }
 
 fn failure(error: Error) -> ToolError {

@@ -555,7 +555,7 @@ pub async fn execute_with(snapshot: &Snapshot, input: Value, ctx: ToolContext, h
 }
 
 
-/// The host of a schedule check (`CodeModeTool.check`): nested calls get the ids `call_<messageID>_<n>`, run
+/// The host of an automation's code (`CodeModeTool.check`): nested calls get the ids `call_<messageID>_<n>`, run
 /// through the plugin hooks, and see the declared output (or the joined text) like an `execute` call.
 struct CheckHost {
     tools: Arc<Vec<(String, String, Arc<dyn Tool>)>>,

@@ -1,9 +1,10 @@
-//! The Effect 4.0.6 time helpers the schedule service relies on, ported to behave exactly like upstream running on
+//! The Effect 4.0.6 time helpers the automation service relies on, ported to behave exactly like upstream running on
 //! Bun 1.4.4 (whose JavaScriptCore parses `new Date(string)` with V8's date parser and resolves zones with ICU):
 //!
 //! - time zones: `DateTime.zoneMakeNamed`, `zoneMakeLocal`, `zoneToString`, `zoneFromString`;
 //! - `Schema.DurationFromString` + `Duration.toMillis` ([`duration_millis`]);
-//! - schedule.ts `parseAt` (`DateTime.make` / `DateTime.makeZoned(…, {adjustForTimeZone: true})`) ([`parse_at`]);
+//! - automation.ts `parseTime` without its relative form (`DateTime.make` /
+//!   `DateTime.makeZoned(…, {adjustForTimeZone: true})`) ([`parse_at`]);
 //! - `Cron.parse` / `Cron.next` ([`cron_parse`], [`Cron::next`]);
 //! - `DateTime.formatIso` and `DateTime.formatIsoOffset(DateTime.setZone(time, zone))`.
 //!
@@ -1015,7 +1016,7 @@ fn js_date_parse(input: &str) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// DateTime.make / makeZoned and schedule.ts parseAt
+// DateTime.make / makeZoned and automation.ts parseTime
 // ---------------------------------------------------------------------------------------------------------------
 
 /// `hasZone` of `DateTime.makeUnsafe`.
@@ -1050,8 +1051,8 @@ fn ends_with_offset(input: &str) -> bool {
         || (n >= 7 && digit(n - 7) && sign(n - 6) && digit(n - 5) && digit(n - 4) && b[n - 3] == b':' && digit(n - 2) && digit(n - 1))
 }
 
-/// schedule.ts `parseAt`: an instant with an offset (`DateTime.make`), or a wall-clock time in `zone`
-/// (`DateTime.makeZoned(input, {timeZone: zone, adjustForTimeZone: true})`), as epoch milliseconds.
+/// automation.ts `parseTime` (the absolute forms): an instant with an offset (`DateTime.make`), or a wall-clock time
+/// in `zone` (`DateTime.makeZoned(input, {timeZone: zone, adjustForTimeZone: true})`), as epoch milliseconds.
 pub fn parse_at(input: &str, zone: &Zone) -> Option<i64> {
     if ends_with_offset(input) {
         return js_date_parse(input);

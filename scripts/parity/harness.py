@@ -34,8 +34,9 @@ PASSWORD = "parity"
 # ---------------------------------------------------------------------------------------------------------------
 # Derived IDs append a suffix (`msg_<id>_4` for forked messages), so only a following alphanumeric ends a match.
 ID_RE = re.compile(r"\b([a-z]{2,6})_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
-# Ids derived from a schedule id (`msg_<sch_id>_<run>`, `msg_<sch_id>_check_<n>`, `call_msg_<sch_id>_check_<n>_<i>`).
-SCHEDULE_ID_RE = re.compile(r"(?<=msg_)(sch)_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
+# Ids derived from a schedule or automation id (`msg_<sch_id>_<run>`, `msg_<aut_id>_<run>_send`,
+# `call_msg_<aut_id>_<run>_<i>`, a run's child session `ses_<aut_id>_<run>`).
+SCHEDULE_ID_RE = re.compile(r"(?<=msg_|ses_)(sch|aut)_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
 # The fork notice's message ID names the fork (`msg_fork_notice_<ses_id>`, 2.3.0).
 FORK_NOTICE_ID_RE = re.compile(r"(?<=msg_fork_notice_)(ses)_([0-9a-f]{12}[0-9A-Za-z]{14})(?![0-9A-Za-z])")
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")

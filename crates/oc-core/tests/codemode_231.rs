@@ -142,7 +142,7 @@ async fn a_hook_can_rename_a_call_inside_a_program_to_another_of_its_tools() {
     }
 }
 
-// The check of a schedule renames the same way, among the tools it was given.
+// An automation's code renames the same way, among the tools it was given.
 #[tokio::test]
 async fn a_check_renames_among_its_own_tools() {
     let seen = Seen::default();

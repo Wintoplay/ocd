@@ -1,22 +1,27 @@
-//! `automation.*`, `generate.video.*` and `blob.get` in the `server.experimental` group, as opencode 2.3.1 answers
-//! them in a release build.
+//! `automation.*`, `generate.video.*` and `blob.get` in the `server.experimental` group.
 //!
-//! Automations (`server/src/handlers/automation.ts`) replaced scheduled prompts in 2.3.1 and need
-//! `experimental.automations` where they run. ocd does not port them yet, so every location reads as having them
-//! off: the routes check their input, sessions, directories and stored rows like upstream, then answer
-//! `403 ForbiddenError`. Video generation (`handlers/generate.ts`) answers `403` behind `experimental.video_generate`
-//! the same way. Blobs (`handlers/blob.ts`, `core/src/blob-store.ts`) are files under `<data>/blobs/`, served
-//! without a flag; the server deletes video blobs older than a week at startup and hourly.
+//! Automations (`server/src/handlers/automation.ts`) need `experimental.automations` in the config of the
+//! automation's directory; an automation whose folder is gone stays manageable, so it can be inspected and deleted.
+//! This module also gives the automation service its prompt path (the session API) and starts its loop. Video
+//! generation (`handlers/generate.ts`) answers `403` behind `experimental.video_generate`, which ocd does not port.
+//! Blobs (`handlers/blob.ts`, `core/src/blob-store.ts`) are files under `<data>/blobs/`, served without a flag; the
+//! server deletes video blobs older than a week at startup and hourly.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Weak};
+
+use futures::future::BoxFuture;
+use oc_core::automation::{AutomationError, CreateInput, ListInput};
 use oc_server::generated as api;
 use oc_server::{ApiError, BlobFile};
 use rusqlite::OptionalExtension;
+use serde_json::{Map, Value};
 
 use crate::engine::Engine;
-use crate::util::defect;
+use crate::util::{defect, from_json};
 
 /// `Automation.DisabledError`'s message.
-pub const AUTOMATIONS_DISABLED: &str = "Automations are disabled; set experimental.automations in config";
+pub const AUTOMATIONS_DISABLED: &str = oc_core::automation::DISABLED;
 /// What `generate.video.*` answers while `experimental.video_generate` is off.
 pub const VIDEO_DISABLED: &str = "Video generation is disabled; enable experimental.video_generate";
 /// `BlobStore.DIRECTORY`, under the data folder.
@@ -49,6 +54,66 @@ pub async fn cleanup_blobs(directory: &std::path::Path) {
     oc_git::file_retention::cleanup(files, BLOB_RETENTION).await;
 }
 
+
+/// `sessions.prompt` for an automation run: the session API's prompt (plugin activation, the `session.prompt` hook,
+/// admission and the wake), delivered as a steer.
+struct EnginePrompter(Weak<Engine>);
+
+impl oc_core::automation::Prompter for EnginePrompter {
+    fn prompt(&self, session_id: String, id: String, text: String, metadata: Map<String, Value>) -> BoxFuture<'static, Result<(), AutomationError>> {
+        let engine = self.0.upgrade();
+        Box::pin(async move {
+            let other = |e: String| AutomationError::Other(e);
+            let engine = engine.ok_or_else(|| other("The server is shutting down".into()))?;
+            let session = engine.session(&session_id).map_err(|e| other(e.to_string()))?;
+            // A new admission needs the session's location (`instances.provide(session)`); one already admitted or
+            // delivered is reconciled without it.
+            let known = engine
+                .app
+                .db
+                .with(|c| {
+                    c.query_row("SELECT 1 FROM session_inbox WHERE id = ?1 UNION ALL SELECT 1 FROM session_message WHERE id = ?1", [&id], |_| Ok(()))
+                        .optional()
+                })
+                .ok()
+                .flatten()
+                .is_some();
+            if !known && !std::path::Path::new(&session.location.directory).is_dir() {
+                return Err(AutomationError::DirectoryNotFound(session.location.directory));
+            }
+            let body = api::SessionPromptBody {
+                id: Some(id),
+                text,
+                files: None,
+                agents: None,
+                skills: None,
+                metadata: Some(from_json(Value::Object(metadata)).map_err(|e| other(e.to_string()))?),
+                delivery: Some(from_json(Value::String("steer".into())).map_err(|e| other(e.to_string()))?),
+                resume: None,
+            };
+            engine.prompt(&session_id, body).await.map(|_| ()).map_err(|e| other(e.to_string()))
+        })
+    }
+
+    fn wake(&self, session_id: &str) {
+        if let Some(engine) = self.0.upgrade() {
+            engine.wake(session_id, oc_core::inbox::Scope::Input);
+        }
+    }
+}
+
+/// Connects the automation service to this server, and runs its loop in the background (the lease makes one
+/// process per database run them).
+pub fn start(engine: &Arc<Engine>) {
+    connect(engine);
+    tokio::spawn(engine.automations.clone().run());
+}
+
+/// Routes the automation service's prompts through this server's session API (without starting the loop).
+pub fn connect(engine: &Arc<Engine>) {
+    engine.automations.set_prompter(Arc::new(EnginePrompter(Arc::downgrade(engine))));
+}
+
 fn disabled() -> ApiError {
     ApiError::forbidden(AUTOMATIONS_DISABLED)
 }
@@ -57,63 +122,113 @@ fn invalid(message: String) -> ApiError {
     ApiError::invalid_request(message).with_kind("automation")
 }
 
-/// Node's `path.isAbsolute` for the platform.
-fn is_absolute(input: &str) -> bool {
-    std::path::Path::new(input).is_absolute() || (cfg!(windows) && (input.starts_with('/') || input.starts_with('\\')))
+fn info(value: Value) -> Result<api::AutomationInfo, ApiError> {
+    from_json(value)
 }
 
 impl Engine {
-    /// `create`: the owner session (404), the directory (its own, the payload's or the home folder; absolute and
-    /// existing, else 400), then the flag where it runs (403).
+    /// Reading the flag boots the directory's location (`locations.get`), announcing it like any first use.
+    async fn automation_boot(&self, directory: &str) {
+        if oc_core::automation::is_absolute(directory) && std::path::Path::new(directory).is_dir() {
+            let _ = self.locations.get(directory).await;
+        }
+    }
+
+    /// `enabled(directory)`: an automation whose folder is gone stays manageable.
+    async fn automation_enabled(&self, directory: &str) -> bool {
+        self.automation_boot(directory).await;
+        self.automations.enabled(directory).await.unwrap_or(true)
+    }
+
+    /// `allowed(directory)`
+    async fn automation_allowed(&self, directory: &str) -> Result<(), ApiError> {
+        if self.automation_enabled(directory).await { Ok(()) } else { Err(disabled()) }
+    }
+
+    /// `find(id)`: a stored automation, where the flag allows it.
+    async fn automation_info(&self, id: &str) -> Result<Value, ApiError> {
+        let info = self.automations.get(id).map_err(|_| ApiError::automation_not_found(id))?;
+        self.automation_allowed(info["directory"].as_str().unwrap_or_default()).await?;
+        Ok(info)
+    }
+
+    /// `create`: stateless HTTP callers have no guaranteed UI listener to answer an interactive ask, so asks are
+    /// settled unattended.
     pub async fn automation_create(&self, payload: &api::AutomationCreatePayload) -> Result<api::AutomationInfo, ApiError> {
-        let owner = payload.session_id.as_deref().map(|id| self.session(id)).transpose()?;
-        let directory = match (&owner, &payload.directory) {
-            (Some(session), _) => session.location.directory.clone(),
-            (None, Some(directory)) => directory.clone(),
-            (None, None) => self.home().display().to_string(),
+        let input = CreateInput::from_value(&serde_json::to_value(payload).map_err(defect)?);
+        let directory = match (&input.session_id, &input.directory) {
+            (Some(id), _) => self.session(id).ok().map(|s| s.location.directory),
+            (None, Some(directory)) => Some(directory.clone()),
+            (None, None) => Some(self.app.global.home.display().to_string()),
         };
-        if !is_absolute(&directory) {
-            return Err(invalid(format!("Directory must be an absolute path: {directory}")));
+        if let Some(directory) = directory {
+            self.automation_boot(&directory).await;
         }
-        if !std::path::Path::new(&directory).is_dir() {
-            return Err(invalid(format!("Directory does not exist: {directory}")));
+        match oc_core::permission::unattended(Vec::new(), self.automations.create(input, None)).await {
+            Ok(value) => info(value),
+            Err(AutomationError::Invalid(message)) => Err(invalid(message)),
+            Err(AutomationError::Disabled) => Err(disabled()),
+            Err(AutomationError::Blocked(message)) | Err(AutomationError::Corrected(message)) => Err(ApiError::forbidden(message)),
+            Err(AutomationError::SessionNotFound(id)) => Err(ApiError::session_not_found(&id)),
+            Err(other) => Err(defect(other.message())),
         }
-        Err(disabled())
     }
 
     /// `list`: a session filter needs the session (404) and the flag where it lives; a directory filter must be
-    /// absolute (400) and needs the flag there, unless the folder is gone. Rows show only where the flag allows
-    /// them, which is nowhere.
+    /// absolute (400) and needs the flag there. Each automation shows only where the flag allows it, like `get`.
     pub async fn automation_list(&self, req: &api::ExperimentalAutomationListRequest) -> Result<Vec<api::AutomationInfo>, ApiError> {
         if let Some(id) = &req.session_id {
             let session = self.session(id)?;
-            if std::path::Path::new(&session.location.directory).is_dir() {
-                return Err(disabled());
-            }
+            self.automation_allowed(&session.location.directory).await?;
         }
-        if let Some(directory) = &req.directory {
-            if !is_absolute(directory) {
+        let directory = req.directory.as_deref();
+        if let Some(directory) = directory {
+            if !oc_core::automation::is_absolute(directory) {
                 return Err(invalid(format!("Directory must be an absolute path: {directory}")));
             }
-            if std::path::Path::new(directory).is_dir() {
-                return Err(disabled());
+            self.automation_allowed(directory).await?;
+        }
+        // Reading ownership must not record a project for a folder that was only asked about.
+        let project_id = match directory {
+            Some(directory) => Some(oc_core::project::resolve(std::path::Path::new(directory)).await.id),
+            None => None,
+        };
+        let rows = self.automations.list(&ListInput { session_id: req.session_id.clone(), project_id: None });
+        // A deleted folder may no longer resolve to its project, so also match automations that ran there.
+        let matching: Vec<Value> = rows
+            .into_iter()
+            .filter(|row| {
+                directory.is_none()
+                    || row["projectID"].as_str() == project_id.as_deref()
+                    || row["directory"].as_str() == directory
+            })
+            .collect();
+        let mut visible = HashSet::new();
+        for dir in matching.iter().filter_map(|row| row["directory"].as_str()).collect::<HashSet<_>>() {
+            if self.automation_enabled(dir).await {
+                visible.insert(dir.to_string());
             }
         }
-        Ok(Vec::new())
+        matching.into_iter().filter(|row| row["directory"].as_str().is_some_and(|d| visible.contains(d))).map(info).collect()
     }
 
-    /// `find`: an automation that is not stored is a 404; one that is reads as forbidden.
-    pub async fn automation_find(&self, id: &str) -> Result<api::AutomationInfo, ApiError> {
-        let stored = self
-            .app
-            .db
-            .with(|c| c.query_row("SELECT 1 FROM automation WHERE id = ?", [id], |_| Ok(())).optional())
-            .map_err(defect)?
-            .is_some();
-        if !stored {
-            return Err(ApiError::automation_not_found(id));
-        }
-        Err(disabled())
+    pub async fn automation_get(&self, id: &str) -> Result<api::AutomationInfo, ApiError> {
+        info(self.automation_info(id).await?)
+    }
+
+    pub async fn automation_pause(&self, id: &str) -> Result<api::AutomationInfo, ApiError> {
+        self.automation_info(id).await?;
+        info(self.automations.pause(id).map_err(|_| ApiError::automation_not_found(id))?)
+    }
+
+    pub async fn automation_resume(&self, id: &str) -> Result<api::AutomationInfo, ApiError> {
+        self.automation_info(id).await?;
+        info(self.automations.resume(id).map_err(|_| ApiError::automation_not_found(id))?)
+    }
+
+    pub async fn automation_delete(&self, id: &str) -> Result<(), ApiError> {
+        self.automation_info(id).await?;
+        self.automations.remove(id).map_err(|_| ApiError::automation_not_found(id))
     }
 
     /// `BlobStore.read`: the file named by the ID, its size, and the type read from its first 64 bytes.

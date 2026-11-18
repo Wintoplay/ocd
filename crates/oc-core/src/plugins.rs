@@ -106,8 +106,7 @@ pub const BUILTIN_PLUGINS: [&str; 94] = [
     "opencode.tool.question",
     "opencode.tool.read",
     "opencode.tool.artifact",
-    // 2.3.1: replaces `opencode.tool.schedule`; its tools and `/automation` need `experimental.automations`, which
-    // ocd does not port yet.
+    // 2.3.1: replaces `opencode.tool.schedule`; its tools and `/automation` need `experimental.automations`.
     "opencode.tool.automation",
     "opencode.tool.shell",
     "opencode.tool.skill",
@@ -217,6 +216,21 @@ pub fn operations(location: &Location) -> Vec<Operation> {
     }
 }
 
+/// Inserts a built-in plugin's tools where the plugin registers them: after the tools of the built-in plugins
+/// before it, before those after it (`internal.ts` order).
+pub fn insert_tools(registry: &mut oc_tools::Registry, plugin: &str, tools: Vec<std::sync::Arc<dyn Tool>>) {
+    let rank = |id: &str| BUILTIN_PLUGINS.iter().position(|p| *p == id);
+    let own = rank(plugin).unwrap_or(usize::MAX);
+    let position = registry
+        .list()
+        .iter()
+        .position(|(_, tool)| tool_plugin(tool.as_ref()).and_then(rank).is_none_or(|r| r > own))
+        .unwrap_or(registry.list().len());
+    for (offset, tool) in tools.into_iter().enumerate() {
+        let _ = registry.insert(position + offset, tool);
+    }
+}
+
 /// The built-in plugin that registers a native tool (by registered, un-namespaced name).
 pub fn tool_plugin(tool: &dyn Tool) -> Option<&'static str> {
     Some(match tool.name() {
@@ -235,6 +249,9 @@ pub fn tool_plugin(tool: &dyn Tool) -> Option<&'static str> {
         "webfetch" => "opencode.tool.webfetch",
         "websearch" => "opencode.tool.websearch",
         "write" => "opencode.tool.write",
+        name if tool.options().namespace.as_deref() == Some("opencode") && crate::automation::tools::is_automation_tool(name) => {
+            crate::automation::PLUGIN_ID
+        }
         name if crate::artifact::tools::is_artifact_tool(name) => crate::artifact::tools::PLUGIN_ID,
         _ if tool.options().namespace.as_deref() == Some("opencode") => "opencode.tools",
         _ => return None,

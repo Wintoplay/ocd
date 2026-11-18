@@ -339,11 +339,12 @@ exports and `import.meta`, `new.target`, `super`, `with`, `debugger`, `eval`/`Fu
 `TextDecoder`, `Iterator.concat`/`zip`, array methods on array-likes (`Array.prototype.slice.call(arguments)`),
 TypeScript syntax. Unsupported syntax is reported lazily (when reached) as `UnsupportedSyntax`.
 
-### Schedule checks
+### Automation code
 
 - `scan::scan_tools(code)` is `CodeMode.scanTools`: the `tools.<path>` a program calls statically, in first-seen
-  order, or the diagnostic for dynamic bracket access, aliasing/passing `tools`, a syntax error or empty code
-  (cases captured from upstream in `tests/fixtures/scan_tools.jsonl`).
+  order, or the diagnostic for dynamic bracket access, aliasing/passing `tools`, loading `tools` (or a computed
+  module name) with `import`/`require`, a syntax error or empty code (cases captured from upstream 2.3.1 in
+  `tests/fixtures/scan_tools.jsonl`). The diagnostics say "Automation code must …" as in 2.3.1.
 - `CodeMode::with_bindings(vec![(name, json)])` binds read-only JSON globals (upstream `execute(code, bindings)`),
   which top-level declarations may shadow.
 - `parser::validate_regexp(pattern, flags)` exposes acorn's regular expression validation.

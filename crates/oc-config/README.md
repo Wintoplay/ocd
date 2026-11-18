@@ -33,9 +33,9 @@ agent/provider registries. It uses the functions below to do that work.
   `{cert, key, passphrase?}`, after `encoding`; a wrong shape invalidates the provider, extra keys are dropped);
   model `capabilities.freeform` (`FreeformFormat[]`: `text`, `regex`, `lark`, after `tools`).
 - 2.3.1 keys: `compaction.background` (after `auto`; background summaries, on unless `false`); the flags
-  `experimental.automations`, `video_generate` and `full_codemode` (accepted and echoed; automations, video
-  generation and the full Code Mode are not ported yet), and `schedules` moved after the registry as the deprecated
-  old name of `automations`. The retired `background_compaction` and `shell_timeout_background` are dropped from the
+  `experimental.automations`, `video_generate` and `full_codemode` (accepted and echoed; video generation and the
+  full Code Mode are not ported yet), and `schedules` moved after the registry as the deprecated old name of
+  `automations`. The retired `background_compaction` and `shell_timeout_background` are dropped from the
   decoded and echoed config without a diagnostic, like any unknown key.
 - `Compaction.buffer` is a `CompactionBuffer`: `Tokens(u64)` or `Percent(String)` (`Config.Compaction.Percent`,
   `^([1-9]\d?(\.\d+)?)%$`, kept as written); `tokens(window)` is `Math.round(window * pct / 100)`. The legacy

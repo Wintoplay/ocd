@@ -38,6 +38,8 @@ pub enum CommandDef {
     Mcp(oc_mcp::Prompt),
     /// `/goal` (the built-in `opencode.goal` plugin).
     Goal,
+    /// `/automation` (the built-in `opencode.tool.automation` plugin, while `experimental.automations` is on).
+    Automation,
     Config(Command),
     /// A plugin command: its `execute` function handle in the plugin host.
     Plugin(String),
@@ -68,7 +70,8 @@ pub fn commands(loc: &Loc, prompts: &[oc_mcp::Prompt]) -> IndexMap<String, (Opti
     out
 }
 
-/// The native commands registered before plugins (`opencode.command`, MCP prompts, `opencode.goal`).
+/// The native commands registered before plugins (`opencode.command`, MCP prompts, `opencode.goal`,
+/// `opencode.tool.automation`).
 pub fn native(prompts: &[oc_mcp::Prompt]) -> IndexMap<String, (Option<String>, CommandDef)> {
     let mut out = IndexMap::new();
     out.insert("init".to_string(), (Some("guided AGENTS.md setup".to_string()), CommandDef::Init));
@@ -81,8 +84,11 @@ pub fn native(prompts: &[oc_mcp::Prompt]) -> IndexMap<String, (Option<String>, C
     }
     // `opencode.goal` registers its command after the command plugin's.
     out.insert(oc_core::goal::COMMAND.to_string(), (Some(oc_core::goal::DESCRIPTION.to_string()), CommandDef::Goal));
-    // 2.3.1: `opencode.tool.automation` registers `/automation` here only with `experimental.automations`, which
-    // ocd does not port yet.
+    // `opencode.tool.automation` registers `/automation` later in the same pass (dropped where automations are off).
+    out.insert(
+        oc_core::automation::COMMAND.to_string(),
+        (Some(oc_core::automation::COMMAND_DESCRIPTION.to_string()), CommandDef::Automation),
+    );
     out
 }
 

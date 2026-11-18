@@ -1,0 +1,1305 @@
+[
+ {
+  "name": "automation_create",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string",
+     "minLength": 1,
+     "description": "A short label shown in lists."
+    },
+    "trigger": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "at"
+         ]
+        },
+        "at": {
+         "type": "string",
+         "description": "An instant with an offset, a wall-clock time in tz such as \"2026-10-27T09:00\", or \"in 10 minutes\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "at"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "every"
+         ]
+        },
+        "every": {
+         "type": "string",
+         "description": "A duration such as \"90 seconds\", \"5 minutes\" or \"2 hours\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "every"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "cron"
+         ]
+        },
+        "cron": {
+         "type": "string"
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "cron"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "event"
+         ]
+        },
+        "server": {
+         "type": "string",
+         "minLength": 1
+        },
+        "event": {
+         "type": "string",
+         "minLength": 1
+        },
+        "args": {
+         "type": "object"
+        }
+       },
+       "required": [
+        "type",
+        "server",
+        "event"
+       ],
+       "additionalProperties": false
+      }
+     ],
+     "description": "When it runs: { type: \"at\", at: \"in 20 minutes\" | \"2026-10-27T09:00\" }, { type: \"every\", every: \"1 hour\" } or { type: \"cron\", cron: \"0 9 * * 1-5\" }, each with an optional tz. Or { type: \"event\", server, event, args? } for a connected MCP server advertising push delivery (requires mcp_events)."
+    },
+    "action": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "prompt"
+         ]
+        },
+        "prompt": {
+         "type": "string",
+         "minLength": 1,
+         "description": "The message the target Session receives, with enough context to act on it without this conversation."
+        },
+        "to": {
+         "anyOf": [
+          {
+           "type": "object",
+           "properties": {
+            "session": {
+             "type": "string",
+             "pattern": "^ses"
+            },
+            "subagent": {
+             "not": {}
+            }
+           },
+           "required": [
+            "session"
+           ],
+           "additionalProperties": false
+          },
+          {
+           "type": "object",
+           "properties": {
+            "subagent": {
+             "type": "string"
+            },
+            "session": {
+             "not": {}
+            }
+           },
+           "required": [
+            "subagent"
+           ],
+           "additionalProperties": false
+          }
+         ]
+        }
+       },
+       "required": [
+        "type",
+        "prompt"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "code"
+         ]
+        },
+        "code": {
+         "type": "string",
+         "minLength": 1,
+         "description": "Code Mode JavaScript run on each trigger with no model (no fetch; 30s, 20 tool calls, 32 KB output cap). Call tools statically as tools.<ns>.<tool>(...) or tools[\"ns-name\"].tool(...); each is authorized once at creation to run unattended. Receives input = { state, now, runs, args } (also globals): state starts null, now is epoch ms, runs counts earlier runs. Event triggers also receive input.event = { id, timestamp, data }; data follows the event type's payloadSchema. Return nothing, or { state?, done?, send? }. JSON state is kept for the next run; done: true stops. lastOutput shows the delivery target and any logs. Return at most one send per run. { send: { prompt } } steers the creating session; { send: { prompt, to: { subagent } } } starts a permitted child that does not report back. No session IDs. Omit send to stay quiet. A rejected send commits neither state nor done. Example code string: if (runs < 2) return; return { done: true, send: { prompt: \"Three checks elapsed. Review the build.\" } }"
+        },
+        "args": {}
+       },
+       "required": [
+        "type",
+        "code"
+       ],
+       "additionalProperties": false
+      }
+     ],
+     "description": "What it does: { type: \"prompt\", prompt, to? } sends a prompt; { type: \"code\", code, args? } runs Code Mode with no model."
+    },
+    "expires": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "trigger",
+    "action"
+   ],
+   "additionalProperties": false
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_"
+    },
+    "name": {
+     "type": "string"
+    },
+    "trigger": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "at"
+         ]
+        },
+        "at": {
+         "type": "string",
+         "description": "An instant with an offset, a wall-clock time in tz such as \"2026-10-27T09:00\", or \"in 10 minutes\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "at"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "every"
+         ]
+        },
+        "every": {
+         "type": "string",
+         "description": "A duration such as \"90 seconds\", \"5 minutes\" or \"2 hours\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "every"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "cron"
+         ]
+        },
+        "cron": {
+         "type": "string"
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "cron"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "event"
+         ]
+        },
+        "server": {
+         "type": "string",
+         "minLength": 1
+        },
+        "event": {
+         "type": "string",
+         "minLength": 1
+        },
+        "args": {
+         "type": "object"
+        }
+       },
+       "required": [
+        "type",
+        "server",
+        "event"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "tz": {
+     "type": "string"
+    },
+    "action": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "prompt"
+         ]
+        },
+        "prompt": {
+         "type": "string"
+        },
+        "to": {
+         "anyOf": [
+          {
+           "type": "object",
+           "properties": {
+            "session": {
+             "type": "string",
+             "pattern": "^ses"
+            },
+            "subagent": {
+             "not": {}
+            }
+           },
+           "required": [
+            "session"
+           ],
+           "additionalProperties": false
+          },
+          {
+           "type": "object",
+           "properties": {
+            "subagent": {
+             "type": "string"
+            },
+            "session": {
+             "not": {}
+            }
+           },
+           "required": [
+            "subagent"
+           ],
+           "additionalProperties": false
+          }
+         ]
+        }
+       },
+       "required": [
+        "type",
+        "prompt",
+        "to"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "code"
+         ]
+        },
+        "code": {
+         "type": "string"
+        },
+        "args": {}
+       },
+       "required": [
+        "type",
+        "code"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "active",
+      "paused",
+      "done"
+     ]
+    },
+    "nextDueAt": {
+     "type": "string"
+    },
+    "expires": {
+     "type": "string"
+    },
+    "runCount": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "string",
+       "enum": [
+        "Infinity",
+        "-Infinity",
+        "NaN"
+       ]
+      }
+     ]
+    },
+    "lastRunAt": {
+     "type": "string"
+    },
+    "lastOutcome": {
+     "type": "string",
+     "enum": [
+      "fired",
+      "late",
+      "skipped",
+      "disabled",
+      "failed",
+      "expired"
+     ]
+    },
+    "lastOutput": {
+     "type": "string"
+    },
+    "state": {}
+   },
+   "required": [
+    "id",
+    "name",
+    "trigger",
+    "tz",
+    "action",
+    "status",
+    "runCount"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "automation_list",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "additionalProperties": false
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "now": {
+     "type": "string",
+     "description": "The current time, in UTC."
+    },
+    "automations": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "properties": {
+       "id": {
+        "type": "string",
+        "pattern": "^aut_"
+       },
+       "name": {
+        "type": "string"
+       },
+       "trigger": {
+        "anyOf": [
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "at"
+            ]
+           },
+           "at": {
+            "type": "string",
+            "description": "An instant with an offset, a wall-clock time in tz such as \"2026-10-27T09:00\", or \"in 10 minutes\"."
+           },
+           "tz": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "type",
+           "at"
+          ],
+          "additionalProperties": false
+         },
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "every"
+            ]
+           },
+           "every": {
+            "type": "string",
+            "description": "A duration such as \"90 seconds\", \"5 minutes\" or \"2 hours\"."
+           },
+           "tz": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "type",
+           "every"
+          ],
+          "additionalProperties": false
+         },
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "cron"
+            ]
+           },
+           "cron": {
+            "type": "string"
+           },
+           "tz": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "type",
+           "cron"
+          ],
+          "additionalProperties": false
+         },
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "event"
+            ]
+           },
+           "server": {
+            "type": "string",
+            "minLength": 1
+           },
+           "event": {
+            "type": "string",
+            "minLength": 1
+           },
+           "args": {
+            "type": "object"
+           }
+          },
+          "required": [
+           "type",
+           "server",
+           "event"
+          ],
+          "additionalProperties": false
+         }
+        ]
+       },
+       "tz": {
+        "type": "string"
+       },
+       "action": {
+        "anyOf": [
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "prompt"
+            ]
+           },
+           "prompt": {
+            "type": "string"
+           },
+           "to": {
+            "anyOf": [
+             {
+              "type": "object",
+              "properties": {
+               "session": {
+                "type": "string",
+                "pattern": "^ses"
+               },
+               "subagent": {
+                "not": {}
+               }
+              },
+              "required": [
+               "session"
+              ],
+              "additionalProperties": false
+             },
+             {
+              "type": "object",
+              "properties": {
+               "subagent": {
+                "type": "string"
+               },
+               "session": {
+                "not": {}
+               }
+              },
+              "required": [
+               "subagent"
+              ],
+              "additionalProperties": false
+             }
+            ]
+           }
+          },
+          "required": [
+           "type",
+           "prompt",
+           "to"
+          ],
+          "additionalProperties": false
+         },
+         {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "enum": [
+             "code"
+            ]
+           },
+           "code": {
+            "type": "string"
+           },
+           "args": {}
+          },
+          "required": [
+           "type",
+           "code"
+          ],
+          "additionalProperties": false
+         }
+        ]
+       },
+       "status": {
+        "type": "string",
+        "enum": [
+         "active",
+         "paused",
+         "done"
+        ]
+       },
+       "nextDueAt": {
+        "type": "string"
+       },
+       "expires": {
+        "type": "string"
+       },
+       "runCount": {
+        "anyOf": [
+         {
+          "type": "number"
+         },
+         {
+          "type": "string",
+          "enum": [
+           "Infinity",
+           "-Infinity",
+           "NaN"
+          ]
+         }
+        ]
+       },
+       "lastRunAt": {
+        "type": "string"
+       },
+       "lastOutcome": {
+        "type": "string",
+        "enum": [
+         "fired",
+         "late",
+         "skipped",
+         "disabled",
+         "failed",
+         "expired"
+        ]
+       },
+       "lastOutput": {
+        "type": "string"
+       },
+       "state": {}
+      },
+      "required": [
+       "id",
+       "name",
+       "trigger",
+       "tz",
+       "action",
+       "status",
+       "runCount"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   "required": [
+    "now",
+    "automations"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "automation_pause",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_",
+     "description": "Automation id from automation_list."
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "additionalProperties": false
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_"
+    },
+    "name": {
+     "type": "string"
+    },
+    "trigger": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "at"
+         ]
+        },
+        "at": {
+         "type": "string",
+         "description": "An instant with an offset, a wall-clock time in tz such as \"2026-10-27T09:00\", or \"in 10 minutes\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "at"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "every"
+         ]
+        },
+        "every": {
+         "type": "string",
+         "description": "A duration such as \"90 seconds\", \"5 minutes\" or \"2 hours\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "every"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "cron"
+         ]
+        },
+        "cron": {
+         "type": "string"
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "cron"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "event"
+         ]
+        },
+        "server": {
+         "type": "string",
+         "minLength": 1
+        },
+        "event": {
+         "type": "string",
+         "minLength": 1
+        },
+        "args": {
+         "type": "object"
+        }
+       },
+       "required": [
+        "type",
+        "server",
+        "event"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "tz": {
+     "type": "string"
+    },
+    "action": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "prompt"
+         ]
+        },
+        "prompt": {
+         "type": "string"
+        },
+        "to": {
+         "anyOf": [
+          {
+           "type": "object",
+           "properties": {
+            "session": {
+             "type": "string",
+             "pattern": "^ses"
+            },
+            "subagent": {
+             "not": {}
+            }
+           },
+           "required": [
+            "session"
+           ],
+           "additionalProperties": false
+          },
+          {
+           "type": "object",
+           "properties": {
+            "subagent": {
+             "type": "string"
+            },
+            "session": {
+             "not": {}
+            }
+           },
+           "required": [
+            "subagent"
+           ],
+           "additionalProperties": false
+          }
+         ]
+        }
+       },
+       "required": [
+        "type",
+        "prompt",
+        "to"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "code"
+         ]
+        },
+        "code": {
+         "type": "string"
+        },
+        "args": {}
+       },
+       "required": [
+        "type",
+        "code"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "active",
+      "paused",
+      "done"
+     ]
+    },
+    "nextDueAt": {
+     "type": "string"
+    },
+    "expires": {
+     "type": "string"
+    },
+    "runCount": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "string",
+       "enum": [
+        "Infinity",
+        "-Infinity",
+        "NaN"
+       ]
+      }
+     ]
+    },
+    "lastRunAt": {
+     "type": "string"
+    },
+    "lastOutcome": {
+     "type": "string",
+     "enum": [
+      "fired",
+      "late",
+      "skipped",
+      "disabled",
+      "failed",
+      "expired"
+     ]
+    },
+    "lastOutput": {
+     "type": "string"
+    },
+    "state": {}
+   },
+   "required": [
+    "id",
+    "name",
+    "trigger",
+    "tz",
+    "action",
+    "status",
+    "runCount"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "automation_resume",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_",
+     "description": "Automation id from automation_list."
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "additionalProperties": false
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_"
+    },
+    "name": {
+     "type": "string"
+    },
+    "trigger": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "at"
+         ]
+        },
+        "at": {
+         "type": "string",
+         "description": "An instant with an offset, a wall-clock time in tz such as \"2026-10-27T09:00\", or \"in 10 minutes\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "at"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "every"
+         ]
+        },
+        "every": {
+         "type": "string",
+         "description": "A duration such as \"90 seconds\", \"5 minutes\" or \"2 hours\"."
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "every"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "cron"
+         ]
+        },
+        "cron": {
+         "type": "string"
+        },
+        "tz": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "type",
+        "cron"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "event"
+         ]
+        },
+        "server": {
+         "type": "string",
+         "minLength": 1
+        },
+        "event": {
+         "type": "string",
+         "minLength": 1
+        },
+        "args": {
+         "type": "object"
+        }
+       },
+       "required": [
+        "type",
+        "server",
+        "event"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "tz": {
+     "type": "string"
+    },
+    "action": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "prompt"
+         ]
+        },
+        "prompt": {
+         "type": "string"
+        },
+        "to": {
+         "anyOf": [
+          {
+           "type": "object",
+           "properties": {
+            "session": {
+             "type": "string",
+             "pattern": "^ses"
+            },
+            "subagent": {
+             "not": {}
+            }
+           },
+           "required": [
+            "session"
+           ],
+           "additionalProperties": false
+          },
+          {
+           "type": "object",
+           "properties": {
+            "subagent": {
+             "type": "string"
+            },
+            "session": {
+             "not": {}
+            }
+           },
+           "required": [
+            "subagent"
+           ],
+           "additionalProperties": false
+          }
+         ]
+        }
+       },
+       "required": [
+        "type",
+        "prompt",
+        "to"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "code"
+         ]
+        },
+        "code": {
+         "type": "string"
+        },
+        "args": {}
+       },
+       "required": [
+        "type",
+        "code"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "active",
+      "paused",
+      "done"
+     ]
+    },
+    "nextDueAt": {
+     "type": "string"
+    },
+    "expires": {
+     "type": "string"
+    },
+    "runCount": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "string",
+       "enum": [
+        "Infinity",
+        "-Infinity",
+        "NaN"
+       ]
+      }
+     ]
+    },
+    "lastRunAt": {
+     "type": "string"
+    },
+    "lastOutcome": {
+     "type": "string",
+     "enum": [
+      "fired",
+      "late",
+      "skipped",
+      "disabled",
+      "failed",
+      "expired"
+     ]
+    },
+    "lastOutput": {
+     "type": "string"
+    },
+    "state": {}
+   },
+   "required": [
+    "id",
+    "name",
+    "trigger",
+    "tz",
+    "action",
+    "status",
+    "runCount"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "automation_delete",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_",
+     "description": "Automation id from automation_list."
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "additionalProperties": false
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string",
+     "pattern": "^aut_"
+    },
+    "removed": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "id",
+    "removed"
+   ],
+   "additionalProperties": false
+  }
+ }
+]

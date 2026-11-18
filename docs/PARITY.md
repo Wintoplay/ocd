@@ -18,7 +18,7 @@ export PATH=$HOME/.cargo/bin:$PATH
 cargo build -p ocd                          # debug build is enough
 python3 scripts/parity.py --list            # scenarios and groups
 python3 scripts/parity.py -q                # everything (about 25 minutes with a debug build)
-python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude schedule image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230 auth230 subagent tls230 codemode231 api231 providers231
+python3 scripts/parity.py --group session   # one group: loop session permission form readonly errors cli plugin websocket stop todo wire22 goal background tools22 hg browser shell225 api225 session225 claude automation image artifact media api227 wire227 tools227 mcp227 run227 acp local api230 freeform230 auth230 subagent tls230 codemode231 api231 providers231
 python3 scripts/parity.py 'loop_*' cli_run  # by name or glob
 ```
 
@@ -69,8 +69,9 @@ upgrade while this is the first unused turn). The mock records every upgrade (he
 
 ### What the normalizer masks (and nothing else)
 
-- generated IDs (`<prefix>_` + 12 hex + 14 base62, also with derived suffixes like `msg_…_4`, and a schedule ID
-  inside a scheduled prompt's message ID, `msg_sch_…_<n>`, and the fork's ID in its fork notice's message ID,
+- generated IDs (`<prefix>_` + 12 hex + 14 base62, also with derived suffixes like `msg_…_4`, a schedule or
+  automation ID inside a derived message or session ID, `msg_sch_…_<n>`, `msg_aut_…_<n>_send`, `ses_aut_…_<n>`, and the
+  fork's ID in its fork notice's message ID,
   `msg_fork_notice_ses_…`), renumbered by first appearance; UUIDs;
 - epoch-millisecond numbers (any key), ISO timestamps, `duration`/`elapsed`-style keys, `pid` (and the number of a
   backgrounded shell result's `PID:` line);
@@ -136,7 +137,7 @@ iterator's `next`.
 | session225 | reasoning across model switches and an interrupt, `read`/`edit` misses and `bash` as `shell`, MCP stdio framing, quiet location close, Code Mode `fetch` permissions, well-known config, terminal rename and removal with the session, restart recovery only under `serve --service` |
 | claude | the Claude Agent provider against a scripted stand-in for `claude` (both binaries use the same stand-in, which logs its arguments, environment and every message): sign-in states, prices, a missing or crashing executable, text and tool turns, an unoffered tool, errors, cancel, fork and compaction; 2.3.1: a chat's `claude` reporting a model the saved catalog doesn't know (one full check for its context size, none on the next chat) |
 
-| schedule | `experimental.schedules`: the schedule API and its errors, unattended creation over HTTP, a schedule firing a prompt, `/schedule` and the schedule tools through Code Mode and directly, shell and Code Mode checks (valid, invalid, paused), two servers on one data directory firing once |
+| automation | `experimental.automations` through `OPENCODE_FLAGS=automations` (`scripts/parity/automation.py`): the automation API and its errors (triggers, targets, sessionless automations, list filters, the command list), unattended creation over HTTP, the `schedules` config alias, automations whose folder is gone staying manageable with the flag off, a prompt automation firing into its session and into a new subagent child, `/automation` and the automation tools through Code Mode and directly (summaries, input errors), code actions (programs refused at creation, state, sends to the creator and to a child, an invalid result pausing, failures), two servers on one data directory running an automation once (KV `automation:leader`) |
 | image | image generation and decisions over HTTP (with the one-shot retry), the image tool by default, edits, model choice, turned off, failures, restart recovery, the plugin API, background jobs at the idle boundary |
 | artifact | `experimental.artifacts`: the HTTP routes and `view`, location resolution, the tools directly and through Code Mode, a plugin provider and its failures |
 | media | `experimental.media_blob`: images stored from a prompt and from the read tool, reads with and without the media capability, the media route, fork, import, cancel, revert and delete, a fork from a location without the flag |
@@ -159,6 +160,12 @@ iterator's `next`.
 | codemode231 | 2.3.1 Code Mode (`scripts/parity/codemode231.py`): `Buffer` (text in each encoding, number reads and writes, views, Node's error codes, the `buffer` module, a Buffer returned and logged, a logging-only program with no `null` line); arguments of fake MCP calls crossing as host copies then JSON (a `toJSON` not run, functions left out, promises awaited, Dates/Sets/URLs/errors converted; an iterator, a symbol, `tools`, a Uint8Array and a Buffer refused; a rejected promise), `search("text")` and its input error's suggestion, the reworded diagnostics; a plugin (`crates/oc-plugin/tests/fixtures/codemode-rename-plugin`) renaming calls inside a program to another Code Mode tool (structured output returned) or to a direct or unknown tool (not available); a nested `worktree_remove` asking `edit`, whose `permission.asked` names the `execute` call as its source |
 
 ## Results
+
+**2.3.1 catch-up, automations (Q5; debug build, 2026-11-18):** the new `automation` group (10 scenarios, replacing
+`schedule`) against the opencode 2.3.1 binary with `OPENCODE_FLAGS=automations`: **8 identical** (`automation_api`,
+`_api_unattended`, `_config_alias`, `_folder_gone`, `_fires`, `_subagent`, `_checks`, `_lease`). `automation_command`
+and `automation_tools_direct` sent the same automation tool calls, results, input errors and Code Mode catalog, and
+differ only by the `read` and `shell` tool texts of another 2.3.1 batch.
 
 **2.3.1 catch-up, providers and server (Q3; debug build, 2026-11-18):** against the opencode 2.3.1 binary, the new
 `providers231` group (reasoning replay on OpenRouter and gateway routes, the ChatGPT token-sharing model list and

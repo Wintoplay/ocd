@@ -689,7 +689,7 @@ impl Backend for Engine {
         }
     }
 
-    // ---- automations (`automation.*`, experimental.automations; not ported, read as off everywhere) ----
+    // ---- automations (`automation.*`, experimental.automations) ----
 
     async fn experimental_automation_create(
         &self,
@@ -708,7 +708,7 @@ impl Backend for Engine {
     }
 
     async fn experimental_automation_get(&self, _ctx: &RequestContext, req: ExperimentalAutomationGetRequest) -> Result<AutomationInfo, ApiError> {
-        self.automation_find(&req.automation_id).await
+        self.automation_get(&req.automation_id).await
     }
 
     async fn experimental_automation_pause(
@@ -716,7 +716,7 @@ impl Backend for Engine {
         _ctx: &RequestContext,
         req: ExperimentalAutomationPauseRequest,
     ) -> Result<AutomationInfo, ApiError> {
-        self.automation_find(&req.automation_id).await
+        self.automation_pause(&req.automation_id).await
     }
 
     async fn experimental_automation_resume(
@@ -724,11 +724,11 @@ impl Backend for Engine {
         _ctx: &RequestContext,
         req: ExperimentalAutomationResumeRequest,
     ) -> Result<AutomationInfo, ApiError> {
-        self.automation_find(&req.automation_id).await
+        self.automation_resume(&req.automation_id).await
     }
 
     async fn experimental_automation_delete(&self, _ctx: &RequestContext, req: ExperimentalAutomationDeleteRequest) -> Result<(), ApiError> {
-        self.automation_find(&req.automation_id).await.map(|_| ())
+        self.automation_delete(&req.automation_id).await
     }
 
     // ---- video generation (experimental.video_generate; not ported, off) and blobs ----

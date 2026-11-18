@@ -52,6 +52,8 @@ pub struct Engine {
     pub goals: crate::goal::Goals,
     /// Background summaries held per session (`compaction.background`).
     pub(crate) precomputed: Mutex<HashMap<String, crate::compaction::Precomputed>>,
+    /// Automations (`experimental.automations`).
+    pub automations: Arc<crate::automation::Automations>,
     /// Tools tests register in every location after the built-ins (a stand-in for a plugin's tool transform).
     #[doc(hidden)]
     pub extra_tools: Mutex<Vec<Arc<dyn oc_tools::Tool>>>,
@@ -107,6 +109,7 @@ impl Engine {
         models.set_plugins(app.plugins.clone());
         models.set_lock_root(app.global.locks());
         app.plugins.add_websearch(services.websearch.clone());
+        let automations = crate::automation::Automations::new(&app);
         Arc::new_cyclic(|me| Engine {
             app,
             models,
@@ -122,6 +125,10 @@ impl Engine {
             console_skill_downloads: Mutex::new(HashMap::new()),
             goals: Default::default(),
             precomputed: Mutex::new(HashMap::new()),
+            automations: {
+                automations.set_engine(me.clone());
+                automations
+            },
             extra_tools: Mutex::new(Vec::new()),
             me: me.clone(),
         })
@@ -554,8 +561,12 @@ impl Engine {
                 }
             }
         }
-        // 2.3.1 replaced `opencode.tool.schedule` with `opencode.tool.automation`, whose tools need
-        // `experimental.automations`; automations are not ported yet, so it adds nothing.
+        // `opencode.tool.automation` adds its tools only while `experimental.automations` is on.
+        if crate::automation::settings_of(&location.entries).enabled
+            && self.app.plugins.enabled(key).is_none_or(|enabled| enabled.iter().any(|e| e == crate::automation::PLUGIN_ID))
+        {
+            crate::plugins::insert_tools(&mut registry, crate::automation::PLUGIN_ID, crate::automation::tools::tools(&self.automations));
+        }
         for tool in self.extra_tools.lock().iter() {
             let _ = registry.add(tool.clone());
         }
@@ -1286,9 +1297,12 @@ fn settle_stale(bus: &Bus, session: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a schedule check needs from its session's location (`schedule/check.ts` runs under `instances.provide`).
+/// What an automation's work needs from a location (`automation.ts` runs it under `instances.provide` or
+/// `inDirectory`).
 pub struct CheckEnv {
     pub location: Arc<Location>,
+    /// The location's agents (`Agent.Service`).
+    pub agents: crate::agent::Agents,
     /// The session's agent id (as selected; may name a missing agent).
     pub agent_id: String,
     pub agent: Option<Agent>,
@@ -1310,10 +1324,10 @@ impl CheckEnv {
 }
 
 impl Engine {
-    /// The location services a schedule check runs with: plugins activated, the session's agent and the
-    /// registered tools.
-    pub async fn check_env(&self, session: &SessionInfo) -> anyhow::Result<CheckEnv> {
-        let location = self.location(&session.location.directory).await?;
+    /// The location services an automation's work for `session` runs with in `directory`: plugins activated, the
+    /// session's agent and the registered tools.
+    pub async fn check_env(&self, session: &SessionInfo, directory: &str) -> anyhow::Result<CheckEnv> {
+        let location = self.location(directory).await?;
         self.app.plugins.await_activation(&location.key).await;
         let agents = self.app.plugins.agents(&location, &self.app.global.home).await;
         *self.app.agents.write() = agents.clone();
@@ -1338,6 +1352,7 @@ impl Engine {
             shell: config.shell.clone(),
             config: Arc::new(config),
             location,
+            agents,
             agent_id,
             agent,
             registry,
@@ -1404,7 +1419,7 @@ impl Engine {
             message_id: message_id.to_string(),
             call_id: String::new(),
             agent: agent.to_string(),
-            directory: PathBuf::from(&session.location.directory),
+            directory: env.location.directory.clone(),
             worktree: env.location.project.canonical.clone(),
             project_id: session.project_id.clone(),
             workspace_id: session.location.workspace_id.clone(),

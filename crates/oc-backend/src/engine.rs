@@ -36,6 +36,8 @@ pub struct Engine {
     pub pty_owner: Mutex<HashMap<String, String>>,
     /// Single-file watches over the API (`FileWatch`), global across locations.
     pub file_watch: Arc<crate::file_watch::FileWatch>,
+    /// The automation service: the runner's, else one that reads every location as having automations off.
+    pub automations: Arc<oc_core::automation::Automations>,
 }
 
 /// `KvStore` over the `kv` table.
@@ -71,6 +73,7 @@ impl Engine {
         models.set_plugins(app.plugins.clone());
         models.set_lock_root(app.global.locks());
         let engine = Arc::new(Engine {
+            automations: oc_core::automation::Automations::new(&app),
             locations: Locations::new(app.clone(), None),
             app,
             runner: None,
@@ -102,6 +105,7 @@ impl Engine {
         let app = runner.app.clone();
         let app_ref = app.clone();
         let engine = Arc::new(Engine {
+            automations: runner.automations.clone(),
             locations: Locations::new(app.clone(), Some(runner.clone())),
             app,
             runner: Some(runner),
@@ -286,7 +290,13 @@ impl Engine {
             Some(m) => m.prompts(),
             None => vec![],
         };
-        crate::catalog::native(&prompts)
+        let mut native = crate::catalog::native(&prompts);
+        if !(oc_core::automation::settings_of(&loc.location.entries).enabled
+            && self.app.plugins.builtin_enabled(&loc.key, oc_core::automation::PLUGIN_ID))
+        {
+            native.retain(|_, (_, def)| !matches!(def, crate::catalog::CommandDef::Automation));
+        }
+        native
     }
 
     /// Agents of a location after plugin transforms and configuration.

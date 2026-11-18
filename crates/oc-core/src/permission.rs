@@ -27,7 +27,7 @@ pub fn merge(sets: &[&[PermissionRule]]) -> Ruleset {
 
 tokio::task_local! {
     /// `Permission.Unattended`: rules that settle a request which would otherwise ask, for work nobody is present to
-    /// answer (a schedule's check). A request they do not allow is denied; configured denies still win.
+    /// answer (an automation's code). A request they do not allow is denied; configured denies still win.
     static UNATTENDED: Ruleset;
 }
 

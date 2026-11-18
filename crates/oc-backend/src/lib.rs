@@ -70,6 +70,8 @@ pub async fn start(
     start_models_refresh(&engine);
     start_project_sweep(&engine);
     automations::start_blob_cleanup(&engine);
+    // Automations run from any server process (`service`, `serve` or `--standalone`); the table holds their state.
+    automations::start(&engine);
     Ok((server, engine))
 }
 

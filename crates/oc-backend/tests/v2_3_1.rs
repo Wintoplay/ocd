@@ -1,5 +1,6 @@
 //! opencode 2.3.1 API behaviour in a release build: the schedule routes are gone, the automation routes check their
-//! input, sessions, directories and stored rows and then answer that automations are disabled, the video routes
+//! input, sessions, directories and stored rows and then answer that automations are disabled (where the folder still
+//! exists; `tests/automations.rs` covers them on), the video routes
 //! answer that video generation is disabled, and blobs under `<data>/blobs/` are served with an immutable ETag,
 //! `If-None-Match`, a single `bytes=` range and a strong `If-Range`. Expected bodies and headers were checked against
 //! the 2.3.1 binary.

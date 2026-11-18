@@ -102,23 +102,28 @@ fn a_missing_module_or_export_fails_at_the_import() {
     assert!(message(r#"require("fs")"#).starts_with(r#"Error: Cannot import "fs""#));
 }
 
-/// `scanTools` parses like `execute`: imports parse, a top-level export is the same `ParseError`, and a `tools`
-/// reference in an import binding is not a static call.
+/// `scanTools` parses like `execute`: imports parse, a top-level export is the same `ParseError`, a `tools`
+/// reference in an import binding is not a static call, and (2.3.1) loading `tools` as a module, or a module whose
+/// name is computed, is refused.
 #[test]
 fn scan_tools_parses_modules() {
     use oc_codemode::scan::scan_tools;
-    // Results of upstream 2.2.7's `scanTools` for the same programs.
-    let alias = "Schedule checks must call tools directly as tools.<name>(...), not alias or pass the tools object.";
-    let cases: [(&str, Result<Vec<&str>, String>); 6] = [
+    // Results of upstream 2.3.1's `scanTools` for the same programs.
+    let alias = "Automation code must call tools directly as tools.<name>(...), not alias or pass the tools object.";
+    let loaded = "Automation code must call tools directly as tools.<name>(...), not import or require them.";
+    let cases: [(&str, Result<Vec<&str>, String>); 9] = [
         ("import { URL } from \"url\"\nawait tools.a.b({})", Ok(vec!["a.b"])),
         (
             "export const x = tools.a.b()",
             Err("SyntaxError: Exports aren't available. Return the result instead. (line 1, col 1)".into()),
         ),
-        ("import tools from \"tools\"", Err(format!("{alias} (line 1, col 8)"))),
+        ("import tools from \"tools\"", Err(format!("{loaded} (line 1, col 1)"))),
         ("{ export const x = tools.a.b() }", Ok(vec!["a.b"])),
-        ("const m = await import(tools.a.b())", Ok(vec!["a.b"])),
+        ("const m = await import(tools.a.b())", Err(format!("{loaded} (line 1, col 17)"))),
         ("import * as tools from \"url\"\ntools.x()", Err(format!("{alias} (line 1, col 13)"))),
+        ("const t = require(\"node:tools\"); await t.slack.post({})", Err(format!("{loaded} (line 1, col 11)"))),
+        ("const fs = require(\"fs\"); return await tools.slack.read_thread({})", Ok(vec!["slack.read_thread"])),
+        ("require()", Ok(vec![])),
     ];
     for (code, expected) in cases {
         let actual = scan_tools(code).map_err(|d| d.message);

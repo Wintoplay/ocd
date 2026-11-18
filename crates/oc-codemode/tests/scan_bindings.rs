@@ -28,7 +28,7 @@ async fn binds_outer_globals_that_programs_can_read_or_shadow() {
     }
 }
 
-/// Every case of `fixtures/scan_tools.jsonl` (captured from upstream 2.2.5's `CodeMode.scanTools`) gives the same
+/// Every case of `fixtures/scan_tools.jsonl` (captured from upstream 2.3.1's `CodeMode.scanTools`) gives the same
 /// paths or diagnostic. Classes are outside the interpreter's subset, and their bodies are not scanned.
 #[test]
 fn scan_tools_matches_upstream() {

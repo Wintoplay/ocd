@@ -116,7 +116,8 @@ impl SubagentReport {
         let period = self.periods.lock().remove(session);
         let job = app.jobs.prepare_subagent_report(session, period.and_then(|p| p.bound_generation));
         let parent = app.db.session_get(session).ok().flatten().and_then(|s| s.parent_id);
-        let reports = parent.is_some() || job != SubagentReportState::None;
+        // An automation run's child finishes quietly; only a follow-up the parent sent through a Job reports back.
+        let reports = (parent.is_some() && !crate::automation::is_run_session(session)) || job != SubagentReportState::None;
         let running = match (&parent, app.coordinator.get()) {
             (Some(_), Some(c)) => crate::job::outstanding(app, session, &c.draining()),
             (Some(_), None) => crate::job::outstanding(app, session, &[]),
