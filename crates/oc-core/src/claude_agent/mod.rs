@@ -290,6 +290,8 @@ pub struct Location {
     state: watch::Sender<State>,
     catalog: RwLock<Catalog>,
     refreshing: tokio::sync::Mutex<()>,
+    /// Models a chat reported without a context size that a full check already ran for (`checked`).
+    checked: parking_lot::Mutex<std::collections::HashSet<String>>,
     owner: Weak<ClaudeAgent>,
 }
 
@@ -297,24 +299,30 @@ impl sessions::Reporter for Location {
     fn missing(&self) {
         self.report(State::Missing);
     }
+    /// A chat's own process reported (`fromChat`).
     fn ready(&self, probe: ProbeResult) {
-        self.report(State::Ready(probe));
+        self.report_from(State::Ready(probe), true);
     }
 }
 
 impl Location {
     /// `status.report(next)` (and the state's subscribers: the connection status and the catalog).
     pub fn report(&self, next: State) {
+        self.report_from(next, false);
+    }
+
+    /// [`Location::report`]; `from_chat` when a chat's own process found `next` as it started.
+    fn report_from(&self, next: State, from_chat: bool) {
         self.state.send_replace(next.clone());
         let Some(owner) = self.owner.upgrade() else { return };
         let me = owner.location(&self.key);
         tokio::spawn(async move {
             let Some(me) = me else { return };
-            me.changed(&owner, next).await;
+            me.changed(&owner, next, from_chat).await;
         });
     }
 
-    async fn changed(&self, owner: &Arc<ClaudeAgent>, state: State) {
+    async fn changed(self: &Arc<Self>, owner: &Arc<ClaudeAgent>, state: State, from_chat: bool) {
         if state == State::Checking {
             return;
         }
@@ -337,6 +345,17 @@ impl Location {
             let current = self.catalog.read();
             Catalog { price_source: price_source(&probe.account, base_url.as_deref()), models: from_claude(&probe.models, &current.models) }
         };
+        // A freshly started process reports its models without context sizes, which only the full check finds: run it
+        // once per such model, so the model doesn't fall back to the default window.
+        let unknown: Vec<String> = {
+            let checked = self.checked.lock();
+            next.models.iter().filter(|m| m.context_window.is_none() && !checked.contains(&m.id)).map(|m| m.id.clone()).collect()
+        };
+        if from_chat && !unknown.is_empty() {
+            self.checked.lock().extend(unknown);
+            let (me, owner) = (self.clone(), owner.clone());
+            tokio::spawn(async move { me.refresh(&owner).await });
+        }
         if serde_json::to_string(&next).ok() == serde_json::to_string(&*self.catalog.read()).ok() {
             return;
         }
@@ -437,6 +456,7 @@ impl ClaudeAgent {
                 state: watch::channel(State::Checking).0,
                 catalog: RwLock::new(saved),
                 refreshing: tokio::sync::Mutex::new(()),
+                checked: Default::default(),
                 owner: self.me.clone(),
             });
             locations.insert(key.to_string(), location.clone());
