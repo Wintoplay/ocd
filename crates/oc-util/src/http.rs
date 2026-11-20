@@ -161,6 +161,13 @@ impl Trust {
         self.verify
     }
 
+    /// The same trust, verifying certificates whatever the environment said. The release lookup and the upgrade
+    /// download use it, so a `NODE_TLS_REJECT_UNAUTHORIZED=0` in the environment cannot turn them into a man in
+    /// the middle.
+    pub fn verified(&self) -> Trust {
+        Trust { verify: true, ..self.clone() }
+    }
+
     /// A rustls client configuration with this trust and the given ALPN protocols.
     pub fn client_config(&self, alpn: &[&[u8]]) -> ClientConfig {
         client_config(Source::Owned(Arc::new(self.clone())), alpn)
@@ -467,6 +474,17 @@ pub fn client_builder() -> reqwest::ClientBuilder {
 /// `client_builder().build()`.
 pub fn client() -> reqwest::Client {
     client_builder().build().expect("reqwest client")
+}
+
+/// [`client_builder`] with certificate verification always on, whatever `NODE_TLS_REJECT_UNAUTHORIZED` says.
+/// The roots still come from the environment, so a named proxy CA (`NODE_EXTRA_CA_CERTS`) keeps working.
+pub fn client_builder_strict() -> reqwest::ClientBuilder {
+    static STRICT_TLS: LazyLock<ClientConfig> = LazyLock::new(|| {
+        client_config(Source::Owned(Arc::new(Trust::global().verified())), &[b"h2", b"http/1.1"])
+    });
+    reqwest::Client::builder()
+        .use_preconfigured_tls(STRICT_TLS.clone())
+        .proxy(reqwest::Proxy::custom(|url| crate::proxy::fetch_proxy(&crate::proxy::process_env, url)))
 }
 
 /// Reads the certificates on a background thread (server start), so that the first handshake does not wait the few
