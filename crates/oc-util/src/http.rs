@@ -121,6 +121,14 @@ impl Trust {
         }
 
         let verify = env("NODE_TLS_REJECT_UNAUTHORIZED").is_none_or(|v| v != "0");
+        if !verify {
+            // Loud, once, at startup: provider requests carry API keys, and nothing authenticates them with
+            // verification off.
+            warnings.push(
+                "warn: NODE_TLS_REJECT_UNAUTHORIZED=0: TLS certificate verification is off; provider requests carry API keys"
+                    .to_string(),
+            );
+        }
         let self_signed = certs.extra.iter().filter(|c| is_self_issued(c)).map(|c| c.as_ref().to_vec()).collect();
         let mut roots = RootCertStore::empty();
         roots.extend(certs.anchors);
