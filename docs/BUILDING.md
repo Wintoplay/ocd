@@ -47,15 +47,15 @@ The build works out its version from the git tags, the same way the release work
 
 | Checkout | `ocd --version` |
 |---|---|
-| Exactly at tag `v0.2.2` | `ocd v0.2.2+<commit> (opencode 2.3.1)`, the same as that release's binary |
-| Three commits after `v0.2.2` | `ocd v0.2.2+3.<commit> (opencode 2.3.1)` |
+| Exactly at tag `v0.4.1` | `ocd v0.4.1+<commit> (opencode 2.3.1)`, the same as that release's binary |
+| Three commits after `v0.4.1` | `ocd v0.4.1+3.<commit> (opencode 2.3.1)` |
 | No `v*` tag | `ocd v20261027.124153+<commit> (opencode 2.3.1)`: the build time in UTC |
 | Not a git checkout | The build time and a random hash |
 
 - **Fetch tags first:** run `git fetch --tags` so the latest tag is there.
 - **Set it yourself:** build with `OCD_BUILD_VERSION`, for example
   `OCD_BUILD_VERSION=1.0.0+$(git rev-parse --short HEAD) cargo build --release -p ocd`.
-- **Tag format:** release tags must be `vMAJOR.MINOR.PATCH`, such as `v0.2.2`. `ocd upgrade` and the update check
+- **Tag format:** release tags must be `vMAJOR.MINOR.PATCH`, such as `v0.4.1`. `ocd upgrade` and the update check
   ignore anything else.
 
 ## Include the web UI
